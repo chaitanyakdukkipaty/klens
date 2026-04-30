@@ -1,0 +1,18 @@
+# Binaries
+klens
+*.exe
+*.test
+
+# Build output
+/dist/
+
+# Docs / local plans
+docs/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
