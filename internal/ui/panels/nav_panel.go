@@ -101,6 +101,10 @@ func (n NavPanel) Update(msg tea.Msg) (NavPanel, tea.Cmd) {
 		case "/":
 			n.filterOn = true
 			n.filterInput = n.filter
+		case "esc":
+			n.filter = ""
+			n.filterInput = ""
+			n.applyNavFilter()
 		}
 	}
 	return n, nil

@@ -122,17 +122,18 @@ func (t ResourceTable) SelectionCount() int {
 }
 
 func (t ResourceTable) FilterActive() bool { return t.filterOn }
+func (t ResourceTable) HasFilter() bool    { return t.filterOn || t.filter != "" }
 
 func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if t.filterOn {
 			switch msg.String() {
-			case "enter", "esc":
+			case "enter":
 				t.filterOn = false
 				t.filter = t.filterInput
 				t.applyFilter()
-			case "ctrl+c":
+			case "esc":
 				t.filterOn = false
 				t.filterInput = ""
 				t.filter = ""
@@ -168,6 +169,10 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 		case "/":
 			t.filterOn = true
 			t.filterInput = t.filter
+		case "esc":
+			t.filter = ""
+			t.filterInput = ""
+			t.applyFilter()
 		case " ":
 			if row := t.SelectedRow(); row != nil {
 				t.selected[row.Name] = !t.selected[row.Name]
@@ -226,7 +231,7 @@ func (t ResourceTable) View() string {
 	if t.filterOn {
 		filterBar = "\n" + styles.Primary.Render("filter: ") + t.filterInput + styles.Muted.Render("█")
 	} else if t.filter != "" {
-		filterBar = "\n" + styles.Primary.Render("filter: ") + styles.Warning.Render(t.filter) + styles.Muted.Render("  (/ to change, ctrl+c to clear)")
+		filterBar = "\n" + styles.Primary.Render("filter: ") + styles.Warning.Render(t.filter) + styles.Muted.Render("  (/ to change, esc to clear)")
 	}
 
 	// Header

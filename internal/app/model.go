@@ -389,8 +389,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
 			return m, cmd
 		}
-		// If table filter is open, let the table handle ESC to clear it before any nav transition.
-		if m.mode == ModeTable && m.table.FilterActive() {
+		// If table has any filter (active or committed), let the table handle ESC to clear it.
+		if m.mode == ModeTable && m.table.HasFilter() {
 			var cmd tea.Cmd
 			m.table, cmd = m.table.Update(msg)
 			return m, cmd
