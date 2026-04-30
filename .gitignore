@@ -14,5 +14,6 @@ docs/
 
 # Editor
 .idea/
+.claude/
 .vscode/
 *.swp

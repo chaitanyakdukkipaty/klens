@@ -9,7 +9,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	aimod "github.com/chaitanyak/klens/internal/ai"
 	"github.com/chaitanyak/klens/internal/cluster"
 	appcfg "github.com/chaitanyak/klens/internal/config"
 	k8sops "github.com/chaitanyak/klens/internal/k8s"
@@ -34,7 +33,6 @@ const (
 	ModeLogs
 	ModeTopology
 	ModeMetrics
-	ModeCopilot
 )
 
 // FocusTarget tracks which panel has keyboard focus.
@@ -56,7 +54,6 @@ type Model struct {
 	logView         panels.LogViewer
 	topology        panels.TopologyPanel
 	metrics         panels.MetricsPanel
-	copilot         panels.CopilotPanel
 	confirm         widgets.ConfirmDialog
 	scaleDialog     widgets.ScaleDialog
 	namespacePicker widgets.NamespacePicker
@@ -73,9 +70,6 @@ type Model struct {
 	watcher           *k8sops.WatcherFactory
 	logStreamer        *k8sops.LogStreamer
 	metricsData       k8sops.MetricsUpdatedMsg
-	aiClient          *aimod.Client
-	aiInitErr         error
-	copilotSteps      []aimod.CopilotStep
 	msgCh             chan tea.Msg
 	namespace         string
 	clusterNamespaces []string // from cluster, may be empty if no permission
@@ -117,8 +111,6 @@ type switchNamespaceMsg struct{ namespace string }
 // the effective readonly state may also be set by the persisted config.
 func New(readOnly bool) Model {
 	ch := make(chan tea.Msg, 128)
-	ai, aiErr := aimod.New("")
-
 	return Model{
 		layout:          layout.New(80, 24),
 		header:          panels.NewHeader(80).SetReadOnly(readOnly),
@@ -129,7 +121,6 @@ func New(readOnly bool) Model {
 		logView:         panels.NewLogViewer(60, 22),
 		topology:        panels.NewTopologyPanel(60, 22),
 		metrics:         panels.NewMetricsPanel(60, 22),
-		copilot:         panels.NewCopilotPanel(60, 22),
 		confirm:         widgets.NewConfirmDialog(),
 		scaleDialog:     widgets.NewScaleDialog(),
 		namespacePicker: widgets.NewNamespacePicker(),
@@ -140,8 +131,6 @@ func New(readOnly bool) Model {
 		msgCh:           ch,
 		namespace:       "default",
 		loading:         true,
-		aiClient:        ai,
-		aiInitErr:       aiErr,
 		readOnlyFlag:    readOnly,
 		readOnly:        readOnly,
 	}
@@ -367,40 +356,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, k8sops.ScaleCmd(cs, msg.Kind, msg.Name, msg.Namespace, msg.Replicas)
 
-	case panels.CopilotRequestMsg:
-		if m.aiClient != nil {
-			cs, _ := m.clusterMgr.ActiveClientset()
-			var pods []*corev1.Pod
-			if cs != nil && m.watcher != nil {
-				pods = m.watcher.ListPods(m.namespace)
-			}
-			clusterCtx := aimod.BuildContext(m.clusterMgr.ActiveContext(), m.namespace, pods)
-			return m, m.aiClient.PlanCmd(msg.Intent, clusterCtx)
-		}
-		errMsg := m.aiInitErr
-		if errMsg == nil {
-			errMsg = fmt.Errorf("AI copilot not available")
-		}
-		var cmd tea.Cmd
-		m.copilot, cmd = m.copilot.Update(aimod.CopilotResponseMsg{Err: errMsg})
-		return m, cmd
-
-	case aimod.CopilotResponseMsg:
-		var cmd tea.Cmd
-		m.copilot, cmd = m.copilot.Update(msg)
-		return m, cmd
-
-	case panels.CopilotExecuteMsg:
-		m.copilotSteps = msg.Steps
-		return m, func() tea.Msg { return copilotRunStepMsg{idx: 0} }
-
-	case copilotRunStepMsg:
-		return m.runCopilotStep(msg.idx)
-
-	case panels.CopilotClosedMsg:
-		m.mode = ModeTable
-		return m, nil
-
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -452,12 +407,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.focus = FocusNav
 			m.nav = m.nav.SetFocused(true)
 			m.table = m.table.SetFocused(false).ClearSelection()
-			return m, nil
-		}
-	case "ctrl+a":
-		if m.mode != ModeCopilot {
-			m.mode = ModeCopilot
-			m.focus = FocusContent
 			return m, nil
 		}
 	case "ctrl+n":
@@ -531,12 +480,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.mode == ModeMetrics {
 		var cmd tea.Cmd
 		m.metrics, cmd = m.metrics.Update(msg)
-		return m, cmd
-	}
-
-	if m.mode == ModeCopilot {
-		var cmd tea.Cmd
-		m.copilot, cmd = m.copilot.Update(msg)
 		return m, cmd
 	}
 
@@ -679,6 +622,15 @@ func (m Model) handleTableKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 			key := row.Namespace + "/" + row.Name
 			rm := m.metricsData.Pods[key]
 			m.metrics = m.metrics.SetResource(row.Name, row.Namespace, rm)
+			if m.watcher != nil {
+				for _, pod := range m.watcher.ListPods(row.Namespace) {
+					if pod.Name == row.Name {
+						cpuReqM, cpuLimM, memReqB, memLimB := panels.PodResourceTotals(pod)
+						m.metrics = m.metrics.SetLimits(cpuReqM, cpuLimM, memReqB, memLimB)
+						break
+					}
+				}
+			}
 			m.mode = ModeMetrics
 			m.focus = FocusContent
 		}
@@ -805,12 +757,11 @@ type deleteTarget struct {
 
 // pendingOpData stores what operation the confirm dialog is for.
 type pendingOpData struct {
-	op         string
-	kind       string
-	name       string         // single-resource ops (scale, suspend, etc.)
-	namespace  string
-	targets    []deleteTarget // multi-delete
-	copilotIdx int            // >=0 when this op is part of a copilot step sequence
+	op        string
+	kind      string
+	name      string         // single-resource ops (scale, suspend, etc.)
+	namespace string
+	targets   []deleteTarget // multi-delete
 }
 
 func (m Model) executeConfirmedOp(result widgets.ConfirmResult) (Model, tea.Cmd) {
@@ -834,13 +785,6 @@ func (m Model) executeConfirmedOp(result widgets.ConfirmResult) (Model, tea.Cmd)
 	case "resume":
 		if m.watcher != nil {
 			return m, k8sops.ResumeHelmReleaseCmd(m.watcher.DynamicClient(), m.watcher.HelmReleaseGVR(), m.pendingOp.name, m.pendingOp.namespace)
-		}
-	case "copilot_step":
-		idx := m.pendingOp.copilotIdx
-		if idx >= 0 && idx < len(m.copilotSteps) {
-			m.copilotSteps[idx].Status = aimod.StepRunning
-			m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepRunning, "")
-			return m.executeCopilotTool(m.copilotSteps[idx], idx)
 		}
 	}
 	return m, nil
@@ -993,7 +937,6 @@ func (m *Model) setStatusBarKind(kind string) {
 		}
 	}
 	help = append(help,
-		panels.HelpItem{Key: "ctrl+a", Desc: "AI"},
 		panels.HelpItem{Key: "ctrl+r", Desc: "refresh"},
 		panels.HelpItem{Key: "q", Desc: "quit"},
 	)
@@ -1067,8 +1010,6 @@ func (m Model) contentView() string {
 		return m.topology.View()
 	case ModeMetrics:
 		return m.metrics.View()
-	case ModeCopilot:
-		return m.copilot.View()
 	default:
 		return m.table.View()
 	}
@@ -1094,7 +1035,6 @@ func (m Model) resizePanels() Model {
 	m.logView = m.logView.SetSize(contentDim.Width, contentDim.Height)
 	m.topology = m.topology.SetSize(contentDim.Width, contentDim.Height)
 	m.metrics = m.metrics.SetSize(contentDim.Width, contentDim.Height)
-	m.copilot = m.copilot.SetSize(contentDim.Width, contentDim.Height)
 	return m
 }
 
@@ -1230,190 +1170,5 @@ func (m *Model) stopAll() {
 	}
 }
 
-// copilotRunStepMsg drives sequential copilot step execution.
-type copilotRunStepMsg struct{ idx int }
 
-func (m Model) runCopilotStep(idx int) (Model, tea.Cmd) {
-	if idx >= len(m.copilotSteps) {
-		return m, nil
-	}
-	step := m.copilotSteps[idx]
-
-	// Skip steps the user marked as skipped in the review panel.
-	if step.Status == aimod.StepSkipped {
-		return m, func() tea.Msg { return copilotRunStepMsg{idx: idx + 1} }
-	}
-
-	// Destructive steps need confirmation before executing.
-	if step.IsDestructive {
-		m.copilotSteps[idx].Status = aimod.StepConfirming
-		m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepConfirming, "awaiting confirmation")
-		m.pendingOp = pendingOpData{op: "copilot_step", copilotIdx: idx}
-		m.confirm = m.confirm.Show("Confirm: "+step.Describe(), "")
-		return m, nil
-	}
-
-	m.copilotSteps[idx].Status = aimod.StepRunning
-	m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepRunning, "")
-	return m.executeCopilotTool(step, idx)
-}
-
-func (m Model) executeCopilotTool(step aimod.CopilotStep, idx int) (Model, tea.Cmd) {
-	cs, _ := m.clusterMgr.ActiveClientset()
-	advance := func() tea.Cmd {
-		return func() tea.Msg { return copilotRunStepMsg{idx: idx + 1} }
-	}
-	done := func(statusMsg string) (Model, tea.Cmd) {
-		m.copilotSteps[idx].Status = aimod.StepDone
-		m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, statusMsg)
-		return m, advance()
-	}
-
-	switch step.ToolName {
-	case "list_resources":
-		ns := step.InputStr("namespace")
-		kind := step.InputStr("kind")
-		var cmds []tea.Cmd
-		if ns != "" && ns != "all" && ns != m.namespace {
-			var nsCmd tea.Cmd
-			m, nsCmd = m.switchNamespace(ns)
-			cmds = append(cmds, nsCmd)
-		}
-		if kind != "" {
-			m.nav = m.nav.SetActiveKind(kind)
-			m.table = m.table.SetKind(kind)
-			m.setStatusBarKind(kind)
-			cmds = append(cmds, m.buildTableCmd())
-		}
-		m.mode = ModeTable
-		m.focus = FocusContent
-		m.copilotSteps[idx].Status = aimod.StepDone
-		m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, "")
-		cmds = append(cmds, advance())
-		return m, tea.Batch(cmds...)
-
-	case "stream_logs":
-		pods := step.InputStrSlice("pods")
-		ns := step.InputStr("namespace")
-		if ns == "" {
-			ns = m.namespace
-		}
-		if len(pods) > 0 && cs != nil {
-			if m.logStreamer != nil {
-				m.logStreamer.Stop()
-			}
-			streamer := k8sops.NewLogStreamer(cs, ns)
-			streamer.Start(pods)
-			m.logStreamer = streamer
-			m.logView = m.logView.SetPods(pods)
-			m.mode = ModeLogs
-			m.focus = FocusContent
-			m.copilotSteps[idx].Status = aimod.StepDone
-			m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, "")
-			return m, tea.Batch(streamer.ReadCmd(), advance())
-		}
-		return done("")
-
-	case "describe_resource":
-		kind := step.InputStr("kind")
-		name := step.InputStr("name")
-		ns := step.InputStr("namespace")
-		if ns == "" {
-			ns = m.namespace
-		}
-		if cs != nil && kind != "" && name != "" {
-			m.copilotSteps[idx].Status = aimod.StepDone
-			m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, "")
-			return m, tea.Batch(panels.FetchYAMLCmd(cs, kind, name, ns), advance())
-		}
-		return done("")
-
-	case "show_topology":
-		kind := step.InputStr("kind")
-		name := step.InputStr("name")
-		if kind != "" && name != "" && m.watcher != nil {
-			tree := m.buildTopology(kind, name)
-			m.topology = m.topology.SetTree(kind, name, tree)
-			m.mode = ModeTopology
-			m.focus = FocusContent
-		}
-		return done("")
-
-	case "show_events":
-		m.nav = m.nav.SetActiveKind("Event")
-		m.table = m.table.SetKind("Event")
-		m.setStatusBarKind("Event")
-		m.mode = ModeTable
-		m.focus = FocusContent
-		m.copilotSteps[idx].Status = aimod.StepDone
-		m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, "")
-		return m, tea.Batch(m.buildTableCmd(), advance())
-
-	case "scale_resource":
-		if m.readOnly {
-			return done("blocked: read-only mode")
-		}
-		if cs != nil {
-			kind := step.InputStr("kind")
-			name := step.InputStr("name")
-			ns := step.InputStr("namespace")
-			if ns == "" {
-				ns = m.namespace
-			}
-			var replicas int32
-			if r, ok := step.Input["replicas"]; ok {
-				switch v := r.(type) {
-				case float64:
-					replicas = int32(v)
-				case int:
-					replicas = int32(v)
-				}
-			}
-			m.copilotSteps[idx].Status = aimod.StepDone
-			m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, "")
-			return m, tea.Batch(k8sops.ScaleCmd(cs, kind, name, ns, replicas), advance())
-		}
-		return done("")
-
-	case "rollout_restart":
-		if m.readOnly {
-			return done("blocked: read-only mode")
-		}
-		if cs != nil {
-			kind := step.InputStr("kind")
-			name := step.InputStr("name")
-			ns := step.InputStr("namespace")
-			if ns == "" {
-				ns = m.namespace
-			}
-			m.copilotSteps[idx].Status = aimod.StepDone
-			m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, "")
-			return m, tea.Batch(k8sops.RolloutRestartCmd(cs, kind, name, ns), advance())
-		}
-		return done("")
-
-	case "delete_resource":
-		if m.readOnly {
-			return done("blocked: read-only mode")
-		}
-		if cs != nil {
-			kind := step.InputStr("kind")
-			name := step.InputStr("name")
-			ns := step.InputStr("namespace")
-			if ns == "" {
-				ns = m.namespace
-			}
-			m.copilotSteps[idx].Status = aimod.StepDone
-			m.copilot = m.copilot.UpdateStepStatus(idx, aimod.StepDone, "")
-			return m, tea.Batch(k8sops.DeleteCmd(cs, kind, name, ns), advance())
-		}
-		return done("")
-
-	case "exec_command", "port_forward":
-		// These require interactive UI not yet wired to copilot execution.
-		return done("use keyboard shortcut to open manually")
-	}
-
-	return done("unknown tool")
-}
 

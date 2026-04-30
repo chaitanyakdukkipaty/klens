@@ -105,23 +105,6 @@ var (
 		lipgloss.Color("#FF9800"),
 	}
 
-	// AI Copilot
-	CopilotBorder = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#9C27B0"))
-
-	CopilotTitle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#CE93D8")).
-			Bold(true)
-
-	CopilotStep = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#AAAAAA")).
-			PaddingLeft(2)
-
-	CopilotDestructive = lipgloss.NewStyle().
-				Foreground(colorWarning).
-				Bold(true).
-				PaddingLeft(2)
 )
 
 // StatusStyle returns a lipgloss style based on Kubernetes resource status.

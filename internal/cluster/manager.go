@@ -109,6 +109,21 @@ func (m *Manager) ClientsetFor(ctx string) (*kubernetes.Clientset, error) {
 	return m.clientsetFor(ctx)
 }
 
+// RestConfigFor returns the REST config for the named context.
+func (m *Manager) RestConfigFor(ctx string) (*rest.Config, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	overrides := &clientcmd.ConfigOverrides{CurrentContext: ctx}
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	cfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
+	restCfg, err := cfg.ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("rest config for %q: %w", ctx, err)
+	}
+	restCfg.WarningHandler = rest.NoWarnings{}
+	return restCfg, nil
+}
+
 func (m *Manager) clientsetFor(ctx string) (*kubernetes.Clientset, error) {
 	if cs, ok := m.clientsets[ctx]; ok {
 		return cs, nil

@@ -22,6 +22,10 @@ type MetricsPanel struct {
 	name      string
 	namespace string
 	metrics   *k8smetrics.ResourceMetrics
+	cpuReqM   int64
+	cpuLimM   int64
+	memReqB   int64
+	memLimB   int64
 }
 
 func NewMetricsPanel(w, h int) MetricsPanel {
@@ -43,6 +47,15 @@ func (m MetricsPanel) SetResource(name, namespace string, metrics *k8smetrics.Re
 	m.name = name
 	m.namespace = namespace
 	m.metrics = metrics
+	m.rebuildContent()
+	return m
+}
+
+func (m MetricsPanel) SetLimits(cpuReqM, cpuLimM, memReqB, memLimB int64) MetricsPanel {
+	m.cpuReqM = cpuReqM
+	m.cpuLimM = cpuLimM
+	m.memReqB = memReqB
+	m.memLimB = memLimB
 	m.rebuildContent()
 	return m
 }
@@ -74,6 +87,8 @@ func (m *MetricsPanel) rebuildContent() {
 	} else {
 		sb.WriteString(styles.Muted.Render("  Collecting samples…"))
 	}
+	sb.WriteString("\n")
+	sb.WriteString(resourceLimitsLine(int64(m.metrics.CPULatest), m.cpuReqM, m.cpuLimM, "m"))
 	sb.WriteString("\n\n")
 
 	// Memory chart
@@ -93,6 +108,11 @@ func (m *MetricsPanel) rebuildContent() {
 	} else {
 		sb.WriteString(styles.Muted.Render("  Collecting samples…"))
 	}
+	sb.WriteString("\n")
+	memUsageMiB := int64(m.metrics.MEMLatest) / (1024 * 1024)
+	memReqMiB := m.memReqB / (1024 * 1024)
+	memLimMiB := m.memLimB / (1024 * 1024)
+	sb.WriteString(resourceLimitsLine(memUsageMiB, memReqMiB, memLimMiB, " MiB"))
 
 	// Inline sparklines summary
 	sb.WriteString("\n\n")
@@ -120,6 +140,40 @@ func (m MetricsPanel) Update(msg tea.Msg) (MetricsPanel, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// resourceLimitsLine renders "Req: <req><unit>  Lim: <lim><unit>  (<pct>% req / <pct>% lim)"
+// with colored percentages. unit is "m" for millicores or " MiB" for memory.
+func resourceLimitsLine(usage, req, lim int64, unit string) string {
+	reqStr := "—"
+	limStr := "—"
+	pctReq := "~"
+	pctLim := "~"
+	if req > 0 {
+		reqStr = fmt.Sprintf("%d%s", req, unit)
+		pct := usage * 100 / req
+		pctReq = colorPct(pct)
+	}
+	if lim > 0 {
+		limStr = fmt.Sprintf("%d%s", lim, unit)
+		pct := usage * 100 / lim
+		pctLim = colorPct(pct)
+	}
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E"))
+	return muted.Render(fmt.Sprintf("  Req: %s  Lim: %s", reqStr, limStr)) +
+		"  (" + pctReq + muted.Render("% req") + " / " + pctLim + muted.Render("% lim") + ")"
+}
+
+func colorPct(pct int64) string {
+	s := fmt.Sprintf("%d", pct)
+	switch {
+	case pct >= 90:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F44336")).Render(s)
+	case pct >= 70:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC107")).Render(s)
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E")).Render(s)
+	}
 }
 
 func (m MetricsPanel) View() string {

@@ -2,6 +2,7 @@ package panels
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,7 +30,6 @@ const (
 	ModeTopology
 	ModeMetrics
 	ModeEvents
-	ModeCopilot
 )
 
 // ResourceTable displays a live table of Kubernetes resources.
@@ -317,14 +317,22 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 	return lipgloss.NewStyle().Width(width).Render(line)
 }
 
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
 func padOrTrunc(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	if len(s) > w {
-		return s[:w-1] + "…"
+	visW := lipgloss.Width(s)
+	if visW > w {
+		// Strip ANSI codes before slicing to avoid cutting mid-escape-sequence.
+		plain := ansiEscape.ReplaceAllString(s, "")
+		if len(plain) > w {
+			return plain[:w-1] + "…"
+		}
+		return plain + strings.Repeat(" ", w-len(plain))
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-visW)
 }
 
 // PopulateRows converts raw k8s objects into ResourceRows for the given kind.
@@ -382,11 +390,11 @@ func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg) []k8
 			memMi := int64(rm.MEMLatest) / (1024 * 1024)
 			cpuStr = fmt.Sprintf("%d", cpuM)
 			memStr = fmt.Sprintf("%d", memMi)
-			cpuReqM, cpuLimM, memReqB, memLimB := podResourceTotals(p)
-			cpuRStr = fmtPct(cpuM, cpuReqM)
-			cpuLStr = fmtPct(cpuM, cpuLimM)
-			memRStr = fmtPct(int64(rm.MEMLatest), memReqB)
-			memLStr = fmtPct(int64(rm.MEMLatest), memLimB)
+			cpuReqM, cpuLimM, memReqB, memLimB := PodResourceTotals(p)
+			cpuRStr = fmtPctColored(cpuM, cpuReqM)
+			cpuLStr = fmtPctColored(cpuM, cpuLimM)
+			memRStr = fmtPctColored(int64(rm.MEMLatest), memReqB)
+			memLStr = fmtPctColored(int64(rm.MEMLatest), memLimB)
 		}
 
 		rows = append(rows, k8sres.ResourceRow{
@@ -403,7 +411,7 @@ func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg) []k8
 	return rows
 }
 
-func podResourceTotals(p *corev1.Pod) (cpuReqM, cpuLimM, memReqB, memLimB int64) {
+func PodResourceTotals(p *corev1.Pod) (cpuReqM, cpuLimM, memReqB, memLimB int64) {
 	for _, c := range p.Spec.Containers {
 		if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
 			cpuReqM += q.MilliValue()
@@ -426,6 +434,22 @@ func fmtPct(num, denom int64) string {
 		return "~"
 	}
 	return fmt.Sprintf("%d", num*100/denom)
+}
+
+func fmtPctColored(num, denom int64) string {
+	if denom == 0 {
+		return "~"
+	}
+	pct := num * 100 / denom
+	s := fmt.Sprintf("%d", pct)
+	switch {
+	case pct >= 90:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F44336")).Render(s)
+	case pct >= 70:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC107")).Render(s)
+	default:
+		return s
+	}
 }
 
 // Columns: NAME, READY, UP-TO-DATE, AVAILABLE, AGE

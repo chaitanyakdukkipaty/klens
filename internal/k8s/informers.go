@@ -32,8 +32,12 @@ var helmReleaseGVR = schema.GroupVersionResource{
 	Resource: "helmreleases",
 }
 
-// discoverHelmReleaseGVR returns the GVR for whichever FluxCD HelmRelease API
+// DiscoverHelmReleaseGVR returns the GVR for whichever FluxCD HelmRelease API
 // version the cluster serves, falling back to the v2 default if discovery fails.
+func DiscoverHelmReleaseGVR(cfg *rest.Config) schema.GroupVersionResource {
+	return discoverHelmReleaseGVR(cfg)
+}
+
 func discoverHelmReleaseGVR(cfg *rest.Config) schema.GroupVersionResource {
 	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
