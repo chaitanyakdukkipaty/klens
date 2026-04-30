@@ -14,16 +14,43 @@ Kubernetes TUI with k9s-style keyboard navigation and OpenLens-class visual rich
 
 ## Install
 
+**go install** (requires Go 1.21+):
+
 ```bash
 go install github.com/chaitanyakdukkipaty/klens/cmd/klens@latest
 ```
 
-Or build from source:
+The binary is placed in `$GOBIN` (default `$HOME/go/bin`). Make sure that directory is on your `$PATH`.
+
+**Build from source:**
 
 ```bash
 git clone git@github.com:chaitanyakdukkipaty/klens.git
 cd klens
 go build -o klens ./cmd/klens/
+sudo mv klens /usr/local/bin/
+```
+
+## Uninstall
+
+**If installed via go install:**
+
+```bash
+rm "$(go env GOBIN)/klens"
+# or, if GOBIN is unset:
+rm "$(go env GOPATH)/bin/klens"
+```
+
+**If installed via build from source:**
+
+```bash
+rm /usr/local/bin/klens
+```
+
+**Remove configuration (optional):**
+
+```bash
+rm -rf ~/.config/klens
 ```
 
 ## Usage
