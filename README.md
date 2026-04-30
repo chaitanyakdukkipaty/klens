@@ -30,7 +30,7 @@ curl -sSL https://raw.githubusercontent.com/chaitanyakdukkipaty/klens/main/unins
 To keep your saved preferences (`~/.config/klens`):
 
 ```bash
-KEEP_DATA=true curl -sSL https://raw.githubusercontent.com/chaitanyakdukkipaty/klens/main/uninstall.sh | bash
+curl -sSL https://raw.githubusercontent.com/chaitanyakdukkipaty/klens/main/uninstall.sh | KEEP_DATA=true bash
 ```
 
 **Build from source** (requires Go):

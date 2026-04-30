@@ -2,7 +2,7 @@
 
 # klens Uninstall Script
 # Usage: curl -sSL https://raw.githubusercontent.com/chaitanyakdukkipaty/klens/main/uninstall.sh | bash
-# Keep config: KEEP_DATA=true curl -sSL .../uninstall.sh | bash
+# Keep config: curl -sSL https://raw.githubusercontent.com/chaitanyakdukkipaty/klens/main/uninstall.sh | KEEP_DATA=true bash
 
 set -e
 
