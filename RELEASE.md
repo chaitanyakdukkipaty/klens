@@ -77,6 +77,7 @@ git push origin v0.X.Y
 
 | Version | Date | Summary |
 |---|---|---|
+| v0.3.0 | 2026-04-30 | Log viewer: search, tab mode, JSON colorization, pod solo filter, grouped streaming |
 | v0.2.2 | 2026-04-30 | Fix filter cleared on informer refresh when filter is uncommitted |
 | v0.2.1 | 2026-04-30 | Fix `KEEP_DATA` not respected in uninstall script |
 | v0.2.0 | 2026-04-30 | Improve filter UX: `esc` clears filters, `enter` commits |
