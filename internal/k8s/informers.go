@@ -66,6 +66,9 @@ type AccessDeniedMsg struct {
 	Kind string
 }
 
+// CacheSyncedMsg is sent once when all informer caches have completed their initial LIST.
+type CacheSyncedMsg struct{}
+
 // WatcherFactory manages SharedIndexInformer instances for one cluster.
 type WatcherFactory struct {
 	factory        informers.SharedInformerFactory
@@ -75,6 +78,7 @@ type WatcherFactory struct {
 	cancel         context.CancelFunc
 	msgCh          chan tea.Msg
 	started        bool
+	syncing        bool
 	accessDenied   map[string]struct{}
 	mu             sync.RWMutex
 }
@@ -150,6 +154,13 @@ func (w *WatcherFactory) IsAccessDenied(kind string) bool {
 	return ok
 }
 
+// IsSyncing reports whether the informer caches are still doing their initial LIST.
+func (w *WatcherFactory) IsSyncing() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.syncing
+}
+
 // Start begins all informers. Should be called once per factory lifetime.
 func (w *WatcherFactory) Start() {
 	if w.started {
@@ -158,6 +169,9 @@ func (w *WatcherFactory) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	w.cancel = cancel
 	w.started = true
+	w.mu.Lock()
+	w.syncing = true
+	w.mu.Unlock()
 
 	notify := func(kind string) func(interface{}) {
 		return func(_ interface{}) {
@@ -212,16 +226,27 @@ func (w *WatcherFactory) Start() {
 	setup(w.factory.Networking().V1().NetworkPolicies().Informer(), "NetworkPolicy")
 
 	w.factory.Start(ctx.Done())
-	go func() {
-		w.factory.WaitForCacheSync(ctx.Done())
-	}()
 
 	// HelmRelease CRD (FluxCD helm.toolkit.fluxcd.io/v2) — gracefully degrades if not installed.
 	if w.dynamicFactory != nil {
 		setup(w.dynamicFactory.ForResource(w.hrGVR).Informer(), "HelmRelease")
 		w.dynamicFactory.Start(ctx.Done())
-		go func() { w.dynamicFactory.WaitForCacheSync(ctx.Done()) }()
 	}
+
+	// Wait for all caches to complete their initial LIST, then notify the app.
+	go func() {
+		w.factory.WaitForCacheSync(ctx.Done())
+		if w.dynamicFactory != nil {
+			w.dynamicFactory.WaitForCacheSync(ctx.Done())
+		}
+		w.mu.Lock()
+		w.syncing = false
+		w.mu.Unlock()
+		select {
+		case w.msgCh <- CacheSyncedMsg{}:
+		default:
+		}
+	}()
 }
 
 // Stop cancels the informers and goroutines for this factory.

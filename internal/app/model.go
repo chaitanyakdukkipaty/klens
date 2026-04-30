@@ -193,13 +193,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.readOnly = m.readOnlyFlag || msg.appConfig.ReadOnly
 		m.header = m.header.SetCluster(msg.ctx).SetNamespace(msg.ns).SetVersion(msg.version).SetReadOnly(m.readOnly)
 		m.nav = m.nav.SetFocused(true)
-		m.table = m.table.SetKind(m.nav.ActiveKind())
+		m.table = m.table.SetKind(m.nav.ActiveKind()).SetSyncing(true)
 		m.setStatusBarKind(m.nav.ActiveKind())
 		return m, tea.Batch(
 			k8sops.WatchCmd(m.msgCh),
 			m.buildTableCmd(),
 			k8sops.MetricsTickCmd(),
 		)
+
+	case k8sops.CacheSyncedMsg:
+		m.table = m.table.SetSyncing(false)
+		return m, tea.Batch(k8sops.WatchCmd(m.msgCh), m.buildTableCmd())
 
 	case switchNamespaceMsg:
 		return m.switchNamespace(msg.namespace)
@@ -818,6 +822,7 @@ func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
 	wf := k8sops.NewWatcherFactory(cs, nsCfg, ns, m.msgCh)
 	wf.Start()
 	m.watcher = wf
+	m.table = m.table.SetSyncing(true)
 	return m, tea.Batch(
 		k8sops.WatchCmd(m.msgCh),
 		m.buildTableCmd(),
@@ -859,6 +864,7 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 	wf := k8sops.NewWatcherFactory(cs, restCfg, ns, m.msgCh)
 	wf.Start()
 	m.watcher = wf
+	m.table = m.table.SetSyncing(true)
 	return m, tea.Batch(
 		k8sops.WatchCmd(m.msgCh),
 		m.buildTableCmd(),

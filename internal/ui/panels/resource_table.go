@@ -45,6 +45,7 @@ type ResourceTable struct {
 	filter   string
 	filterOn bool
 	filterInput string
+	syncing  bool
 }
 
 func NewResourceTable(w, h int) ResourceTable {
@@ -57,6 +58,7 @@ func NewResourceTable(w, h int) ResourceTable {
 
 func (t ResourceTable) SetSize(w, h int) ResourceTable { t.width = w; t.height = h; return t }
 func (t ResourceTable) SetFocused(f bool) ResourceTable { t.focused = f; return t }
+func (t ResourceTable) SetSyncing(s bool) ResourceTable { t.syncing = s; return t }
 func (t ResourceTable) SetKind(kind string) ResourceTable {
 	if t.kind != kind {
 		t.cursor = 0
@@ -259,7 +261,11 @@ func (t ResourceTable) View() string {
 	}
 
 	if len(t.filtered) == 0 {
-		rowLines = []string{styles.Muted.Render("  No resources found")}
+		if t.syncing {
+			rowLines = []string{styles.Muted.Render("  Syncing resources...")}
+		} else {
+			rowLines = []string{styles.Muted.Render("  No resources found")}
+		}
 	}
 
 	content := title + filterBar + "\n" + header + "\n" + strings.Join(rowLines, "\n")
