@@ -355,9 +355,8 @@ func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 		}
 		return t.rows[i].Name < t.rows[j].Name
 	})
-	// Reapply filter
-	if t.filter != "" {
-		t.filterInput = t.filter
+	// Reapply filter — use filterInput so in-progress (uncommitted) filters survive refreshes.
+	if t.filterInput != "" {
 		t.applyFilter()
 	} else {
 		t.filtered = t.rows
