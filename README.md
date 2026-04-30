@@ -6,7 +6,7 @@ Kubernetes TUI with k9s-style keyboard navigation and OpenLens-class visual rich
 
 - **Resource browser** — 26 Kubernetes resource types with filterable, sortable tables
 - **YAML viewer & editor** — syntax-highlighted viewer; vim-style editor with diff preview before applying (`ctrl+s`)
-- **Log streaming** — multi-pod fan-in; space-select multiple pods and stream all logs at once
+- **Log streaming** — multi-pod fan-in; space-select multiple pods and stream all logs at once; tab mode groups resources into named tabs; JSON lines are Chroma-highlighted with pretty-print toggle (`J`); inline search (`ctrl+f`) with `n`/`N` navigation; pod solo filter (`1`–`9`); live / paused scroll indicator
 - **Topology trees** — visual ownerReference traversal: `Ingress → Service → Pod`, `Deployment → ReplicaSet → Pod`
 - **Metrics panel** — ASCII sparklines for CPU and memory via metrics-server (degrades gracefully if not installed)
 - **Pod attach** — exec into a pod shell (`a`); opens a new tmux window when running inside tmux
@@ -118,8 +118,23 @@ No Anthropic API key required. Skills call `klens get` and `klens logs` as a rea
 | `a` | attach / exec into pod |
 | `s` | scale (Deployments / StatefulSets) |
 | `ctrl+r` | reconnect / refresh |
-| `esc` | back to table |
+| `esc` | back to table (or peel log viewer state) |
 | `q` | quit |
+
+### Log viewer
+
+| Key | Action |
+|---|---|
+| `↑↓` / `jk` | scroll |
+| `g` / `G` | top / bottom (G re-enables live auto-scroll) |
+| `/` | filter lines (hides non-matching) |
+| `ctrl+f` | inline search with match highlighting |
+| `n` / `N` | next / prev search match |
+| `1`–`9` | solo pod (single stream) or jump to tab (multi-resource) |
+| `0` | show all pods / return to first tab |
+| `tab` | cycle tabs in multi-resource mode |
+| `J` | toggle JSON pretty-print + syntax highlighting |
+| `esc` | peel state one layer at a time, then exit logs |
 
 ## Configuration
 

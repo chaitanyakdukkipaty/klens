@@ -51,7 +51,7 @@ internal/k8s/
   resources.go                → ResourceDescriptor registry (26 types + aliases)
   query.go                    → read-only query functions used by CLI subcommands (QueryPods, QueryEvents, etc.)
   output.go                   → table-printing and JSON helpers for CLI output (PrintPodsTable, MarshalPretty, etc.)
-  logs.go                     → multi-pod log fan-in via goroutine channels; LogOptions; StreamPodLogs/StreamDeploymentLogs
+  logs.go                     → multi-pod log fan-in via goroutine channels; LogGroup type; Start/StartGrouped; LogLine carries Group field for tab routing
   metrics.go                  → metrics-server REST polling; MetricsUpdatedMsg
   topology.go                 → ownerReference traversal; TreeNode builder
   operations.go               → delete/scale/rollout/drain/cordon
@@ -81,10 +81,14 @@ internal/ui/
 - **Metrics degradation**: if metrics-server not installed (404 on metrics API), show "n/a" — never block resource browsing.
 - **lipgloss constraint**: `MarginLeft()` breaks `Width()` in lipgloss v1.1.0 — use `PaddingLeft()` for all indented panel elements.
 - **YAML editor modal states**: `internal/ui/panels/yaml_editor.go` implements vim-style Normal/Insert/DiffConfirm/Applying states. In Normal mode both `hjkl` and arrow keys navigate; `i/a/A/o/O` enter Insert mode; `ctrl+s` opens diff preview. In Insert mode all input goes directly to the `textarea` widget.
+- **Log viewer states**: `internal/ui/panels/log_viewer.go` has layered state — filterOn (/ input), searchOn (ctrl+f input), podFilter (1-9 solo), tabGroups (multi-group). `HasActiveState()` and `HandleEsc()` let the root model peel one layer per `esc` instead of exiting log mode immediately. `LogGroup` / `StartGrouped()` in `logs.go` carry the group name through `LogLine.Group` so the viewer can route lines to tabs.
+- **JSON colorization**: `tryColorizeJSON` in `log_viewer.go` Chroma-highlights lines that are valid JSON (dracula theme, terminal256 formatter); colorCache is a parallel slice to `lines` so re-colorizing on `J` toggle only re-renders lines, not restreams data.
 - **CLI subcommand dispatch**: `main.go` checks `os.Args[1]` before the tmux auto-wrap block so `klens get`/`logs`/`setup` are never wrapped in a tmux session.
 - **klog suppression**: klog is silenced at startup via `klog.SetOutput(io.Discard)` — suppress before any client-go initialization to avoid noisy stderr.
 
 ## Keyboard Shortcuts
+
+### Global
 
 | Key | Action |
 |---|---|
@@ -102,8 +106,23 @@ internal/ui/
 | `s` | scale (Deployments / StatefulSets) |
 | `ctrl+r` | reconnect / refresh (stops watcher, reruns full connect) |
 | `:` | command palette (TODO) |
-| `esc` | back to table |
+| `esc` | back to table (or peel log viewer state) |
 | `q` | quit |
+
+### Log viewer
+
+| Key | Action |
+|---|---|
+| `↑↓` / `jk` | scroll |
+| `g` / `G` | top / bottom (G also re-enables auto-scroll) |
+| `/` | filter lines (hides non-matching) |
+| `ctrl+f` | inline search (highlights matches) |
+| `n` / `N` | next / prev search match |
+| `1`–`9` | solo pod (single-group) or jump to tab (multi-group) |
+| `0` | show all pods / return to first tab |
+| `tab` | cycle tabs (multi-group mode) |
+| `J` | toggle JSON pretty-print + Chroma colorization |
+| `esc` | peel state: cancel input → clear search → clear pod filter → clear filter → exit logs |
 
 ## Claude Code Skills
 
