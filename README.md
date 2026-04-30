@@ -61,6 +61,15 @@ klens
 
 Requires a valid `~/.kube/config`. Switches clusters with the cluster picker; `ctrl+r` reconnects.
 
+### tmux
+
+klens works without tmux, but running inside tmux unlocks two extra behaviours:
+
+- **Pod exec in a separate window** — shelling into a pod (`x`) opens a new tmux window instead of suspending the TUI. You can switch back to klens instantly (`ctrl+b p`) without exiting the shell.
+- **Session persistence** — if your SSH connection drops or you close the terminal, the klens session keeps running in the background. Reattach with `tmux attach` and pick up where you left off.
+
+klens auto-wraps itself in a new tmux session on launch if tmux is installed and you are not already inside one.
+
 ### AI copilot (optional)
 
 The copilot shells out to the `claude` CLI — no Anthropic SDK or API key needed.
