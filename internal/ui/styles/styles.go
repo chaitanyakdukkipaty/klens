@@ -79,9 +79,10 @@ var (
 	Bold    = lipgloss.NewStyle().Bold(true)
 	Muted   = lipgloss.NewStyle().Foreground(colorMuted)
 	Error   = lipgloss.NewStyle().Foreground(colorError)
-	Warning = lipgloss.NewStyle().Foreground(colorWarning)
-	Success = lipgloss.NewStyle().Foreground(colorAccent)
-	Primary = lipgloss.NewStyle().Foreground(colorPrimary)
+	Warning         = lipgloss.NewStyle().Foreground(colorWarning)
+	Success         = lipgloss.NewStyle().Foreground(colorAccent)
+	Primary         = lipgloss.NewStyle().Foreground(colorPrimary)
+	SearchHighlight = lipgloss.NewStyle().Background(colorWarning).Foreground(colorBg)
 
 	// Dialog
 	DialogBox = lipgloss.NewStyle().

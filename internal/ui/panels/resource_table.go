@@ -64,6 +64,8 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.cursor = 0
 		t.selected = make(map[string]bool)
 		t.filter = ""
+		t.filterInput = ""
+		t.filterOn = false
 	}
 	t.kind = kind
 	return t

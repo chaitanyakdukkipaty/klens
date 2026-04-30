@@ -399,6 +399,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.table, cmd = m.table.Update(msg)
 			return m, cmd
 		}
+		// Peel log viewer state one layer before exiting: cancel input → clear search → clear filter.
+		if m.mode == ModeLogs && m.logView.HasActiveState() {
+			m.logView = m.logView.HandleEsc()
+			return m, nil
+		}
 		if m.mode != ModeTable {
 			m.mode = ModeTable
 			if m.logStreamer != nil {
@@ -583,30 +588,29 @@ func (m Model) handleTableKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "l":
 		kind := m.nav.ActiveKind()
 		selectedNames := m.table.SelectedPods()
-		var pods []string
+		var groups []k8sops.LogGroup
 		if m.watcher != nil {
-			seen := make(map[string]bool)
 			for _, name := range selectedNames {
-				for _, p := range k8sops.ResolvePodNames(kind, name, m.namespace, m.watcher) {
-					if !seen[p] {
-						seen[p] = true
-						pods = append(pods, p)
-					}
+				pods := k8sops.ResolvePodNames(kind, name, m.namespace, m.watcher)
+				if len(pods) > 0 {
+					groups = append(groups, k8sops.LogGroup{Name: name, Pods: pods})
 				}
 			}
 		} else {
-			pods = selectedNames
+			for _, name := range selectedNames {
+				groups = append(groups, k8sops.LogGroup{Name: name, Pods: []string{name}})
+			}
 		}
-		if len(pods) > 0 && m.clusterMgr != nil {
+		if len(groups) > 0 && m.clusterMgr != nil {
 			cs, _ := m.clusterMgr.ActiveClientset()
 			if cs != nil {
 				if m.logStreamer != nil {
 					m.logStreamer.Stop()
 				}
 				streamer := k8sops.NewLogStreamer(cs, m.namespace)
-				streamer.Start(pods)
+				streamer.StartGrouped(groups)
 				m.logStreamer = streamer
-				m.logView = m.logView.SetPods(pods)
+				m.logView = m.logView.SetPodGroups(groups)
 				m.mode = ModeLogs
 				m.focus = FocusContent
 				return m, streamer.ReadCmd()
