@@ -10,6 +10,7 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	k8slogs "github.com/chaitanyak/klens/internal/k8s"
@@ -66,7 +67,8 @@ type LogViewer struct {
 }
 
 func NewLogViewer(w, h int) LogViewer {
-	vp := viewport.New(w-2, h-7)
+	vp := viewport.New(w-3, h-7)
+	vp.SetHorizontalStep(8)
 	return LogViewer{
 		viewport:      vp,
 		width:         w,
@@ -82,7 +84,7 @@ func NewLogViewer(w, h int) LogViewer {
 func (v LogViewer) SetSize(w, h int) LogViewer {
 	v.width = w
 	v.height = h
-	v.viewport.Width = max(1, w-2)
+	v.viewport.Width = max(1, w-3)
 	v.viewport.Height = max(1, h-7)
 	return v
 }
@@ -229,9 +231,15 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 					v.filterInput = v.filterInput[:len(v.filterInput)-1]
 					v.rebuildViewport()
 				}
+			case "ctrl+v":
+				if text, err := clipboard.ReadAll(); err == nil && text != "" {
+					clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(text)
+					v.filterInput += clean
+					v.rebuildViewport()
+				}
 			default:
-				if len(msg.String()) == 1 {
-					v.filterInput += msg.String()
+				if msg.Type == tea.KeyRunes {
+					v.filterInput += string(msg.Runes)
 					v.rebuildViewport()
 				}
 			}
@@ -264,9 +272,15 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 					v.searchInput = v.searchInput[:len(v.searchInput)-1]
 					v.rebuildViewport()
 				}
+			case "ctrl+v":
+				if text, err := clipboard.ReadAll(); err == nil && text != "" {
+					clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(text)
+					v.searchInput += clean
+					v.rebuildViewport()
+				}
 			default:
-				if len(msg.String()) == 1 {
-					v.searchInput += msg.String()
+				if msg.Type == tea.KeyRunes {
+					v.searchInput += string(msg.Runes)
 					v.rebuildViewport()
 				}
 			}
@@ -300,10 +314,12 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 			v.autoScroll = true
 		case "g":
 			v.viewport.GotoTop()
+			v.viewport.SetXOffset(0)
 			v.autoScroll = false
 		case "tab":
 			if len(v.tabGroups) > 1 {
 				v.activeTabIdx = (v.activeTabIdx + 1) % len(v.tabGroups)
+				v.viewport.SetXOffset(0)
 				v.rebuildViewport()
 				if v.autoScroll {
 					v.viewport.GotoBottom()
@@ -316,6 +332,7 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 			}
 			v.rebuildViewport()
 		case "0":
+			v.viewport.SetXOffset(0)
 			if len(v.tabGroups) > 1 {
 				v.activeTabIdx = 0
 				v.rebuildViewport()
@@ -510,6 +527,48 @@ func tryColorizeJSON(text string, indent bool) string {
 	return strings.TrimRight(buf.String(), "\n")
 }
 
+// renderScrollbar returns a height-line string (one char per line) for a vertical scrollbar.
+// Track is │ (muted); thumb is █ (primary when focused, muted otherwise).
+func renderScrollbar(height, visible, total, yOffset int, focused bool) string {
+	trackChar := styles.Muted.Render("│")
+	thumbChar := styles.Muted.Render("█")
+	if focused {
+		thumbChar = styles.Primary.Render("█")
+	}
+	lines := make([]string, height)
+	if total <= visible || height <= 0 {
+		for i := range lines {
+			lines[i] = trackChar
+		}
+		return strings.Join(lines, "\n")
+	}
+	thumbSize := max(1, height*visible/total)
+	thumbPos := int(float64(yOffset) / float64(max(1, total-visible)) * float64(height-thumbSize))
+	for i := range lines {
+		if i >= thumbPos && i < thumbPos+thumbSize {
+			lines[i] = thumbChar
+		} else {
+			lines[i] = trackChar
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// joinScrollbar appends one scrollbar char per line to the right of vpContent.
+func joinScrollbar(vpContent, sbStr string) string {
+	vpLines := strings.Split(vpContent, "\n")
+	sbLines := strings.Split(sbStr, "\n")
+	combined := make([]string, len(vpLines))
+	for i, line := range vpLines {
+		sb := " "
+		if i < len(sbLines) {
+			sb = sbLines[i]
+		}
+		combined[i] = line + sb
+	}
+	return strings.Join(combined, "\n")
+}
+
 func (v LogViewer) View() string {
 	border := styles.NormalBorder
 	if v.focused {
@@ -612,5 +671,14 @@ func (v LogViewer) View() string {
 	}
 	header := title + scrollStatus + indentHint + "  " + styles.Muted.Render(v.lineCountStr) + tabBar + filterBar + searchBar + "\n" + help
 
-	return border.Width(max(1, v.width-2)).Height(max(1, v.height-2)).Render(header + "\n\n" + v.viewport.View())
+	sbStr := renderScrollbar(
+		v.viewport.Height,
+		v.viewport.VisibleLineCount(),
+		v.viewport.TotalLineCount(),
+		v.viewport.YOffset,
+		v.focused,
+	)
+	return border.Width(max(1, v.width-2)).Height(max(1, v.height-2)).Render(
+		header + "\n\n" + joinScrollbar(v.viewport.View(), sbStr),
+	)
 }

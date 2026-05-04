@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	k8sres "github.com/chaitanyak/klens/internal/k8s"
@@ -89,9 +90,15 @@ func (n NavPanel) Update(msg tea.Msg) (NavPanel, tea.Cmd) {
 					n.filterInput = n.filterInput[:len(n.filterInput)-1]
 					n.applyNavFilter()
 				}
+			case "ctrl+v":
+				if text, err := clipboard.ReadAll(); err == nil && text != "" {
+					clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(text)
+					n.filterInput += clean
+					n.applyNavFilter()
+				}
 			default:
-				if len(msg.String()) == 1 {
-					n.filterInput += msg.String()
+				if msg.Type == tea.KeyRunes {
+					n.filterInput += string(msg.Runes)
 					n.applyNavFilter()
 				}
 			}

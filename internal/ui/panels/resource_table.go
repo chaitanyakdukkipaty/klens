@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	k8sres "github.com/chaitanyak/klens/internal/k8s"
@@ -154,9 +155,15 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 					t.filterInput = t.filterInput[:len(t.filterInput)-1]
 					t.applyFilter()
 				}
+			case "ctrl+v":
+				if text, err := clipboard.ReadAll(); err == nil && text != "" {
+					clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(text)
+					t.filterInput += clean
+					t.applyFilter()
+				}
 			default:
-				if len(msg.String()) == 1 {
-					t.filterInput += msg.String()
+				if msg.Type == tea.KeyRunes {
+					t.filterInput += string(msg.Runes)
 					t.applyFilter()
 				}
 			}

@@ -378,6 +378,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		switch m.mode {
+		case ModeLogs:
+			var cmd tea.Cmd
+			m.logView, cmd = m.logView.Update(msg)
+			return m, cmd
+		case ModeYAML:
+			var cmd tea.Cmd
+			m.yamlView, cmd = m.yamlView.Update(msg)
+			return m, cmd
+		case ModeEditor:
+			var cmd tea.Cmd
+			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
+			return m, cmd
+		case ModeTopology:
+			var cmd tea.Cmd
+			m.topology, cmd = m.topology.Update(msg)
+			return m, cmd
+		case ModeMetrics:
+			var cmd tea.Cmd
+			m.metrics, cmd = m.metrics.Update(msg)
+			return m, cmd
+		}
 	}
 
 	return m, nil
@@ -403,7 +427,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.stopAll()
 		return m, tea.Quit
 	case "q":
-		if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
+		if m.mode == ModeEditor {
 			var cmd tea.Cmd
 			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
 			return m, cmd

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -56,12 +57,12 @@ type YAMLEditor struct {
 
 func NewYAMLEditor(w, h int) YAMLEditor {
 	ta := textarea.New()
-	ta.SetWidth(max(1, w-4))
+	ta.SetWidth(max(1, w-5))
 	ta.SetHeight(max(1, h-6))
 	ta.ShowLineNumbers = true
 	ta.Focus()
 
-	diffVP := viewport.New(max(1, w-4), max(1, h-8))
+	diffVP := viewport.New(max(1, w-5), max(1, h-8))
 	return YAMLEditor{
 		textarea: ta,
 		diffVP:   diffVP,
@@ -73,9 +74,9 @@ func NewYAMLEditor(w, h int) YAMLEditor {
 func (e YAMLEditor) SetSize(w, h int) YAMLEditor {
 	e.width = w
 	e.height = h
-	e.textarea.SetWidth(max(1, w-4))
+	e.textarea.SetWidth(max(1, w-5))
 	e.textarea.SetHeight(max(1, h-6))
-	e.diffVP.Width = max(1, w-4)
+	e.diffVP.Width = max(1, w-5)
 	e.diffVP.Height = max(1, h-8)
 	return e
 }
@@ -123,6 +124,15 @@ func (e YAMLEditor) Update(msg tea.Msg) (YAMLEditor, tea.Cmd) {
 				e.pendingKey = ""
 				return e, nil
 			}
+			if msg.String() == "ctrl+v" {
+				if text, err := clipboard.ReadAll(); err == nil && text != "" {
+					e.textarea, _ = e.textarea.Update(tea.KeyMsg{
+						Type:  tea.KeyRunes,
+						Runes: []rune(text),
+					})
+				}
+				return e, nil
+			}
 		case editorDiffConfirm:
 			switch msg.String() {
 			case "y", "enter":
@@ -137,6 +147,30 @@ func (e YAMLEditor) Update(msg tea.Msg) (YAMLEditor, tea.Cmd) {
 				return e, cmd
 			}
 		}
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress {
+			switch msg.Button {
+			case tea.MouseButtonWheelUp:
+				if e.state == editorDiffConfirm {
+					var cmd tea.Cmd
+					e.diffVP, cmd = e.diffVP.Update(msg)
+					return e, cmd
+				}
+				e = e.sendKey(tea.KeyUp)
+			case tea.MouseButtonWheelDown:
+				if e.state == editorDiffConfirm {
+					var cmd tea.Cmd
+					e.diffVP, cmd = e.diffVP.Update(msg)
+					return e, cmd
+				}
+				e = e.sendKey(tea.KeyDown)
+			case tea.MouseButtonWheelLeft:
+				e = e.sendKey(tea.KeyLeft)
+			case tea.MouseButtonWheelRight:
+				e = e.sendKey(tea.KeyRight)
+			}
+		}
+		return e, nil
 	}
 
 	if e.state == editorInsert {
@@ -293,19 +327,33 @@ func (e YAMLEditor) View() string {
 
 	title := styles.Title.Render(fmt.Sprintf("Edit: %s/%s", e.kind, e.name))
 
+	taScrollbar := func() string {
+		taHeight := max(1, e.height-6)
+		totalLines := strings.Count(e.textarea.Value(), "\n") + 1
+		viewTop := max(0, min(e.textarea.Line()-taHeight/2, totalLines-taHeight))
+		return renderScrollbar(taHeight, taHeight, totalLines, viewTop, e.focused)
+	}
+
 	var body string
 	switch e.state {
 	case editorNormal:
 		modeBar := styles.Muted.Bold(true).Render(" NORMAL ")
 		hint := styles.Muted.Render("  hjkl move · w/b word · 0/$ line · gg/G top/bot · i/a/o insert · dd/D del · yy/p yank · ctrl+s preview")
-		body = title + "\n" + modeBar + hint + "\n\n" + e.textarea.View()
+		body = title + "\n" + modeBar + hint + "\n\n" + joinScrollbar(e.textarea.View(), taScrollbar())
 	case editorInsert:
 		modeBar := styles.Primary.Bold(true).Render(" INSERT ")
 		hint := styles.Muted.Render("  esc → normal · ctrl+s preview")
-		body = title + "\n" + modeBar + hint + "\n\n" + e.textarea.View()
+		body = title + "\n" + modeBar + hint + "\n\n" + joinScrollbar(e.textarea.View(), taScrollbar())
 	case editorDiffConfirm:
 		warning := styles.Warning.Bold(true).Render("  Preview changes — apply? [y/n]")
-		body = title + "\n" + warning + "\n\n" + e.diffVP.View()
+		sbStr := renderScrollbar(
+			e.diffVP.Height,
+			e.diffVP.VisibleLineCount(),
+			e.diffVP.TotalLineCount(),
+			e.diffVP.YOffset,
+			e.focused,
+		)
+		body = title + "\n" + warning + "\n\n" + joinScrollbar(e.diffVP.View(), sbStr)
 	case editorApplying:
 		body = title + "\n" + styles.Primary.Render("  Applying…")
 	}
