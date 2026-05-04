@@ -5,17 +5,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
-	chromastyles "github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	k8slogs "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 )
+
+// klensChromaStyle is a minimal Chroma style aligned to the klens palette.
+// Foreground-only — no background color so it doesn't fight the lipgloss panel backgrounds.
+var klensChromaStyle = chroma.MustNewStyle("klens", chroma.StyleEntries{
+	chroma.Comment:       "#888888", // Inactive Gray
+	chroma.Keyword:       "#00ADD8", // Signal Blue — covers KeywordConstant by inheritance
+	chroma.NameTag:       "#00ADD8", // JSON/YAML keys
+	chroma.LiteralString: "#AAAAAA", // Body Text — covers all string subtypes
+	chroma.LiteralNumber: "#AAAAAA", // Body Text — covers all number subtypes
+	chroma.Punctuation:   "#888888", // Inactive Gray — structural chars recede
+	chroma.Operator:      "#888888", // Inactive Gray — YAML colon/dash separators
+})
 
 const maxLogLines = 10000
 
@@ -26,8 +37,10 @@ type LogViewer struct {
 	height     int
 	focused    bool
 	pods       []string
-	lines      []k8slogs.LogLine
-	colorCache []string // parallel to lines; Chroma-colorized JSON or "" for plain text
+	lines       []k8slogs.LogLine
+	colorCache  []string // parallel to lines; Chroma-colorized JSON or "" for plain text
+	lowerCache  []string // parallel to lines; pre-cached strings.ToLower(line.Text)
+	lineCountStr string  // cached line-count display string (recomputed in rebuildViewport)
 	autoScroll bool
 	jsonIndent bool // pretty-print JSON with indentation; toggle with J
 	podFilter  int  // -1 = all pods; 0..N-1 = solo pods[podFilter] (single-group mode only)
@@ -48,6 +61,8 @@ type LogViewer struct {
 	searchQuery   string
 	searchMatches []int // viewport visual line indices of matching lines
 	searchCurrent int   // -1 when no match selected
+
+	lastLineAt time.Time // wall time of the most recently received log line
 }
 
 func NewLogViewer(w, h int) LogViewer {
@@ -60,14 +75,15 @@ func NewLogViewer(w, h int) LogViewer {
 		jsonIndent:    true,
 		podFilter:     -1,
 		searchCurrent: -1,
+		lineCountStr:  "  0 lines",
 	}
 }
 
 func (v LogViewer) SetSize(w, h int) LogViewer {
 	v.width = w
 	v.height = h
-	v.viewport.Width = w - 2
-	v.viewport.Height = h - 7
+	v.viewport.Width = max(1, w-2)
+	v.viewport.Height = max(1, h-7)
 	return v
 }
 
@@ -79,6 +95,7 @@ func (v LogViewer) SetPods(pods []string) LogViewer {
 	v.activeTabIdx = 0
 	v.lines = nil
 	v.colorCache = nil
+	v.lowerCache = nil
 	v.podFilter = -1
 	v.jsonIndent = true
 	v.filterInput = ""
@@ -90,6 +107,7 @@ func (v LogViewer) SetPods(pods []string) LogViewer {
 	v.searchMatches = nil
 	v.searchCurrent = -1
 	v.autoScroll = true
+	v.lastLineAt = time.Time{}
 	return v
 }
 
@@ -113,6 +131,7 @@ func (v LogViewer) SetPodGroups(groups []k8slogs.LogGroup) LogViewer {
 	v.activeTabIdx = 0
 	v.lines = nil
 	v.colorCache = nil
+	v.lowerCache = nil
 	v.podFilter = -1
 	v.jsonIndent = true
 	v.filterInput = ""
@@ -124,6 +143,7 @@ func (v LogViewer) SetPodGroups(groups []k8slogs.LogGroup) LogViewer {
 	v.searchMatches = nil
 	v.searchCurrent = -1
 	v.autoScroll = true
+	v.lastLineAt = time.Time{}
 	return v
 }
 
@@ -132,6 +152,9 @@ func (v LogViewer) SetPodGroups(groups []k8slogs.LogGroup) LogViewer {
 func (v LogViewer) HasActiveState() bool {
 	return v.podFilter >= 0 || v.filter != "" || v.filterOn || v.searchQuery != "" || v.searchOn
 }
+
+// IsCapturingInput reports whether the filter or search input box is open and accepting keystrokes.
+func (v LogViewer) IsCapturingInput() bool { return v.filterOn || v.searchOn }
 
 // HandleEsc peels one layer: cancel active input → clear pod filter → clear search → clear filter.
 func (v LogViewer) HandleEsc() LogViewer {
@@ -171,11 +194,16 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 		for _, line := range msg.Lines {
 			v.lines = append(v.lines, line)
 			v.colorCache = append(v.colorCache, tryColorizeJSON(line.Text, v.jsonIndent))
+			v.lowerCache = append(v.lowerCache, strings.ToLower(line.Text))
+		}
+		if len(msg.Lines) > 0 {
+			v.lastLineAt = time.Now()
 		}
 		if len(v.lines) > maxLogLines {
 			trim := len(v.lines) - maxLogLines
 			v.lines = v.lines[trim:]
 			v.colorCache = v.colorCache[trim:]
+			v.lowerCache = v.lowerCache[trim:]
 		}
 		v.rebuildViewport()
 		if v.autoScroll {
@@ -360,6 +388,7 @@ func (v *LogViewer) rebuildViewport() {
 
 	var sb strings.Builder
 	viewLine := 0
+	shown := 0
 	for i, l := range v.lines {
 		if len(v.tabGroups) > 1 {
 			if v.activeTabIdx < len(v.tabGroups) && l.Group != v.tabGroups[v.activeTabIdx] {
@@ -368,13 +397,22 @@ func (v *LogViewer) rebuildViewport() {
 		} else if v.podFilter >= 0 && v.podFilter < len(v.pods) && l.Pod != v.pods[v.podFilter] {
 			continue
 		}
-		if lowFilter != "" && !strings.Contains(strings.ToLower(l.Text), lowFilter) {
+		shown++
+
+		var lowText string
+		if i < len(v.lowerCache) {
+			lowText = v.lowerCache[i]
+		} else {
+			lowText = strings.ToLower(l.Text)
+		}
+
+		if lowFilter != "" && !strings.Contains(lowText, lowFilter) {
 			continue
 		}
 
 		// Search highlight takes priority over JSON colorization (both emit ANSI codes).
 		text := l.Text
-		if lowSearch != "" && strings.Contains(strings.ToLower(l.Text), lowSearch) {
+		if lowSearch != "" && strings.Contains(lowText, lowSearch) {
 			v.searchMatches = append(v.searchMatches, viewLine)
 			text = highlightMatches(l.Text, lowSearch)
 		} else if !l.IsSystem && i < len(v.colorCache) && v.colorCache[i] != "" {
@@ -394,6 +432,12 @@ func (v *LogViewer) rebuildViewport() {
 	}
 
 	v.viewport.SetContent(sb.String())
+
+	if len(v.tabGroups) > 1 || (v.podFilter >= 0 && v.podFilter < len(v.pods)) {
+		v.lineCountStr = fmt.Sprintf("  %d/%d lines", shown, len(v.lines))
+	} else {
+		v.lineCountStr = fmt.Sprintf("  %d lines", len(v.lines))
+	}
 }
 
 // highlightMatches wraps all case-insensitive occurrences of query in text with SearchHighlight.
@@ -423,10 +467,9 @@ func renderLogLineText(l k8slogs.LogLine, text string) string {
 	if colorIdx >= len(styles.LogPrefixColors) {
 		colorIdx = colorIdx % len(styles.LogPrefixColors)
 	}
-	color := styles.LogPrefixColors[colorIdx]
-	prefix := lipgloss.NewStyle().Foreground(color).Bold(true).Render(fmt.Sprintf("[%s] ", l.Pod))
+	prefix := styles.LogPrefixStyles[colorIdx].Render(fmt.Sprintf("[%s] ", l.Pod))
 	if l.IsSystem {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Italic(true).Render(text)
+		return styles.Muted.Italic(true).Render(text)
 	}
 	return prefix + text
 }
@@ -452,10 +495,6 @@ func tryColorizeJSON(text string, indent bool) string {
 		src = text
 	}
 	lexer := chroma.Coalesce(lexers.Get("json"))
-	style := chromastyles.Get("dracula")
-	if style == nil {
-		style = chromastyles.Fallback
-	}
 	formatter := formatters.Get("terminal256")
 	if formatter == nil {
 		formatter = formatters.Fallback
@@ -465,7 +504,7 @@ func tryColorizeJSON(text string, indent bool) string {
 		return ""
 	}
 	var buf bytes.Buffer
-	if err := formatter.Format(&buf, style, iterator); err != nil {
+	if err := formatter.Format(&buf, klensChromaStyle, iterator); err != nil {
 		return ""
 	}
 	return strings.TrimRight(buf.String(), "\n")
@@ -502,32 +541,19 @@ func (v LogViewer) View() string {
 		title = styles.Title.Render("Logs: ") + styles.Primary.Render(titlePods)
 	}
 
-	scrollStatus := styles.Primary.Render("  ● live")
-	if !v.autoScroll {
+	scrollStatus := styles.Success.Render("  ● live")
+	if v.autoScroll {
+		if !v.lastLineAt.IsZero() {
+			if since := time.Since(v.lastLineAt); since >= 30*time.Second {
+				scrollStatus += styles.Muted.Render(fmt.Sprintf(" · quiet %ds", int(since.Seconds())))
+			}
+		}
+	} else {
 		pct := 100
 		if v.viewport.TotalLineCount() > 0 {
 			pct = int(v.viewport.ScrollPercent() * 100)
 		}
-		scrollStatus = styles.Warning.Render(fmt.Sprintf("  ⏸ %d%%", pct))
-	}
-
-	lineCount := fmt.Sprintf("  %d lines", len(v.lines))
-	if len(v.tabGroups) > 1 && v.activeTabIdx < len(v.tabGroups) {
-		shown := 0
-		for _, l := range v.lines {
-			if l.Group == v.tabGroups[v.activeTabIdx] {
-				shown++
-			}
-		}
-		lineCount = fmt.Sprintf("  %d/%d lines", shown, len(v.lines))
-	} else if v.podFilter >= 0 && v.podFilter < len(v.pods) {
-		shown := 0
-		for _, l := range v.lines {
-			if l.Pod == v.pods[v.podFilter] {
-				shown++
-			}
-		}
-		lineCount = fmt.Sprintf("  %d/%d lines", shown, len(v.lines))
+		scrollStatus = styles.Muted.Render(fmt.Sprintf("  ⏸ %d%%", pct))
 	}
 
 	indentHint := ""
@@ -546,7 +572,7 @@ func (v LogViewer) View() string {
 				label = fmt.Sprintf(" %d:%s ", i+1, name[:tabW-5]) + "… "
 			}
 			if i == v.activeTabIdx {
-				tabs = append(tabs, styles.Warning.Bold(true).Render(label))
+				tabs = append(tabs, styles.Primary.Bold(true).Render(label))
 			} else {
 				tabs = append(tabs, styles.Muted.Render(label))
 			}
@@ -584,7 +610,7 @@ func (v LogViewer) View() string {
 	} else {
 		help = styles.Muted.Render("  ↑↓/jk scroll  / filter  ctrl+f search  n/N next/prev  1-9 solo pod  0 all  J indent  g top  G bottom  esc back")
 	}
-	header := title + scrollStatus + indentHint + "  " + styles.Muted.Render(lineCount) + tabBar + filterBar + searchBar + "\n" + help
+	header := title + scrollStatus + indentHint + "  " + styles.Muted.Render(v.lineCountStr) + tabBar + filterBar + searchBar + "\n" + help
 
-	return border.Width(v.width - 2).Height(v.height - 2).Render(header + "\n\n" + v.viewport.View())
+	return border.Width(max(1, v.width-2)).Height(max(1, v.height-2)).Render(header + "\n\n" + v.viewport.View())
 }

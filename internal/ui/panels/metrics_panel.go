@@ -29,15 +29,15 @@ type MetricsPanel struct {
 }
 
 func NewMetricsPanel(w, h int) MetricsPanel {
-	vp := viewport.New(w-4, h-8)
+	vp := viewport.New(max(1, w-4), max(1, h-8))
 	return MetricsPanel{viewport: vp, width: w, height: h}
 }
 
 func (m MetricsPanel) SetSize(w, h int) MetricsPanel {
 	m.width = w
 	m.height = h
-	m.viewport.Width = w - 4
-	m.viewport.Height = h - 8
+	m.viewport.Width = max(1, w-4)
+	m.viewport.Height = max(1, h-8)
 	return m
 }
 
@@ -83,7 +83,7 @@ func (m *MetricsPanel) rebuildContent() {
 			asciigraph.Width(chartW),
 			asciigraph.Caption(fmt.Sprintf("latest: %.1fm", m.metrics.CPULatest)),
 		)
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#00ADD8")).Render(graph))
+		sb.WriteString(lipgloss.NewStyle().Foreground(styles.ColorPrimary).Render(graph))
 	} else {
 		sb.WriteString(styles.Muted.Render("  Collecting samples…"))
 	}
@@ -104,7 +104,7 @@ func (m *MetricsPanel) rebuildContent() {
 			asciigraph.Width(chartW),
 			asciigraph.Caption(fmt.Sprintf("latest: %.1f MiB", m.metrics.MEMLatest/(1024*1024))),
 		)
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#4CAF50")).Render(graph))
+		sb.WriteString(lipgloss.NewStyle().Foreground(styles.ColorRunning).Render(graph))
 	} else {
 		sb.WriteString(styles.Muted.Render("  Collecting samples…"))
 	}
@@ -159,20 +159,19 @@ func resourceLimitsLine(usage, req, lim int64, unit string) string {
 		pct := usage * 100 / lim
 		pctLim = colorPct(pct)
 	}
-	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E"))
-	return muted.Render(fmt.Sprintf("  Req: %s  Lim: %s", reqStr, limStr)) +
-		"  (" + pctReq + muted.Render("% req") + " / " + pctLim + muted.Render("% lim") + ")"
+	return styles.Muted.Render(fmt.Sprintf("  Req: %s  Lim: %s", reqStr, limStr)) +
+		"  (" + pctReq + styles.Muted.Render("% req") + " / " + pctLim + styles.Muted.Render("% lim") + ")"
 }
 
 func colorPct(pct int64) string {
 	s := fmt.Sprintf("%d", pct)
 	switch {
 	case pct >= 90:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F44336")).Render(s)
+		return lipgloss.NewStyle().Foreground(styles.ColorFailed).Render(s)
 	case pct >= 70:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC107")).Render(s)
+		return lipgloss.NewStyle().Foreground(styles.ColorPending).Render(s)
 	default:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#9E9E9E")).Render(s)
+		return styles.Muted.Render(s)
 	}
 }
 
@@ -183,6 +182,6 @@ func (m MetricsPanel) View() string {
 	}
 	title := styles.Title.Render(fmt.Sprintf("Metrics: %s", m.name))
 	help := styles.Muted.Render("  ↑↓ scroll  esc back  (refreshes every 15s)")
-	return border.Width(m.width - 2).Height(m.height - 2).Render(
+	return border.Width(max(1, m.width-2)).Height(max(1, m.height-2)).Render(
 		title + "\n" + help + "\n\n" + m.viewport.View())
 }

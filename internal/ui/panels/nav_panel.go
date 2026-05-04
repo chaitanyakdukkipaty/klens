@@ -10,6 +10,14 @@ import (
 	"github.com/chaitanyak/klens/internal/ui/styles"
 )
 
+// navTitleBase, navCursorBase, navBodyBase are pre-built without Width so that
+// per-render calls only incur one copy (`.Width(w)`) instead of a full style chain.
+var (
+	navTitleBase  = lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true).PaddingLeft(1)
+	navCursorBase = lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true)
+	navBodyBase   = lipgloss.NewStyle().Foreground(styles.ColorBodyText)
+)
+
 // NavPanel is the left-side resource type navigator.
 type NavPanel struct {
 	width       int
@@ -134,21 +142,14 @@ func (n NavPanel) View() string {
 		border = styles.FocusedBorder
 	}
 
-	innerW := n.width - 2
-	innerH := n.height - 2
+	innerW := max(1, n.width-2)
+	innerH := max(1, n.height-2)
 
 	countInfo := ""
 	if n.filter != "" {
 		countInfo = styles.Muted.Render(fmt.Sprintf(" %d/%d", len(n.filtered), len(n.items)))
 	}
-	// PaddingLeft is included in Width (unlike MarginLeft), so the title
-	// renders to exactly innerW chars — no overflow into the border.
-	title := lipgloss.NewStyle().
-		Foreground(styles.Primary.GetForeground()).
-		Bold(true).
-		PaddingLeft(1).
-		Width(innerW).
-		Render("Resources") + countInfo
+	title := navTitleBase.Width(innerW).Render("Resources") + countInfo
 
 	var rows []string
 	rows = append(rows, title)
@@ -182,21 +183,13 @@ func (n NavPanel) View() string {
 
 		var row string
 		if i == n.cursor {
-			row = lipgloss.NewStyle().
-				Background(lipgloss.Color("#1E3A5F")).
-				Foreground(styles.Primary.GetForeground()).
-				Bold(true).
-				Width(innerW).
-				Render(" ▶ " + label)
+			row = navCursorBase.Width(innerW).Render(" ▶ " + label)
 		} else {
-			row = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#CCCCCC")).
-				Width(innerW).
-				Render("   " + label)
+			row = navBodyBase.Width(innerW).Render("   " + label)
 		}
 		rows = append(rows, row)
 	}
 
 	content := strings.Join(rows, "\n")
-	return border.Width(n.width - 2).Height(n.height - 2).Render(content)
+	return border.Width(max(1, n.width-2)).Height(max(1, n.height-2)).Render(content)
 }

@@ -8,6 +8,11 @@ import (
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 )
 
+var (
+	treeKindStyle = lipgloss.NewStyle().Foreground(appstyles.ColorPrimary).Bold(true)
+	treeNameStyle = lipgloss.NewStyle().Foreground(appstyles.ColorBodyText)
+)
+
 // RenderTree renders a TreeNode hierarchy using unicode box-drawing characters.
 func RenderTree(root *k8s.TreeNode) string {
 	var lines []string
@@ -23,12 +28,10 @@ func renderNode(node *k8s.TreeNode, prefix string, isLast bool, lines *[]string)
 		childPrefix = prefix + "   "
 	}
 
-	kindStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00ADD8")).Bold(true)
-	nameStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
 	statusStyle := appstyles.StatusStyle(node.Status)
 
-	label := kindStyle.Render(node.Kind) + " " +
-		nameStyle.Render(node.Name) + " " +
+	label := treeKindStyle.Render(node.Kind) + " " +
+		treeNameStyle.Render(node.Name) + " " +
 		statusStyle.Render("[" + node.Status + "]")
 
 	if prefix == "" {

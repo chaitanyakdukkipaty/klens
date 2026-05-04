@@ -56,12 +56,12 @@ type YAMLEditor struct {
 
 func NewYAMLEditor(w, h int) YAMLEditor {
 	ta := textarea.New()
-	ta.SetWidth(w - 4)
-	ta.SetHeight(h - 6)
+	ta.SetWidth(max(1, w-4))
+	ta.SetHeight(max(1, h-6))
 	ta.ShowLineNumbers = true
 	ta.Focus()
 
-	diffVP := viewport.New(w-4, h-8)
+	diffVP := viewport.New(max(1, w-4), max(1, h-8))
 	return YAMLEditor{
 		textarea: ta,
 		diffVP:   diffVP,
@@ -73,10 +73,10 @@ func NewYAMLEditor(w, h int) YAMLEditor {
 func (e YAMLEditor) SetSize(w, h int) YAMLEditor {
 	e.width = w
 	e.height = h
-	e.textarea.SetWidth(w - 4)
-	e.textarea.SetHeight(h - 6)
-	e.diffVP.Width = w - 4
-	e.diffVP.Height = h - 8
+	e.textarea.SetWidth(max(1, w-4))
+	e.textarea.SetHeight(max(1, h-6))
+	e.diffVP.Width = max(1, w-4)
+	e.diffVP.Height = max(1, h-8)
 	return e
 }
 
@@ -296,7 +296,7 @@ func (e YAMLEditor) View() string {
 	var body string
 	switch e.state {
 	case editorNormal:
-		modeBar := styles.Warning.Bold(true).Render(" NORMAL ")
+		modeBar := styles.Muted.Bold(true).Render(" NORMAL ")
 		hint := styles.Muted.Render("  hjkl move · w/b word · 0/$ line · gg/G top/bot · i/a/o insert · dd/D del · yy/p yank · ctrl+s preview")
 		body = title + "\n" + modeBar + hint + "\n\n" + e.textarea.View()
 	case editorInsert:
@@ -310,7 +310,7 @@ func (e YAMLEditor) View() string {
 		body = title + "\n" + styles.Primary.Render("  Applying…")
 	}
 
-	return border.Width(e.width - 2).Height(e.height - 2).Render(body)
+	return border.Width(max(1, e.width-2)).Height(max(1, e.height-2)).Render(body)
 }
 
 func (e YAMLEditor) applyCmd() tea.Cmd {

@@ -9,7 +9,6 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	lipgloss "github.com/charmbracelet/lipgloss"
@@ -50,8 +49,8 @@ func NewYAMLViewer(w, h int) YAMLViewer {
 func (v YAMLViewer) SetSize(w, h int) YAMLViewer {
 	v.width = w
 	v.height = h
-	v.viewport.Width = w - 2
-	v.viewport.Height = h - 4
+	v.viewport.Width = max(1, w-2)
+	v.viewport.Height = max(1, h-4)
 	return v
 }
 func (v YAMLViewer) SetFocused(f bool) YAMLViewer { v.focused = f; return v }
@@ -85,7 +84,7 @@ func (v YAMLViewer) View() string {
 	}
 	title := appstyles.Title.Render(fmt.Sprintf("YAML: %s/%s", v.kind, v.name))
 	help := appstyles.Muted.Render("  ↑↓/jk scroll  e edit  esc back")
-	return border.Width(v.width - 2).Height(v.height - 2).Render(
+	return border.Width(max(1, v.width-2)).Height(max(1, v.height-2)).Render(
 		title + "\n" + help + "\n\n" + v.viewport.View(),
 	)
 }
@@ -182,11 +181,6 @@ func highlightYAML(src string) string {
 	}
 	lexer = chroma.Coalesce(lexer)
 
-	style := styles.Get("dracula")
-	if style == nil {
-		style = styles.Fallback
-	}
-
 	formatter := formatters.Get("terminal256")
 	if formatter == nil {
 		formatter = formatters.Fallback
@@ -198,7 +192,7 @@ func highlightYAML(src string) string {
 	}
 
 	var buf bytes.Buffer
-	if err := formatter.Format(&buf, style, iterator); err != nil {
+	if err := formatter.Format(&buf, klensChromaStyle, iterator); err != nil {
 		return src
 	}
 	return buf.String()

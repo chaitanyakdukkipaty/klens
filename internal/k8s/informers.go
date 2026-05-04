@@ -75,6 +75,7 @@ type WatcherFactory struct {
 	dynamicClient  dynamic.Interface
 	dynamicFactory dynamicinformer.DynamicSharedInformerFactory
 	hrGVR          schema.GroupVersionResource
+	restCfg        *rest.Config // stored for async Helm GVR discovery in Start()
 	cancel         context.CancelFunc
 	msgCh          chan tea.Msg
 	started        bool
@@ -106,7 +107,8 @@ func NewWatcherFactory(cs *kubernetes.Clientset, cfg *rest.Config, namespace str
 		factory:        factory,
 		dynamicClient:  dc,
 		dynamicFactory: dynFactory,
-		hrGVR:          discoverHelmReleaseGVR(cfg),
+		hrGVR:          helmReleaseGVR, // will be overwritten by async discovery in Start()
+		restCfg:        cfg,
 		msgCh:          msgCh,
 		accessDenied:   make(map[string]struct{}),
 	}
@@ -116,7 +118,11 @@ func NewWatcherFactory(cs *kubernetes.Clientset, cfg *rest.Config, namespace str
 func (w *WatcherFactory) DynamicClient() dynamic.Interface { return w.dynamicClient }
 
 // HelmReleaseGVR returns the discovered GVR for HelmRelease on this cluster.
-func (w *WatcherFactory) HelmReleaseGVR() schema.GroupVersionResource { return w.hrGVR }
+func (w *WatcherFactory) HelmReleaseGVR() schema.GroupVersionResource {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.hrGVR
+}
 
 // watchErrHandler returns a WatchErrorHandler that silently tracks forbidden
 // errors and notifies the app once per kind instead of spamming klog.
@@ -227,14 +233,21 @@ func (w *WatcherFactory) Start() {
 
 	w.factory.Start(ctx.Done())
 
-	// HelmRelease CRD (FluxCD helm.toolkit.fluxcd.io/v2) — gracefully degrades if not installed.
-	if w.dynamicFactory != nil {
-		setup(w.dynamicFactory.ForResource(w.hrGVR).Informer(), "HelmRelease")
-		w.dynamicFactory.Start(ctx.Done())
-	}
-
-	// Wait for all caches to complete their initial LIST, then notify the app.
+	// Helm GVR discovery and dynamic informer setup run in the background so that
+	// namespace/context switches (which call NewWatcherFactory on the UI goroutine)
+	// are not blocked by the API-server round-trips in discoverHelmReleaseGVR.
 	go func() {
+		// Discover the correct HelmRelease GVR, then start the dynamic informer.
+		if w.dynamicFactory != nil {
+			gvr := discoverHelmReleaseGVR(w.restCfg)
+			w.mu.Lock()
+			w.hrGVR = gvr
+			w.mu.Unlock()
+			// SetWatchErrorHandler must be called before dynamicFactory.Start().
+			setup(w.dynamicFactory.ForResource(gvr).Informer(), "HelmRelease")
+			w.dynamicFactory.Start(ctx.Done())
+		}
+
 		w.factory.WaitForCacheSync(ctx.Done())
 		if w.dynamicFactory != nil {
 			w.dynamicFactory.WaitForCacheSync(ctx.Done())
@@ -447,7 +460,10 @@ func (w *WatcherFactory) ListHelmReleases(namespace string) []*unstructured.Unst
 	if w.dynamicFactory == nil {
 		return nil
 	}
-	objs := w.dynamicFactory.ForResource(w.hrGVR).Informer().GetStore().List()
+	w.mu.RLock()
+	gvr := w.hrGVR
+	w.mu.RUnlock()
+	objs := w.dynamicFactory.ForResource(gvr).Informer().GetStore().List()
 	out := make([]*unstructured.Unstructured, 0, len(objs))
 	for _, o := range objs {
 		u, ok := o.(*unstructured.Unstructured)

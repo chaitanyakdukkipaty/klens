@@ -67,6 +67,8 @@ func (d ConfirmDialog) View() string {
 	title := appstyles.Warning.Bold(true).Render(fmt.Sprintf("  %s %q?", d.action, d.resource))
 	hint := appstyles.Muted.Render("  [y] confirm  [any] cancel")
 	box := appstyles.DialogBox.Render(title + "\n" + hint)
-	return lipgloss.Place(60, 8, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(lipgloss.Color("#0D0D1A")))
+	w := lipgloss.Width(box) + 4
+	h := lipgloss.Height(box) + 2
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceBackground(appstyles.ColorAbyss))
 }

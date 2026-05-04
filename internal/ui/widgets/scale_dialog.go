@@ -17,14 +17,17 @@ type ScaleResult struct {
 	Confirmed bool
 }
 
+const scaleMax int32 = 100
+
 // ScaleDialog is a modal dialog for entering a replica count.
 type ScaleDialog struct {
-	visible   bool
-	kind      string
-	name      string
-	namespace string
-	current   int32
-	input     string
+	visible       bool
+	kind          string
+	name          string
+	namespace     string
+	current       int32
+	input         string
+	validationMsg string
 }
 
 func NewScaleDialog() ScaleDialog { return ScaleDialog{} }
@@ -53,6 +56,14 @@ func (d ScaleDialog) Update(msg tea.Msg) (ScaleDialog, tea.Cmd) {
 	case "enter":
 		var replicas int32
 		fmt.Sscanf(d.input, "%d", &replicas)
+		if replicas < 1 {
+			d.validationMsg = "minimum 1 replica"
+			return d, nil
+		}
+		if replicas > scaleMax {
+			d.validationMsg = fmt.Sprintf("maximum %d replicas", scaleMax)
+			return d, nil
+		}
 		d.visible = false
 		kind, name, ns := d.kind, d.name, d.namespace
 		return d, func() tea.Msg {
@@ -64,11 +75,13 @@ func (d ScaleDialog) Update(msg tea.Msg) (ScaleDialog, tea.Cmd) {
 	case "backspace":
 		if len(d.input) > 0 {
 			d.input = d.input[:len(d.input)-1]
+			d.validationMsg = ""
 		}
 	default:
 		k := keyMsg.String()
 		if len(k) == 1 && k >= "0" && k <= "9" && len(d.input) < 4 {
 			d.input += k
+			d.validationMsg = ""
 		}
 	}
 	return d, nil
@@ -81,8 +94,13 @@ func (d ScaleDialog) View() string {
 	title := appstyles.Warning.Bold(true).Render(fmt.Sprintf("  Scale %s/%s", d.kind, d.name))
 	current := appstyles.Muted.Render(fmt.Sprintf("  Current replicas: %d", d.current))
 	inputLine := appstyles.Primary.Render(fmt.Sprintf("  New replicas: %s█", d.input))
-	hint := appstyles.Muted.Render("  [0-9] enter count  [enter] confirm  [esc] cancel")
-	box := appstyles.DialogBox.Render(title + "\n" + current + "\n" + inputLine + "\n" + hint)
+	hint := appstyles.Muted.Render(fmt.Sprintf("  1–%d replicas  [enter] confirm  [esc] cancel", scaleMax))
+	body := title + "\n" + current + "\n" + inputLine + "\n"
+	if d.validationMsg != "" {
+		body += appstyles.Error.Render("  "+d.validationMsg) + "\n"
+	}
+	body += hint
+	box := appstyles.DialogBox.Render(body)
 	return lipgloss.Place(60, 10, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(lipgloss.Color("#0D0D1A")))
+		lipgloss.WithWhitespaceBackground(appstyles.ColorAbyss))
 }

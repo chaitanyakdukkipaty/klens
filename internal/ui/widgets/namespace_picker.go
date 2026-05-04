@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -28,10 +29,11 @@ type nsEntry struct {
 
 // NamespacePicker is a modal overlay for switching and managing namespaces.
 type NamespacePicker struct {
-	visible bool
-	entries []nsEntry
-	cursor  int
-	filter  string
+	visible     bool
+	entries     []nsEntry
+	cursor      int
+	filter      string
+	pendingSave string // non-empty when awaiting confirmation to save a new namespace
 }
 
 func NewNamespacePicker() NamespacePicker { return NamespacePicker{} }
@@ -105,6 +107,20 @@ func (p NamespacePicker) Update(msg tea.Msg) (NamespacePicker, tea.Cmd) {
 		return p, nil
 	}
 
+	// When awaiting save confirmation, only enter/esc are active.
+	if p.pendingSave != "" {
+		switch key.String() {
+		case "enter":
+			ns := p.pendingSave
+			p.visible = false
+			p.pendingSave = ""
+			return p, func() tea.Msg { return NamespacePickedMsg{Namespace: ns, Save: true} }
+		case "esc":
+			p.pendingSave = ""
+		}
+		return p, nil
+	}
+
 	switch key.String() {
 	case "esc":
 		p.visible = false
@@ -153,10 +169,9 @@ func (p NamespacePicker) Update(msg tea.Msg) (NamespacePicker, tea.Cmd) {
 			p.visible = false
 			return p, func() tea.Msg { return NamespacePickedMsg{Namespace: ns} }
 		}
-		// No matches — the typed text is a new namespace to add.
+		// No matches — enter confirm state before saving the new namespace.
 		if ns := strings.TrimSpace(p.filter); ns != "" {
-			p.visible = false
-			return p, func() tea.Msg { return NamespacePickedMsg{Namespace: ns, Save: true} }
+			p.pendingSave = ns
 		}
 
 	default:
@@ -231,33 +246,38 @@ func (p NamespacePicker) View() string {
 
 	sb.WriteString(appstyles.Muted.Render(strings.Repeat("─", pickerWidth-2)) + "\n")
 
-	// Filter / add input
-	filterDisplay := p.filter
-	if filterDisplay == "" {
-		filterDisplay = appstyles.Muted.Render("type to filter or add new…")
-	}
-	sb.WriteString(" > " + filterDisplay + "▌\n")
-
-	// Hint
-	if len(filtered) > 0 {
-		hint := " [↑↓] nav  [enter] switch"
-		if cursor < len(filtered) && filtered[cursor].saved {
-			hint += "  [ctrl+d] remove saved"
-		}
-		hint += "  [esc] cancel"
-		sb.WriteString(appstyles.Muted.Render(hint))
+	if p.pendingSave != "" {
+		// Confirm state: user is about to save a new namespace entry.
+		sb.WriteString(appstyles.Warning.Bold(true).Render(fmt.Sprintf(" Save %q?", p.pendingSave)) + "\n")
+		sb.WriteString(appstyles.Muted.Render(" [enter] confirm  [esc] back"))
 	} else {
-		sb.WriteString(appstyles.Muted.Render(" [enter] add & switch  [esc] cancel"))
+		// Normal state: filter / add input + navigation hints.
+		filterDisplay := p.filter
+		if filterDisplay == "" {
+			filterDisplay = appstyles.Muted.Render("type to filter or add new…")
+		}
+		sb.WriteString(" > " + filterDisplay + "▌\n")
+
+		if len(filtered) > 0 {
+			hint := " [↑↓] nav  [enter] switch"
+			if cursor < len(filtered) && filtered[cursor].saved {
+				hint += "  [ctrl+d] remove"
+			}
+			hint += "  [esc] cancel"
+			sb.WriteString(appstyles.Muted.Render(hint))
+		} else {
+			sb.WriteString(appstyles.Muted.Render(" [enter] add & switch  [esc] cancel"))
+		}
 	}
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#00ADD8")).
+		BorderForeground(appstyles.ColorPrimary).
 		Padding(0, 1).
 		Width(pickerWidth).
 		Render(sb.String())
 
 	return lipgloss.Place(pickerWidth+8, pickerMaxItems+10,
 		lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(lipgloss.Color("#0D0D1A")))
+		lipgloss.WithWhitespaceBackground(appstyles.ColorAbyss))
 }

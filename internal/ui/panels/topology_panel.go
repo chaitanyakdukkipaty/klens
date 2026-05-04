@@ -21,15 +21,15 @@ type TopologyPanel struct {
 }
 
 func NewTopologyPanel(w, h int) TopologyPanel {
-	vp := viewport.New(w-4, h-6)
+	vp := viewport.New(max(1, w-4), max(1, h-6))
 	return TopologyPanel{viewport: vp, width: w, height: h}
 }
 
 func (t TopologyPanel) SetSize(w, h int) TopologyPanel {
 	t.width = w
 	t.height = h
-	t.viewport.Width = w - 4
-	t.viewport.Height = h - 6
+	t.viewport.Width = max(1, w-4)
+	t.viewport.Height = max(1, h-6)
 	return t
 }
 
@@ -50,6 +50,14 @@ func (t TopologyPanel) SetTree(kind, name string, root *k8s.TreeNode) TopologyPa
 func (t TopologyPanel) Update(msg tea.Msg) (TopologyPanel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		switch msg.String() {
+		case "g":
+			t.viewport.GotoTop()
+			return t, nil
+		case "G":
+			t.viewport.GotoBottom()
+			return t, nil
+		}
 		var cmd tea.Cmd
 		t.viewport, cmd = t.viewport.Update(msg)
 		return t, cmd
@@ -63,7 +71,13 @@ func (t TopologyPanel) View() string {
 		border = styles.FocusedBorder
 	}
 	title := styles.Title.Render(fmt.Sprintf("Topology: %s/%s", t.kind, t.name))
-	help := styles.Muted.Render("  ↑↓ scroll  esc back")
-	return border.Width(t.width - 2).Height(t.height - 2).Render(
+
+	scrollPct := ""
+	if t.viewport.TotalLineCount() > t.viewport.Height {
+		scrollPct = styles.Muted.Render(fmt.Sprintf("  %d%%", int(t.viewport.ScrollPercent()*100)))
+	}
+	help := styles.Muted.Render("  ↑↓/jk scroll  g top  G bottom  esc back") + scrollPct
+
+	return border.Width(max(1, t.width-2)).Height(max(1, t.height-2)).Render(
 		title + "\n" + help + "\n\n" + t.viewport.View())
 }

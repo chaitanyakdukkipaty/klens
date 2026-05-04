@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	addLine    = lipgloss.NewStyle().Foreground(lipgloss.Color("#4CAF50"))
-	removeLine = lipgloss.NewStyle().Foreground(lipgloss.Color("#F44336"))
-	ctxLine    = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
-	hunkHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("#64B5F6")).Bold(true)
+	addLine    = lipgloss.NewStyle().Foreground(appstyles.ColorRunning)
+	removeLine = lipgloss.NewStyle().Foreground(appstyles.ColorFailed)
+	ctxLine    = lipgloss.NewStyle().Foreground(appstyles.ColorDiffContext)
+	hunkHeader = lipgloss.NewStyle().Foreground(appstyles.ColorSucceeded).Bold(true)
 )
 
 // DiffView renders a colored unified diff between original and modified YAML.

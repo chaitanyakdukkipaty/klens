@@ -83,6 +83,16 @@ type Model struct {
 	// readOnly is the effective readonly state: readOnlyFlag || config.ReadOnly.
 	// When true, all cluster-mutating operations are blocked.
 	readOnly bool
+
+	// syncing is true between a namespace/context switch and the first CacheSyncedMsg,
+	// preventing stale informer data from populating the table during the transition.
+	syncing bool
+
+	// rollback stash: saved after a successful YAML apply so ctrl+z can revert.
+	rollbackYAML string
+	rollbackKind string
+	rollbackName string
+	rollbackNS   string
 }
 
 // internal messages
@@ -191,6 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clusterNamespaces = msg.clusterNamespaces
 		m.appConfig = msg.appConfig
 		m.readOnly = m.readOnlyFlag || msg.appConfig.ReadOnly
+		m.syncing = true
 		m.header = m.header.SetCluster(msg.ctx).SetNamespace(msg.ns).SetVersion(msg.version).SetReadOnly(m.readOnly)
 		m.nav = m.nav.SetFocused(true)
 		m.table = m.table.SetKind(m.nav.ActiveKind()).SetSyncing(true)
@@ -202,6 +213,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case k8sops.CacheSyncedMsg:
+		m.syncing = false
 		m.table = m.table.SetSyncing(false)
 		return m, tea.Batch(k8sops.WatchCmd(m.msgCh), m.buildTableCmd())
 
@@ -307,8 +319,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case panels.YAMLAppliedMsg:
+		m.rollbackYAML = m.yamlEdit.Original()
+		m.rollbackKind = msg.Kind
+		m.rollbackName = msg.Name
+		m.rollbackNS = msg.Namespace
 		m.mode = ModeYAML
-		m.statusBar = m.statusBar.SetMessage(fmt.Sprintf("Applied %s/%s", msg.Kind, msg.Name))
+		m.statusBar = m.statusBar.SetMessage(fmt.Sprintf("Applied %s/%s — ctrl+z to rollback", msg.Kind, msg.Name))
 		return m, m.buildTableCmd()
 
 	case panels.YAMLApplyErrMsg:
@@ -383,7 +399,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 	// Global keys work in any mode
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "ctrl+c":
+		m.stopAll()
+		return m, tea.Quit
+	case "q":
+		if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
+			var cmd tea.Cmd
+			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
+			return m, cmd
+		}
+		if m.mode == ModeLogs && m.logView.IsCapturingInput() {
+			var cmd tea.Cmd
+			m.logView, cmd = m.logView.Update(msg)
+			return m, cmd
+		}
+		if m.table.FilterActive() {
+			var cmd tea.Cmd
+			m.table, cmd = m.table.Update(msg)
+			return m, cmd
+		}
 		m.stopAll()
 		return m, tea.Quit
 	case "esc":
@@ -751,6 +785,18 @@ func (m Model) handleYAMLViewKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.yamlEdit = m.yamlEdit.LoadYAML(kind, name, ns, m.yamlView.RawYAML())
 		m.mode = ModeEditor
 		return m, nil
+	case "ctrl+z":
+		if m.readOnly || m.rollbackYAML == "" {
+			return m, nil
+		}
+		kind, name, ns := m.yamlView.ResourceInfo()
+		if m.rollbackKind != kind || m.rollbackName != name || m.rollbackNS != ns {
+			return m, nil
+		}
+		m.yamlEdit = m.yamlEdit.LoadYAML(kind, name, ns, m.rollbackYAML)
+		m.rollbackYAML = ""
+		m.mode = ModeEditor
+		return m, nil
 	}
 	var cmd tea.Cmd
 	m.yamlView, cmd = m.yamlView.Update(msg)
@@ -826,6 +872,7 @@ func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
 	wf := k8sops.NewWatcherFactory(cs, nsCfg, ns, m.msgCh)
 	wf.Start()
 	m.watcher = wf
+	m.syncing = true
 	m.table = m.table.SetSyncing(true)
 	return m, tea.Batch(
 		k8sops.WatchCmd(m.msgCh),
@@ -868,6 +915,7 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 	wf := k8sops.NewWatcherFactory(cs, restCfg, ns, m.msgCh)
 	wf.Start()
 	m.watcher = wf
+	m.syncing = true
 	m.table = m.table.SetSyncing(true)
 	return m, tea.Batch(
 		k8sops.WatchCmd(m.msgCh),
@@ -974,6 +1022,10 @@ func currentReplicas(row *k8sops.ResourceRow) int32 {
 
 // View renders the full TUI.
 func (m Model) View() string {
+	if m.layout.TooSmall() {
+		return renderTooSmall(m.layout)
+	}
+
 	if m.loading {
 		return renderLoading(m.layout, m.reconnecting)
 	}
@@ -1023,6 +1075,13 @@ func (m Model) contentView() string {
 	default:
 		return m.table.View()
 	}
+}
+
+func renderTooSmall(l layout.Layout) string {
+	w, h := l.TermSize()
+	msg := fmt.Sprintf("  Terminal too small: %d×%d  (need %d×%d)",
+		w, h, layout.MinTermWidth, layout.MinTermHeight)
+	return styles.Warning.Bold(true).Render(msg) + strings.Repeat("\n", max(0, h-1))
 }
 
 func renderLoading(l layout.Layout, reconnecting bool) string {

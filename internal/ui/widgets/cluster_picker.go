@@ -195,12 +195,12 @@ func (p ClusterPicker) View() string {
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#00ADD8")).
+		BorderForeground(appstyles.ColorPrimary).
 		Padding(0, 1).
 		Width(clusterPickerWidth).
 		Render(sb.String())
 
 	return lipgloss.Place(clusterPickerWidth+8, clusterPickerMaxItems+10,
 		lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(lipgloss.Color("#0D0D1A")))
+		lipgloss.WithWhitespaceBackground(appstyles.ColorAbyss))
 }

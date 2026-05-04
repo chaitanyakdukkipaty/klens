@@ -16,7 +16,14 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+)
+
+var (
+	tableRowCursorBase = lipgloss.NewStyle().Background(styles.ColorSelection).Foreground(styles.ColorWhite)
+	tableRowBase       = lipgloss.NewStyle()
+	pctFailedStyle     = lipgloss.NewStyle().Foreground(styles.ColorFailed)
+	pctPendingStyle    = lipgloss.NewStyle().Foreground(styles.ColorPending)
 )
 
 // ContentMode controls what is shown in the content panel.
@@ -211,8 +218,8 @@ func (t ResourceTable) View() string {
 	if t.focused {
 		border = styles.FocusedBorder
 	}
-	innerW := t.width - 2
-	innerH := t.height - 2
+	innerW := max(1, t.width-2)
+	innerH := max(1, t.height-2)
 
 	desc, ok := k8sres.Resolve(t.kind)
 	if !ok {
@@ -239,7 +246,8 @@ func (t ResourceTable) View() string {
 	}
 
 	// Header
-	header := buildHeader(desc, innerW)
+	colWidths := computeColWidths(desc.Columns, innerW)
+	header := buildHeader(desc, colWidths)
 
 	// Rows
 	visibleRows := innerH - 3 // title + header + optional filter
@@ -258,7 +266,7 @@ func (t ResourceTable) View() string {
 		sel := t.selected[row.Name]
 		isCursor := i == t.cursor
 
-		line := buildRow(row, desc, innerW, sel, isCursor)
+		line := buildRow(row, desc, innerW, colWidths, sel, isCursor)
 		rowLines = append(rowLines, line)
 	}
 
@@ -274,21 +282,33 @@ func (t ResourceTable) View() string {
 	return border.Width(innerW).Height(innerH).Render(content)
 }
 
-func buildHeader(desc k8sres.ResourceDescriptor, width int) string {
+func computeColWidths(cols []k8sres.Column, width int) []int {
+	if len(cols) == 0 {
+		return nil
+	}
+	maxW := width / len(cols)
+	widths := make([]int, len(cols))
+	for i, c := range cols {
+		if c.Width > maxW {
+			widths[i] = maxW
+		} else {
+			widths[i] = c.Width
+		}
+	}
+	return widths
+}
+
+func buildHeader(desc k8sres.ResourceDescriptor, colWidths []int) string {
 	cols := desc.Columns
 	var parts []string
-	for _, c := range cols {
-		w := c.Width
-		if w > width/len(cols) {
-			w = width / len(cols)
-		}
-		parts = append(parts, padOrTrunc(c.Header, w))
+	for i, c := range cols {
+		parts = append(parts, padOrTrunc(c.Header, colWidths[i]))
 	}
 	line := strings.Join(parts, " ")
 	return styles.TableHeader.Render(line)
 }
 
-func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, selected, cursor bool) string {
+func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor bool) string {
 	prefix := "  "
 	if selected {
 		prefix = "✓ "
@@ -303,11 +323,8 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 	}
 
 	var parts []string
-	for i, c := range cols {
-		w := c.Width
-		if w > width/len(cols) {
-			w = width / len(cols)
-		}
+	for i := range cols {
+		w := colWidths[i]
 		val := ""
 		if i < len(values) {
 			val = values[i]
@@ -321,13 +338,9 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 	line := prefix + strings.Join(parts, " ")
 
 	if cursor {
-		return lipgloss.NewStyle().
-			Background(lipgloss.Color("#1E3A5F")).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Width(width).
-			Render(line)
+		return tableRowCursorBase.Width(width).Render(line)
 	}
-	return lipgloss.NewStyle().Width(width).Render(line)
+	return tableRowBase.Width(width).Render(line)
 }
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -456,9 +469,9 @@ func fmtPctColored(num, denom int64) string {
 	s := fmt.Sprintf("%d", pct)
 	switch {
 	case pct >= 90:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F44336")).Render(s)
+		return pctFailedStyle.Render(s)
 	case pct >= 70:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC107")).Render(s)
+		return pctPendingStyle.Render(s)
 	default:
 		return s
 	}
