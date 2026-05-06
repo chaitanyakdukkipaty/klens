@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/chaitanyak/klens/internal/cluster"
 	appcfg "github.com/chaitanyak/klens/internal/config"
 	k8sops "github.com/chaitanyak/klens/internal/k8s"
@@ -58,9 +58,16 @@ type Model struct {
 	scaleDialog     widgets.ScaleDialog
 	namespacePicker widgets.NamespacePicker
 	clusterPicker   widgets.ClusterPicker
+	contextMenu     widgets.ContextMenu
 	statusBar       panels.StatusBar
 	focus           FocusTarget
 	mode            ContentMode
+
+	// fullScreen, when true, hides header / nav / status and renders the
+	// active content panel using the entire terminal. Toggled by `F` in
+	// ModeYAML / ModeEditor / ModeLogs / ModeTopology / ModeMetrics. Reset to
+	// false whenever the user returns to ModeTable.
+	fullScreen bool
 
 	// Pending operation waiting for confirm dialog
 	pendingOp pendingOpData
@@ -114,8 +121,17 @@ type errMsg struct {
 
 type refreshMsg struct{}
 
+type clearStatusMsg struct{}
+
 // switchNamespaceMsg triggers a watcher restart for the new namespace.
 type switchNamespaceMsg struct{ namespace string }
+
+func clearStatusAfterDelay(d time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(d)
+		return clearStatusMsg{}
+	}
+}
 
 // New creates the initial app model. readOnly mirrors the --readonly CLI flag;
 // the effective readonly state may also be set by the persisted config.
@@ -135,6 +151,7 @@ func New(readOnly bool) Model {
 		scaleDialog:     widgets.NewScaleDialog(),
 		namespacePicker: widgets.NewNamespacePicker(),
 		clusterPicker:   widgets.NewClusterPicker(),
+		contextMenu:     widgets.NewContextMenu(),
 		statusBar:       panels.NewStatusBar(80),
 		focus:           FocusNav,
 		mode:            ModeTable,
@@ -155,7 +172,7 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Namespace picker intercepts key events when visible (modal).
 	if m.namespacePicker.IsVisible() {
-		if _, ok := msg.(tea.KeyMsg); ok {
+		if _, ok := msg.(tea.KeyPressMsg); ok {
 			var cmd tea.Cmd
 			m.namespacePicker, cmd = m.namespacePicker.Update(msg)
 			return m, cmd
@@ -164,7 +181,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Cluster picker intercepts key events when visible (modal).
 	if m.clusterPicker.IsVisible() {
-		if _, ok := msg.(tea.KeyMsg); ok {
+		if _, ok := msg.(tea.KeyPressMsg); ok {
 			var cmd tea.Cmd
 			m.clusterPicker, cmd = m.clusterPicker.Update(msg)
 			return m, cmd
@@ -185,6 +202,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Context menu intercepts all input when visible (modal).
+	if m.contextMenu.IsVisible() {
+		var cmd tea.Cmd
+		m.contextMenu, cmd = m.contextMenu.Update(msg)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
@@ -195,6 +219,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clusterReadyMsg:
 		m.loading = false
 		m.reconnecting = false
+		m.statusMsg = ""
+		m.statusBar = m.statusBar.SetMessage("")
 		m.clusterMgr = msg.mgr
 		m.watcher = msg.watcher
 		m.namespace = msg.ns
@@ -339,24 +365,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusBar = m.statusBar.SetMessage(fmt.Sprintf("%s failed: %v", msg.Operation, msg.Err))
 		}
 		m.mode = ModeTable
+		m.fullScreen = false
 		return m, m.buildTableCmd()
 
 	case k8sops.AttachFinishedMsg:
 		if msg.Err != nil {
 			m.statusMsg = fmt.Sprintf("attach %s: %v", msg.Pod, msg.Err)
-		} else {
-			m.statusMsg = fmt.Sprintf("attach session ended: %s", msg.Pod)
+			m.statusBar = m.statusBar.SetMessage(m.statusMsg)
+			return m, nil
 		}
+		m.statusMsg = fmt.Sprintf("attach session ended: %s", msg.Pod)
 		m.statusBar = m.statusBar.SetMessage(m.statusMsg)
-		return m, nil
+		return m, clearStatusAfterDelay(5 * time.Second)
 
 	case k8sops.TmuxWindowOpenedMsg:
 		if msg.Err != nil {
 			m.statusBar = m.statusBar.SetMessage("attach: " + msg.Err.Error())
-		} else {
-			m.statusMsg = fmt.Sprintf("attached to %s", msg.Session.Pod)
-			m.statusBar = m.statusBar.SetMessage(m.statusMsg)
+			return m, nil
 		}
+		m.statusMsg = fmt.Sprintf("attached to %s", msg.Session.Pod)
+		m.statusBar = m.statusBar.SetMessage(m.statusMsg)
+		return m, clearStatusAfterDelay(5 * time.Second)
+
+	case clearStatusMsg:
+		m.statusMsg = ""
+		m.statusBar = m.statusBar.SetMessage("")
 		return m, nil
 
 	case widgets.ConfirmResult:
@@ -376,11 +409,158 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, k8sops.ScaleCmd(cs, msg.Kind, msg.Name, msg.Namespace, msg.Replicas)
 
-	case tea.KeyMsg:
+	case widgets.ContextMenuPickedMsg:
+		m.contextMenu = m.contextMenu.Hide()
+		return m.dispatchTableAction(msg.Action)
+
+	case widgets.ContextMenuCancelMsg:
+		m.contextMenu = m.contextMenu.Hide()
+		return m, nil
+
+	case tea.PasteMsg:
+		// Bracketed paste — route to whichever input is currently capturing.
+		switch m.mode {
+		case ModeLogs:
+			var cmd tea.Cmd
+			m.logView, cmd = m.logView.Update(msg)
+			return m, cmd
+		case ModeEditor:
+			var cmd tea.Cmd
+			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
+			return m, cmd
+		case ModeTable:
+			if m.focus == FocusNav && m.nav.FilterActive() {
+				var cmd tea.Cmd
+				m.nav, cmd = m.nav.Update(msg)
+				return m, cmd
+			}
+			if m.table.FilterActive() {
+				var cmd tea.Cmd
+				m.table, cmd = m.table.Update(msg)
+				return m, cmd
+			}
+		}
+		return m, nil
+
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
 	case tea.MouseMsg:
+		// Surface raw mouse details when KLENS_DEBUG_MOUSE is set so terminal
+		// click delivery (or lack thereof) can be diagnosed in the status bar.
+		if os.Getenv("KLENS_DEBUG_MOUSE") != "" {
+			if click, ok := msg.(tea.MouseClickMsg); ok {
+				mp := click.Mouse()
+				m.statusBar = m.statusBar.SetMessage(fmt.Sprintf(
+					"mouse click: button=%d (%s) X=%d Y=%d", mp.Button, mp.Button, mp.X, mp.Y))
+			}
+		}
+		// Click handling: nav clicks work in every mode (clicking a nav item
+		// while viewing logs / yaml / etc. escapes back to the table). Content
+		// clicks are only interpreted as row selection in ModeTable.
+		if click, ok := msg.(tea.MouseClickMsg); ok {
+			mouse := click.Mouse()
+			_, termH := m.layout.TermSize()
+			// In fullscreen the nav panel is hidden; clicks in its old X-band must
+			// not be misrouted to nav (which would force-exit fullscreen). The
+			// content panel fills the terminal — let the click reach the panel's
+			// own Update at the bottom of this block, which handles tab/stripe
+			// selection (logs) or wheel-equivalent gestures.
+			if !m.fullScreen && mouse.Y > 0 && mouse.Y < termH-1 {
+				navW := m.layout.Nav().Width
+				innerY := mouse.Y - 2 // header (1) + panel border top (1)
+				if mouse.X < navW {
+					// Nav click. If an item was clicked, select it; if we were
+					// in a non-table mode, return to the table view.
+					prevKind := m.nav.ActiveKind()
+					var newKind string
+					m.nav, newKind = m.nav.HandleClickAt(innerY)
+					switchedMode := m.mode != ModeTable
+					if switchedMode {
+						if m.mode == ModeLogs && m.logStreamer != nil {
+							m.logStreamer.Stop()
+							m.logStreamer = nil
+						}
+						m.mode = ModeTable
+						m.fullScreen = false
+					}
+					if newKind == "" {
+						if m.focus != FocusNav {
+							m.focus = FocusNav
+							m.nav = m.nav.SetFocused(true)
+							m.table = m.table.SetFocused(false).ClearSelection()
+						}
+						if switchedMode {
+							return m, m.buildTableCmd()
+						}
+						return m, nil
+					}
+					m.focus = FocusContent
+					m.nav = m.nav.SetFocused(false)
+					m.table = m.table.SetFocused(true)
+					if newKind != prevKind {
+						m.table = m.table.SetKind(newKind)
+						m.setStatusBarKind(newKind)
+						return m, m.buildTableCmd()
+					}
+					if switchedMode {
+						return m, m.buildTableCmd()
+					}
+					return m, nil
+				}
+				// Content area click. Only the table interprets these as row
+				// selection; in other modes fall through to the panel's own
+				// mouse handling (scroll etc.).
+				if m.mode == ModeTable {
+					if m.focus != FocusContent {
+						m.focus = FocusContent
+						m.nav = m.nav.SetFocused(false)
+						m.table = m.table.SetFocused(true)
+					}
+					switch click.Button {
+					case tea.MouseLeft:
+						m.table, _ = m.table.HandleClickAt(innerY, true)
+						return m, nil
+					case tea.MouseRight:
+						var hit bool
+						m.table, hit = m.table.HandleClickAt(innerY, false)
+						if hit {
+							m = m.openContextMenu()
+						}
+						return m, nil
+					}
+				}
+			}
+			// Logs panel click routing: switch tabs/stripes by clicking on them.
+			// Origin is (navW, 1) in normal layout; (0, 0) in fullscreen.
+			if click.Button == tea.MouseLeft && m.mode == ModeLogs {
+				var ox, oy int
+				if !m.fullScreen {
+					ox = m.layout.Nav().Width
+					oy = 1
+				}
+				localX := mouse.X - ox
+				localY := mouse.Y - oy
+				var hit bool
+				m.logView, hit = m.logView.HandleClickAt(localX, localY)
+				if hit {
+					if m.focus != FocusContent {
+						m.focus = FocusContent
+						m.nav = m.nav.SetFocused(false)
+					}
+					return m, nil
+				}
+			}
+		}
 		switch m.mode {
+		case ModeTable:
+			var cmd tea.Cmd
+			if m.focus == FocusContent {
+				m.table, cmd = m.table.Update(msg)
+			} else {
+				m.nav, cmd = m.nav.Update(msg)
+			}
+			return m, cmd
 		case ModeLogs:
 			var cmd tea.Cmd
 			m.logView, cmd = m.logView.Update(msg)
@@ -407,7 +587,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// When nav filter input is open, route all keys to nav handler.
 	if m.focus == FocusNav && m.nav.FilterActive() {
 		prev := m.nav.ActiveKind()
@@ -423,9 +603,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 
 	// Global keys work in any mode
 	switch msg.String() {
-	case "ctrl+c":
-		m.stopAll()
-		return m, tea.Quit
+	case "F":
+		switch m.mode {
+		case ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics:
+			// In editor Insert mode F is literal text, not a toggle.
+			if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
+				break
+			}
+			m.fullScreen = !m.fullScreen
+			m = m.resizePanels()
+			return m, nil
+		}
 	case "q":
 		if m.mode == ModeEditor {
 			var cmd tea.Cmd
@@ -446,6 +634,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		// In the YAML editor's Insert mode, ESC switches to Normal — don't exit to table.
+		// (Handled before fullScreen so insert→normal transition fires before fullScreen exits.)
 		if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
 			var cmd tea.Cmd
 			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
@@ -457,13 +646,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			m.table, cmd = m.table.Update(msg)
 			return m, cmd
 		}
-		// Peel log viewer state one layer before exiting: cancel input → clear search → clear filter.
+		// Peel log viewer state (filter input, search, podFilter, split layout)
+		// BEFORE peeling fullscreen — otherwise an open filter input would be
+		// destroyed by an exit-fullscreen we didn't want.
 		if m.mode == ModeLogs && m.logView.HasActiveState() {
 			m.logView = m.logView.HandleEsc()
 			return m, nil
 		}
+		// Peel fullscreen if active — return to normal layout, stay in mode.
+		if m.fullScreen {
+			m.fullScreen = false
+			m = m.resizePanels()
+			return m, nil
+		}
 		if m.mode != ModeTable {
 			m.mode = ModeTable
+			m.fullScreen = false
 			if m.logStreamer != nil {
 				m.logStreamer.Stop()
 				m.logStreamer = nil
@@ -505,6 +703,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.loading = true
 		m.reconnecting = true
 		m.mode = ModeTable
+		m.fullScreen = false
 		return m, m.connectCmd()
 	}
 
@@ -535,6 +734,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.mode == ModeLogs {
 		var cmd tea.Cmd
 		m.logView, cmd = m.logView.Update(msg)
+		if s := m.logView.ConsumeStatusMsg(); s != "" {
+			m.statusBar = m.statusBar.SetMessage(s)
+		}
 		return m, cmd
 	}
 
@@ -593,7 +795,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) handleTableKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
+func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// When filter input is open, all keys go to the table's filter handler.
 	if m.table.FilterActive() {
 		var cmd tea.Cmd
@@ -602,6 +804,14 @@ func (m Model) handleTableKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "enter":
+		// First press in nav: shift focus to content. Second press while
+		// already in content (with a selected row) opens the context menu.
+		if m.focus == FocusContent {
+			m2 := m.openContextMenu()
+			if m2.contextMenu.IsVisible() {
+				return m2, nil
+			}
+		}
 		m.focus = FocusContent
 		m.nav = m.nav.SetFocused(false)
 		m.table = m.table.SetFocused(true)
@@ -612,185 +822,26 @@ func (m Model) handleTableKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.table = m.table.SetFocused(false).ClearSelection()
 		return m, nil
 	case "y":
-		row := m.table.SelectedRow()
-		if row != nil {
-			if m.nav.ActiveKind() == "HelmRelease" {
-				if u, ok := row.Raw.(*unstructuredpkg.Unstructured); ok {
-					return m, panels.FetchHelmReleaseYAMLCmd(u)
-				}
-			} else if m.clusterMgr != nil {
-				cs, _ := m.clusterMgr.ActiveClientset()
-				if cs != nil {
-					return m, panels.FetchYAMLCmd(cs, m.nav.ActiveKind(), row.Name, row.Namespace)
-				}
-			}
-		}
+		return m.actionViewYAML()
 	case "e":
-		if m.readOnly {
-			m.statusBar = m.statusBar.SetMessage("read-only mode – use 'y' to view YAML")
-			return m, nil
-		}
-		row := m.table.SelectedRow()
-		if row != nil {
-			if m.nav.ActiveKind() == "HelmRelease" {
-				if u, ok := row.Raw.(*unstructuredpkg.Unstructured); ok {
-					return m, panels.FetchHelmReleaseYAMLCmd(u)
-				}
-			} else if m.clusterMgr != nil {
-				cs, _ := m.clusterMgr.ActiveClientset()
-				if cs != nil {
-					return m, panels.FetchYAMLCmd(cs, m.nav.ActiveKind(), row.Name, row.Namespace)
-				}
-			}
-		}
+		return m.actionEditYAML()
 	case "l":
-		kind := m.nav.ActiveKind()
-		selectedNames := m.table.SelectedPods()
-		var groups []k8sops.LogGroup
-		if m.watcher != nil {
-			for _, name := range selectedNames {
-				pods := k8sops.ResolvePodNames(kind, name, m.namespace, m.watcher)
-				if len(pods) > 0 {
-					groups = append(groups, k8sops.LogGroup{Name: name, Pods: pods})
-				}
-			}
-		} else {
-			for _, name := range selectedNames {
-				groups = append(groups, k8sops.LogGroup{Name: name, Pods: []string{name}})
-			}
-		}
-		if len(groups) > 0 && m.clusterMgr != nil {
-			cs, _ := m.clusterMgr.ActiveClientset()
-			if cs != nil {
-				if m.logStreamer != nil {
-					m.logStreamer.Stop()
-				}
-				streamer := k8sops.NewLogStreamer(cs, m.namespace)
-				streamer.StartGrouped(groups)
-				m.logStreamer = streamer
-				m.logView = m.logView.SetPodGroups(groups)
-				m.mode = ModeLogs
-				m.focus = FocusContent
-				return m, streamer.ReadCmd()
-			}
-		}
+		return m.actionLogs()
 	case "t":
-		row := m.table.SelectedRow()
-		if row != nil && m.watcher != nil {
-			tree := m.buildTopology(m.nav.ActiveKind(), row.Name)
-			m.topology = m.topology.SetTree(m.nav.ActiveKind(), row.Name, tree)
-			m.mode = ModeTopology
-			m.focus = FocusContent
-		}
+		return m.actionTopology()
 	case "m":
-		row := m.table.SelectedRow()
-		if row != nil {
-			key := row.Namespace + "/" + row.Name
-			rm := m.metricsData.Pods[key]
-			m.metrics = m.metrics.SetResource(row.Name, row.Namespace, rm)
-			if m.watcher != nil {
-				for _, pod := range m.watcher.ListPods(row.Namespace) {
-					if pod.Name == row.Name {
-						cpuReqM, cpuLimM, memReqB, memLimB := panels.PodResourceTotals(pod)
-						m.metrics = m.metrics.SetLimits(cpuReqM, cpuLimM, memReqB, memLimB)
-						break
-					}
-				}
-			}
-			m.mode = ModeMetrics
-			m.focus = FocusContent
-		}
+		return m.actionMetrics()
 	case "d":
-		if m.readOnly {
-			m.statusBar = m.statusBar.SetMessage("read-only mode")
-			return m, nil
-		}
-		kind := m.nav.ActiveKind()
-		rows := m.table.SelectedRows()
-		if len(rows) > 0 {
-			var targets []deleteTarget
-			for _, row := range rows {
-				targets = append(targets, deleteTarget{name: row.Name, namespace: row.Namespace})
-			}
-			var action, resource string
-			if len(targets) == 1 {
-				action, resource = "Delete", targets[0].name
-			} else {
-				action = fmt.Sprintf("Delete %d", len(targets))
-				resource = kind + "s"
-			}
-			m.confirm = m.confirm.Show(action, resource)
-			m.pendingOp = pendingOpData{op: "delete", kind: kind, targets: targets}
-		}
+		return m.actionDelete()
 	case "s":
-		if m.readOnly {
-			m.statusBar = m.statusBar.SetMessage("read-only mode")
-			return m, nil
-		}
 		if m.nav.ActiveKind() == "HelmRelease" {
-			row := m.table.SelectedRow()
-			if row != nil {
-				m.confirm = m.confirm.Show("Suspend", row.Name)
-				m.pendingOp = pendingOpData{op: "suspend", kind: "HelmRelease", name: row.Name, namespace: row.Namespace}
-			}
-		} else {
-			rd, _ := k8sops.Resolve(m.nav.ActiveKind())
-			if rd.SupportsScale {
-				row := m.table.SelectedRow()
-				if row != nil {
-					current := currentReplicas(row)
-					m.scaleDialog = m.scaleDialog.Show(m.nav.ActiveKind(), row.Name, row.Namespace, current)
-				}
-			}
+			return m.actionSuspendHelm()
 		}
+		return m.actionScale()
 	case "r":
-		if m.readOnly {
-			m.statusBar = m.statusBar.SetMessage("read-only mode")
-			return m, nil
-		}
-		if m.nav.ActiveKind() == "HelmRelease" {
-			row := m.table.SelectedRow()
-			if row != nil {
-				m.confirm = m.confirm.Show("Resume", row.Name)
-				m.pendingOp = pendingOpData{op: "resume", kind: "HelmRelease", name: row.Name, namespace: row.Namespace}
-			}
-		}
+		return m.actionResumeHelm()
 	case "a":
-		if m.readOnly {
-			m.statusBar = m.statusBar.SetMessage("read-only mode")
-			return m, nil
-		}
-		row := m.table.SelectedRow()
-		if row == nil {
-			m.statusBar = m.statusBar.SetMessage("no pod selected")
-			break
-		}
-		if m.nav.ActiveKind() != "Pod" {
-			m.statusBar = m.statusBar.SetMessage("attach only available for Pods")
-			break
-		}
-		var container string
-		if pod, ok := row.Raw.(*corev1.Pod); ok && len(pod.Spec.Containers) > 0 {
-			container = pod.Spec.Containers[0].Name
-		}
-		if os.Getenv("TMUX") != "" {
-			return m, k8sops.TmuxAttachWindowCmd(row.Namespace, row.Name, container)
-		}
-		// Non-tmux fallback: suspend TUI and exec directly.
-		if m.clusterMgr == nil {
-			break
-		}
-		cs, err := m.clusterMgr.ActiveClientset()
-		if err != nil || cs == nil {
-			m.statusBar = m.statusBar.SetMessage("no cluster connection")
-			break
-		}
-		cfg, err := m.clusterMgr.ActiveRestConfig()
-		if err != nil {
-			m.statusBar = m.statusBar.SetMessage("rest config: " + err.Error())
-			break
-		}
-		return m, k8sops.AttachCmd(cs, cfg, row.Namespace, row.Name)
+		return m.actionAttach()
 	}
 	// Pass remaining keys to table
 	var cmd tea.Cmd
@@ -798,7 +849,360 @@ func (m Model) handleTableKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) handleYAMLViewKeys(msg tea.KeyMsg) (Model, tea.Cmd) {
+// dispatchTableAction routes a context-menu pick to the same helpers used by handleTableKeys.
+func (m Model) dispatchTableAction(action string) (Model, tea.Cmd) {
+	switch action {
+	case "y":
+		return m.actionViewYAML()
+	case "e":
+		return m.actionEditYAML()
+	case "l":
+		return m.actionLogs()
+	case "t":
+		return m.actionTopology()
+	case "m":
+		return m.actionMetrics()
+	case "a":
+		return m.actionAttach()
+	case "scale":
+		return m.actionScale()
+	case "suspend":
+		return m.actionSuspendHelm()
+	case "resume":
+		return m.actionResumeHelm()
+	case "d":
+		return m.actionDelete()
+	case "clear-selection":
+		return m.actionClearSelection()
+	}
+	return m, nil
+}
+
+// openContextMenu shows the context menu for whatever the user has currently
+// selected. With a multi-select active, it builds a multi-resource menu (logs,
+// bulk delete, clear). Otherwise it builds the single-resource menu.
+func (m Model) openContextMenu() Model {
+	row := m.table.SelectedRow()
+	if row == nil {
+		return m
+	}
+	kind := m.nav.ActiveKind()
+	var items []widgets.MenuItem
+	var title string
+	if n := m.table.SelectionCount(); n > 1 {
+		items = buildMultiContextMenuItems(kind, n, m.readOnly)
+		title = fmt.Sprintf("%d %s selected", n, pluralizeKind(kind))
+	} else {
+		items = buildContextMenuItems(kind, m.readOnly)
+		title = fmt.Sprintf("%s/%s", kind, row.Name)
+	}
+	if len(items) == 0 {
+		return m
+	}
+	termW, termH := m.layout.TermSize()
+	m.contextMenu = m.contextMenu.SetSize(termW, termH).Show(title, items)
+	return m
+}
+
+// pluralizeKind returns a simple plural form of a Kubernetes resource kind.
+// "Pod" → "Pods", "PersistentVolumeClaim" → "PersistentVolumeClaims".
+func pluralizeKind(kind string) string {
+	if kind == "" {
+		return "items"
+	}
+	if strings.HasSuffix(kind, "s") {
+		return kind + "es"
+	}
+	return kind + "s"
+}
+
+// buildMultiContextMenuItems returns the menu entries that make sense when more
+// than one row is selected. Single-resource actions (View YAML, Topology, Attach,
+// Scale, etc.) are intentionally excluded.
+func buildMultiContextMenuItems(kind string, count int, readOnly bool) []widgets.MenuItem {
+	rd, _ := k8sops.Resolve(kind)
+	var items []widgets.MenuItem
+	if rd.SupportsLogs {
+		items = append(items, widgets.MenuItem{
+			Label:  fmt.Sprintf("View Logs (%d, combined)", count),
+			Action: "l",
+			Hint:   "l",
+		})
+	}
+	if !readOnly && (rd.SupportsDeletion || kind == "HelmRelease") {
+		items = append(items, widgets.MenuItem{
+			Label:  fmt.Sprintf("Delete %d…", count),
+			Action: "d",
+			Hint:   "d",
+		})
+	}
+	items = append(items, widgets.MenuItem{
+		Label:  "Clear selection",
+		Action: "clear-selection",
+		Hint:   "c",
+	})
+	return items
+}
+
+// buildContextMenuItems returns the list of menu entries valid for the given kind
+// and the current read-only state. Mirrors the gating logic in setStatusBarKind.
+func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
+	rd, _ := k8sops.Resolve(kind)
+	var items []widgets.MenuItem
+	if rd.SupportsYAML {
+		items = append(items, widgets.MenuItem{Label: "View YAML", Action: "y", Hint: "y"})
+		if !readOnly {
+			items = append(items, widgets.MenuItem{Label: "Edit YAML", Action: "e", Hint: "e"})
+		}
+	}
+	if rd.SupportsLogs {
+		items = append(items, widgets.MenuItem{Label: "View Logs", Action: "l", Hint: "l"})
+	}
+	if rd.SupportsTopology {
+		items = append(items, widgets.MenuItem{Label: "View Topology", Action: "t", Hint: "t"})
+	}
+	if rd.SupportsMetrics {
+		items = append(items, widgets.MenuItem{Label: "View Metrics", Action: "m", Hint: "m"})
+	}
+	if !readOnly {
+		if rd.SupportsAttach {
+			items = append(items, widgets.MenuItem{Label: "Attach (exec)", Action: "a", Hint: "a"})
+		}
+		if rd.SupportsScale {
+			items = append(items, widgets.MenuItem{Label: "Scale", Action: "scale", Hint: "s"})
+		}
+		if kind == "HelmRelease" {
+			items = append(items,
+				widgets.MenuItem{Label: "Suspend", Action: "suspend", Hint: "s"},
+				widgets.MenuItem{Label: "Resume", Action: "resume", Hint: "r"},
+			)
+		}
+		if rd.SupportsDeletion || kind == "HelmRelease" {
+			items = append(items, widgets.MenuItem{Label: "Delete…", Action: "d", Hint: "d"})
+		}
+	}
+	return items
+}
+
+// --- Per-action helpers (extracted from handleTableKeys; behavior-preserving) ---
+
+func (m Model) actionClearSelection() (Model, tea.Cmd) {
+	m.table = m.table.ClearSelection()
+	return m, nil
+}
+
+func (m Model) actionViewYAML() (Model, tea.Cmd) {
+	row := m.table.SelectedRow()
+	if row == nil {
+		return m, nil
+	}
+	if m.nav.ActiveKind() == "HelmRelease" {
+		if u, ok := row.Raw.(*unstructuredpkg.Unstructured); ok {
+			return m, panels.FetchHelmReleaseYAMLCmd(u)
+		}
+		return m, nil
+	}
+	if m.clusterMgr != nil {
+		cs, _ := m.clusterMgr.ActiveClientset()
+		if cs != nil {
+			return m, panels.FetchYAMLCmd(cs, m.nav.ActiveKind(), row.Name, row.Namespace)
+		}
+	}
+	return m, nil
+}
+
+func (m Model) actionEditYAML() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode – use 'y' to view YAML")
+		return m, nil
+	}
+	return m.actionViewYAML()
+}
+
+func (m Model) actionLogs() (Model, tea.Cmd) {
+	kind := m.nav.ActiveKind()
+	selectedNames := m.table.SelectedPods()
+	var groups []k8sops.LogGroup
+	if m.watcher != nil {
+		for _, name := range selectedNames {
+			pods := k8sops.ResolvePodNames(kind, name, m.namespace, m.watcher)
+			if len(pods) > 0 {
+				groups = append(groups, k8sops.LogGroup{Name: name, Pods: pods})
+			}
+		}
+	} else {
+		for _, name := range selectedNames {
+			groups = append(groups, k8sops.LogGroup{Name: name, Pods: []string{name}})
+		}
+	}
+	if len(groups) > 0 && m.clusterMgr != nil {
+		cs, _ := m.clusterMgr.ActiveClientset()
+		if cs != nil {
+			if m.logStreamer != nil {
+				m.logStreamer.Stop()
+			}
+			streamer := k8sops.NewLogStreamer(cs, m.namespace)
+			streamer.StartGrouped(groups)
+			m.logStreamer = streamer
+			m.logView = m.logView.SetPodGroups(groups)
+			m.mode = ModeLogs
+			m.focus = FocusContent
+			return m, streamer.ReadCmd()
+		}
+	}
+	return m, nil
+}
+
+func (m Model) actionTopology() (Model, tea.Cmd) {
+	row := m.table.SelectedRow()
+	if row != nil && m.watcher != nil {
+		tree := m.buildTopology(m.nav.ActiveKind(), row.Name)
+		m.topology = m.topology.SetTree(m.nav.ActiveKind(), row.Name, tree)
+		m.mode = ModeTopology
+		m.focus = FocusContent
+	}
+	return m, nil
+}
+
+func (m Model) actionMetrics() (Model, tea.Cmd) {
+	row := m.table.SelectedRow()
+	if row == nil {
+		return m, nil
+	}
+	key := row.Namespace + "/" + row.Name
+	rm := m.metricsData.Pods[key]
+	m.metrics = m.metrics.SetResource(row.Name, row.Namespace, rm)
+	if m.watcher != nil {
+		for _, pod := range m.watcher.ListPods(row.Namespace) {
+			if pod.Name == row.Name {
+				cpuReqM, cpuLimM, memReqB, memLimB := panels.PodResourceTotals(pod)
+				m.metrics = m.metrics.SetLimits(cpuReqM, cpuLimM, memReqB, memLimB)
+				break
+			}
+		}
+	}
+	m.mode = ModeMetrics
+	m.focus = FocusContent
+	return m, nil
+}
+
+func (m Model) actionDelete() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode")
+		return m, nil
+	}
+	kind := m.nav.ActiveKind()
+	rows := m.table.SelectedRows()
+	if len(rows) == 0 {
+		return m, nil
+	}
+	var targets []deleteTarget
+	for _, row := range rows {
+		targets = append(targets, deleteTarget{name: row.Name, namespace: row.Namespace})
+	}
+	var action, resource string
+	if len(targets) == 1 {
+		action, resource = "Delete", targets[0].name
+	} else {
+		action = fmt.Sprintf("Delete %d", len(targets))
+		resource = kind + "s"
+	}
+	m.confirm = m.confirm.Show(action, resource)
+	m.pendingOp = pendingOpData{op: "delete", kind: kind, targets: targets}
+	return m, nil
+}
+
+func (m Model) actionScale() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode")
+		return m, nil
+	}
+	rd, _ := k8sops.Resolve(m.nav.ActiveKind())
+	if !rd.SupportsScale {
+		return m, nil
+	}
+	row := m.table.SelectedRow()
+	if row == nil {
+		return m, nil
+	}
+	current := currentReplicas(row)
+	m.scaleDialog = m.scaleDialog.Show(m.nav.ActiveKind(), row.Name, row.Namespace, current)
+	return m, nil
+}
+
+func (m Model) actionSuspendHelm() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode")
+		return m, nil
+	}
+	if m.nav.ActiveKind() != "HelmRelease" {
+		return m, nil
+	}
+	row := m.table.SelectedRow()
+	if row == nil {
+		return m, nil
+	}
+	m.confirm = m.confirm.Show("Suspend", row.Name)
+	m.pendingOp = pendingOpData{op: "suspend", kind: "HelmRelease", name: row.Name, namespace: row.Namespace}
+	return m, nil
+}
+
+func (m Model) actionResumeHelm() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode")
+		return m, nil
+	}
+	if m.nav.ActiveKind() != "HelmRelease" {
+		return m, nil
+	}
+	row := m.table.SelectedRow()
+	if row == nil {
+		return m, nil
+	}
+	m.confirm = m.confirm.Show("Resume", row.Name)
+	m.pendingOp = pendingOpData{op: "resume", kind: "HelmRelease", name: row.Name, namespace: row.Namespace}
+	return m, nil
+}
+
+func (m Model) actionAttach() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode")
+		return m, nil
+	}
+	row := m.table.SelectedRow()
+	if row == nil {
+		m.statusBar = m.statusBar.SetMessage("no pod selected")
+		return m, nil
+	}
+	if m.nav.ActiveKind() != "Pod" {
+		m.statusBar = m.statusBar.SetMessage("attach only available for Pods")
+		return m, nil
+	}
+	var container string
+	if pod, ok := row.Raw.(*corev1.Pod); ok && len(pod.Spec.Containers) > 0 {
+		container = pod.Spec.Containers[0].Name
+	}
+	if os.Getenv("TMUX") != "" {
+		return m, k8sops.TmuxAttachWindowCmd(row.Namespace, row.Name, container)
+	}
+	// Non-tmux fallback: suspend TUI and exec directly.
+	if m.clusterMgr == nil {
+		return m, nil
+	}
+	cs, err := m.clusterMgr.ActiveClientset()
+	if err != nil || cs == nil {
+		m.statusBar = m.statusBar.SetMessage("no cluster connection")
+		return m, nil
+	}
+	cfg, err := m.clusterMgr.ActiveRestConfig()
+	if err != nil {
+		m.statusBar = m.statusBar.SetMessage("rest config: " + err.Error())
+		return m, nil
+	}
+	return m, k8sops.AttachCmd(cs, cfg, row.Namespace, row.Name)
+}
+
+func (m Model) handleYAMLViewKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "e":
 		if m.readOnly {
@@ -879,6 +1283,7 @@ func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
 	m.namespace = ns
 	m.header = m.header.SetNamespace(ns)
 	m.mode = ModeTable
+	m.fullScreen = false
 	m.focus = FocusNav
 	m.table = m.table.ClearSelection()
 
@@ -913,6 +1318,7 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 		m.logStreamer = nil
 	}
 	m.mode = ModeTable
+	m.fullScreen = false
 	m.focus = FocusNav
 
 	if err := m.clusterMgr.SwitchContext(ctx); err != nil {
@@ -1045,7 +1451,18 @@ func currentReplicas(row *k8sops.ResourceRow) int32 {
 }
 
 // View renders the full TUI.
-func (m Model) View() string {
+func (m Model) View() tea.View {
+	v := tea.NewView(m.renderContent())
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+// renderContent builds the textual content of the View. When a modal is open,
+// it is centered on the full terminal so it remains visible (the base view fills
+// the entire terminal height after the lipgloss v2 width/height fix, so simply
+// appending the modal below would push it off-screen).
+func (m Model) renderContent() string {
 	if m.layout.TooSmall() {
 		return renderTooSmall(m.layout)
 	}
@@ -1055,25 +1472,40 @@ func (m Model) View() string {
 	}
 
 	if m.namespacePicker.IsVisible() {
-		return m.baseView() + "\n" + m.namespacePicker.View()
+		return m.modalOverlay(m.namespacePicker.View())
 	}
 
 	if m.clusterPicker.IsVisible() {
-		return m.baseView() + "\n" + m.clusterPicker.View()
+		return m.modalOverlay(m.clusterPicker.View())
 	}
 
 	if m.confirm.IsVisible() {
-		return m.baseView() + "\n" + m.confirm.View()
+		return m.modalOverlay(m.confirm.View())
 	}
 
 	if m.scaleDialog.IsVisible() {
-		return m.baseView() + "\n" + m.scaleDialog.View()
+		return m.modalOverlay(m.scaleDialog.View())
+	}
+
+	if m.contextMenu.IsVisible() {
+		return m.modalOverlay(m.contextMenu.View())
 	}
 
 	return m.baseView()
 }
 
+// modalOverlay centers a modal's pre-rendered output on the full terminal,
+// using ColorAbyss as the surrounding backdrop.
+func (m Model) modalOverlay(modal string) string {
+	termW, termH := m.layout.TermSize()
+	return lipgloss.Place(termW, termH, lipgloss.Center, lipgloss.Center, modal,
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(styles.ColorAbyss)))
+}
+
 func (m Model) baseView() string {
+	if m.fullScreen {
+		return m.contentView()
+	}
 	navView := m.nav.View()
 	contentView := m.contentView()
 	middle := layout.JoinPanels(navView, contentView)
@@ -1119,15 +1551,27 @@ func renderLoading(l layout.Layout, reconnecting bool) string {
 func (m Model) resizePanels() Model {
 	navDim := m.layout.Nav()
 	contentDim := m.layout.Content()
+	termW, termH := m.layout.TermSize()
 	m.header = m.header.SetWidth(m.layout.Header().Width)
 	m.statusBar = m.statusBar.SetWidth(m.layout.Status().Width)
 	m.nav = m.nav.SetSize(navDim.Width, navDim.Height)
 	m.table = m.table.SetSize(contentDim.Width, contentDim.Height)
-	m.yamlView = m.yamlView.SetSize(contentDim.Width, contentDim.Height)
-	m.yamlEdit = m.yamlEdit.SetSize(contentDim.Width, contentDim.Height)
-	m.logView = m.logView.SetSize(contentDim.Width, contentDim.Height)
-	m.topology = m.topology.SetSize(contentDim.Width, contentDim.Height)
-	m.metrics = m.metrics.SetSize(contentDim.Width, contentDim.Height)
+
+	// In fullscreen the active content panel uses the entire terminal; the
+	// non-fullscreen panels are kept at normal size so their state stays
+	// coherent for the toggle-off render. Table never goes fullscreen.
+	cw, ch := contentDim.Width, contentDim.Height
+	if m.fullScreen {
+		cw, ch = termW, termH
+	}
+	m.yamlView = m.yamlView.SetSize(cw, ch)
+	m.yamlEdit = m.yamlEdit.SetSize(cw, ch)
+	m.logView = m.logView.SetSize(cw, ch)
+	m.topology = m.topology.SetSize(cw, ch)
+	m.metrics = m.metrics.SetSize(cw, ch)
+
+	m.contextMenu = m.contextMenu.SetSize(termW, termH)
+	m.confirm = m.confirm.SetSize(termW, termH)
 	return m
 }
 

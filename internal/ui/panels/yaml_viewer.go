@@ -9,9 +9,10 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	lipgloss "github.com/charmbracelet/lipgloss"
+	"github.com/atotto/clipboard"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	lipgloss "charm.land/lipgloss/v2"
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,7 +42,7 @@ type YAMLViewer struct {
 }
 
 func NewYAMLViewer(w, h int) YAMLViewer {
-	vp := viewport.New(w-2, h-4)
+	vp := viewport.New(viewport.WithWidth(w-3), viewport.WithHeight(h-4))
 	vp.Style = lipgloss.NewStyle()
 	return YAMLViewer{viewport: vp, width: w, height: h}
 }
@@ -49,8 +50,8 @@ func NewYAMLViewer(w, h int) YAMLViewer {
 func (v YAMLViewer) SetSize(w, h int) YAMLViewer {
 	v.width = w
 	v.height = h
-	v.viewport.Width = max(1, w-2)
-	v.viewport.Height = max(1, h-4)
+	v.viewport.SetWidth(max(1, w-3))
+	v.viewport.SetHeight(max(1, h-4))
 	return v
 }
 func (v YAMLViewer) SetFocused(f bool) YAMLViewer { v.focused = f; return v }
@@ -69,10 +70,26 @@ func (v YAMLViewer) Update(msg tea.Msg) (YAMLViewer, tea.Cmd) {
 		highlighted := highlightYAML(msg.YAML)
 		v.viewport.SetContent(highlighted)
 		v.viewport.GotoTop()
-	case tea.KeyMsg:
+	case tea.MouseMsg:
 		var cmd tea.Cmd
 		v.viewport, cmd = v.viewport.Update(msg)
 		return v, cmd
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "g":
+			v.viewport.GotoTop()
+			return v, nil
+		case "G":
+			v.viewport.GotoBottom()
+			return v, nil
+		case "ctrl+c":
+			_ = clipboard.WriteAll(v.raw)
+			return v, nil
+		default:
+			var cmd tea.Cmd
+			v.viewport, cmd = v.viewport.Update(msg)
+			return v, cmd
+		}
 	}
 	return v, nil
 }
@@ -83,9 +100,24 @@ func (v YAMLViewer) View() string {
 		border = appstyles.FocusedBorder
 	}
 	title := appstyles.Title.Render(fmt.Sprintf("YAML: %s/%s", v.kind, v.name))
-	help := appstyles.Muted.Render("  ↑↓/jk scroll  e edit  esc back")
-	return border.Width(max(1, v.width-2)).Height(max(1, v.height-2)).Render(
-		title + "\n" + help + "\n\n" + v.viewport.View(),
+	help := "  " + RenderHelpInline([]HelpItem{
+		{Key: "↑↓/jk", Desc: "scroll"},
+		{Key: "g", Desc: "top"},
+		{Key: "G", Desc: "bottom"},
+		{Key: "ctrl+c", Desc: "copy"},
+		{Key: "e", Desc: "edit"},
+		{Key: "F", Desc: "fullscreen"},
+		{Key: "esc", Desc: "back"},
+	})
+	sbStr := renderScrollbar(
+		v.viewport.Height(),
+		v.viewport.VisibleLineCount(),
+		v.viewport.TotalLineCount(),
+		v.viewport.YOffset(),
+		v.focused,
+	)
+	return border.Width(max(1, v.width)).Height(max(1, v.height)).Render(
+		title + "\n" + help + "\n\n" + joinScrollbar(v.viewport.View(), sbStr),
 	)
 }
 

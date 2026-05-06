@@ -1,6 +1,6 @@
 package layout
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 // PanelID identifies layout panels.
 type PanelID int

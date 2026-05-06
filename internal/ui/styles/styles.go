@@ -1,6 +1,10 @@
 package styles
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"image/color"
+
+	"charm.land/lipgloss/v2"
+)
 
 var (
 	// Base colors (private — consumed by styles in this file)
@@ -105,7 +109,7 @@ var (
 	HelpDesc = lipgloss.NewStyle().Foreground(colorMuted)
 
 	// Log viewer
-	LogPrefixColors = []lipgloss.Color{
+	LogPrefixColors = []color.Color{
 		lipgloss.Color("#00ADD8"),
 		lipgloss.Color("#4CAF50"),
 		lipgloss.Color("#FFC107"),

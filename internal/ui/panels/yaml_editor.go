@@ -7,10 +7,10 @@ import (
 	"strings"
 
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 	"github.com/chaitanyak/klens/internal/ui/widgets"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -62,7 +62,7 @@ func NewYAMLEditor(w, h int) YAMLEditor {
 	ta.ShowLineNumbers = true
 	ta.Focus()
 
-	diffVP := viewport.New(max(1, w-5), max(1, h-8))
+	diffVP := viewport.New(viewport.WithWidth(max(1, w-5)), viewport.WithHeight(max(1, h-8)))
 	return YAMLEditor{
 		textarea: ta,
 		diffVP:   diffVP,
@@ -76,8 +76,8 @@ func (e YAMLEditor) SetSize(w, h int) YAMLEditor {
 	e.height = h
 	e.textarea.SetWidth(max(1, w-5))
 	e.textarea.SetHeight(max(1, h-6))
-	e.diffVP.Width = max(1, w-5)
-	e.diffVP.Height = max(1, h-8)
+	e.diffVP.SetWidth(max(1, w-5))
+	e.diffVP.SetHeight(max(1, h-8))
 	return e
 }
 
@@ -100,21 +100,30 @@ func (e YAMLEditor) Modified() string { return e.textarea.Value() }
 func (e YAMLEditor) Original() string { return e.original }
 func (e YAMLEditor) IsInsertMode() bool { return e.state == editorInsert }
 
-// sendKey sends a synthetic key message to the textarea and returns the updated editor.
-func (e YAMLEditor) sendKey(keyType tea.KeyType) YAMLEditor {
-	e.textarea, _ = e.textarea.Update(tea.KeyMsg{Type: keyType})
+// sendKey sends a synthetic key press to the textarea (special keys like KeyUp, KeyEnter, etc.)
+// and returns the updated editor.
+func (e YAMLEditor) sendKey(code rune) YAMLEditor {
+	e.textarea, _ = e.textarea.Update(tea.KeyPressMsg{Code: code})
 	return e
 }
 
-// sendAltRune sends a synthetic alt+rune key to the textarea (e.g. alt+f for word-forward).
+// sendCtrlKey sends a synthetic ctrl+<r> key press to the textarea (e.g. ctrl+a for line start).
+func (e YAMLEditor) sendCtrlKey(r rune) YAMLEditor {
+	e.textarea, _ = e.textarea.Update(tea.KeyPressMsg{Code: r, Mod: tea.ModCtrl})
+	return e
+}
+
+// sendAltRune sends a synthetic alt+<r> key press to the textarea (e.g. alt+f for word-forward).
+// Text is intentionally omitted — when set, KeyPressMsg.String() returns the text alone
+// ("f") instead of the modified key ("alt+f"), which textarea's keymap matches against.
 func (e YAMLEditor) sendAltRune(r rune) YAMLEditor {
-	e.textarea, _ = e.textarea.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}, Alt: true})
+	e.textarea, _ = e.textarea.Update(tea.KeyPressMsg{Code: r, Mod: tea.ModAlt})
 	return e
 }
 
 func (e YAMLEditor) Update(msg tea.Msg) (YAMLEditor, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch e.state {
 		case editorNormal:
 			return e.handleNormalKey(msg)
@@ -126,10 +135,7 @@ func (e YAMLEditor) Update(msg tea.Msg) (YAMLEditor, tea.Cmd) {
 			}
 			if msg.String() == "ctrl+v" {
 				if text, err := clipboard.ReadAll(); err == nil && text != "" {
-					e.textarea, _ = e.textarea.Update(tea.KeyMsg{
-						Type:  tea.KeyRunes,
-						Runes: []rune(text),
-					})
+					e.textarea, _ = e.textarea.Update(tea.PasteMsg{Content: text})
 				}
 				return e, nil
 			}
@@ -147,28 +153,26 @@ func (e YAMLEditor) Update(msg tea.Msg) (YAMLEditor, tea.Cmd) {
 				return e, cmd
 			}
 		}
-	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress {
-			switch msg.Button {
-			case tea.MouseButtonWheelUp:
-				if e.state == editorDiffConfirm {
-					var cmd tea.Cmd
-					e.diffVP, cmd = e.diffVP.Update(msg)
-					return e, cmd
-				}
-				e = e.sendKey(tea.KeyUp)
-			case tea.MouseButtonWheelDown:
-				if e.state == editorDiffConfirm {
-					var cmd tea.Cmd
-					e.diffVP, cmd = e.diffVP.Update(msg)
-					return e, cmd
-				}
-				e = e.sendKey(tea.KeyDown)
-			case tea.MouseButtonWheelLeft:
-				e = e.sendKey(tea.KeyLeft)
-			case tea.MouseButtonWheelRight:
-				e = e.sendKey(tea.KeyRight)
+	case tea.MouseWheelMsg:
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			if e.state == editorDiffConfirm {
+				var cmd tea.Cmd
+				e.diffVP, cmd = e.diffVP.Update(msg)
+				return e, cmd
 			}
+			e = e.sendKey(tea.KeyUp)
+		case tea.MouseWheelDown:
+			if e.state == editorDiffConfirm {
+				var cmd tea.Cmd
+				e.diffVP, cmd = e.diffVP.Update(msg)
+				return e, cmd
+			}
+			e = e.sendKey(tea.KeyDown)
+		case tea.MouseWheelLeft:
+			e = e.sendKey(tea.KeyLeft)
+		case tea.MouseWheelRight:
+			e = e.sendKey(tea.KeyRight)
 		}
 		return e, nil
 	}
@@ -181,7 +185,7 @@ func (e YAMLEditor) Update(msg tea.Msg) (YAMLEditor, tea.Cmd) {
 	return e, nil
 }
 
-func (e YAMLEditor) handleNormalKey(msg tea.KeyMsg) (YAMLEditor, tea.Cmd) {
+func (e YAMLEditor) handleNormalKey(msg tea.KeyPressMsg) (YAMLEditor, tea.Cmd) {
 	key := msg.String()
 
 	// Resolve pending 2-key sequences first.
@@ -194,7 +198,7 @@ func (e YAMLEditor) handleNormalKey(msg tea.KeyMsg) (YAMLEditor, tea.Cmd) {
 			for e.textarea.Line() > 0 {
 				e = e.sendKey(tea.KeyUp)
 			}
-			e = e.sendKey(tea.KeyCtrlA)
+			e = e.sendCtrlKey('a')
 		case "dd":
 			e = e.deleteLine()
 		case "yy":
@@ -230,9 +234,9 @@ func (e YAMLEditor) handleNormalKey(msg tea.KeyMsg) (YAMLEditor, tea.Cmd) {
 	case "b":
 		e = e.sendAltRune('b') // alt+b: word backward
 	case "0":
-		e = e.sendKey(tea.KeyCtrlA) // beginning of line
+		e = e.sendCtrlKey('a') // beginning of line
 	case "$":
-		e = e.sendKey(tea.KeyCtrlE) // end of line
+		e = e.sendCtrlKey('e') // end of line
 	case "G":
 		lines := strings.Split(e.textarea.Value(), "\n")
 		for e.textarea.Line() < len(lines)-1 {
@@ -250,14 +254,14 @@ func (e YAMLEditor) handleNormalKey(msg tea.KeyMsg) (YAMLEditor, tea.Cmd) {
 		e = e.sendKey(tea.KeyRight)
 		e.state = editorInsert
 	case "A":
-		e = e.sendKey(tea.KeyCtrlE)
+		e = e.sendCtrlKey('e')
 		e.state = editorInsert
 	case "o":
-		e = e.sendKey(tea.KeyCtrlE)
+		e = e.sendCtrlKey('e')
 		e = e.sendKey(tea.KeyEnter)
 		e.state = editorInsert
 	case "O":
-		e = e.sendKey(tea.KeyCtrlA)
+		e = e.sendCtrlKey('a')
 		e = e.sendKey(tea.KeyEnter)
 		e = e.sendKey(tea.KeyUp)
 		e.state = editorInsert
@@ -266,13 +270,13 @@ func (e YAMLEditor) handleNormalKey(msg tea.KeyMsg) (YAMLEditor, tea.Cmd) {
 	case "x":
 		e = e.sendKey(tea.KeyDelete)
 	case "D":
-		e = e.sendKey(tea.KeyCtrlK) // kill to end of line
+		e = e.sendCtrlKey('k') // kill to end of line
 	case "p":
 		if e.clipboard != "" {
 			e = e.pasteLine()
 		}
 	case "u":
-		e = e.sendKey(tea.KeyCtrlZ)
+		e = e.sendCtrlKey('z')
 
 	// Save / preview
 	case "ctrl+s":
@@ -301,7 +305,7 @@ func (e YAMLEditor) deleteLine() YAMLEditor {
 	if cur >= len(lines) {
 		e = e.sendKey(tea.KeyUp)
 	}
-	e = e.sendKey(tea.KeyCtrlA)
+	e = e.sendCtrlKey('a')
 	return e
 }
 
@@ -315,7 +319,7 @@ func (e YAMLEditor) pasteLine() YAMLEditor {
 	e.textarea.SetValue(strings.Join(after, "\n"))
 	// Move cursor to the pasted line.
 	e = e.sendKey(tea.KeyDown)
-	e = e.sendKey(tea.KeyCtrlA)
+	e = e.sendCtrlKey('a')
 	return e
 }
 
@@ -338,19 +342,32 @@ func (e YAMLEditor) View() string {
 	switch e.state {
 	case editorNormal:
 		modeBar := styles.Muted.Bold(true).Render(" NORMAL ")
-		hint := styles.Muted.Render("  hjkl move · w/b word · 0/$ line · gg/G top/bot · i/a/o insert · dd/D del · yy/p yank · ctrl+s preview")
+		hint := "  " + RenderHelpInline([]HelpItem{
+			{Key: "hjkl", Desc: "move"},
+			{Key: "w/b", Desc: "word"},
+			{Key: "0/$", Desc: "line"},
+			{Key: "gg/G", Desc: "top/bot"},
+			{Key: "i/a/o", Desc: "insert"},
+			{Key: "dd/D", Desc: "del"},
+			{Key: "yy/p", Desc: "yank"},
+			{Key: "F", Desc: "fullscreen"},
+			{Key: "ctrl+s", Desc: "preview"},
+		})
 		body = title + "\n" + modeBar + hint + "\n\n" + joinScrollbar(e.textarea.View(), taScrollbar())
 	case editorInsert:
 		modeBar := styles.Primary.Bold(true).Render(" INSERT ")
-		hint := styles.Muted.Render("  esc → normal · ctrl+s preview")
+		hint := "  " + RenderHelpInline([]HelpItem{
+			{Key: "esc", Desc: "→ normal"},
+			{Key: "ctrl+s", Desc: "preview"},
+		})
 		body = title + "\n" + modeBar + hint + "\n\n" + joinScrollbar(e.textarea.View(), taScrollbar())
 	case editorDiffConfirm:
 		warning := styles.Warning.Bold(true).Render("  Preview changes — apply? [y/n]")
 		sbStr := renderScrollbar(
-			e.diffVP.Height,
+			e.diffVP.Height(),
 			e.diffVP.VisibleLineCount(),
 			e.diffVP.TotalLineCount(),
-			e.diffVP.YOffset,
+			e.diffVP.YOffset(),
 			e.focused,
 		)
 		body = title + "\n" + warning + "\n\n" + joinScrollbar(e.diffVP.View(), sbStr)
@@ -358,7 +375,7 @@ func (e YAMLEditor) View() string {
 		body = title + "\n" + styles.Primary.Render("  Applying…")
 	}
 
-	return border.Width(max(1, e.width-2)).Height(max(1, e.height-2)).Render(body)
+	return border.Width(max(1, e.width)).Height(max(1, e.height)).Render(body)
 }
 
 func (e YAMLEditor) applyCmd() tea.Cmd {

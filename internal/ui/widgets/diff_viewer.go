@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/pmezard/go-difflib/difflib"
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 )

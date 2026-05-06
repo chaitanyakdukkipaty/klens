@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/atotto/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	k8sres "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 
@@ -138,7 +138,26 @@ func (t ResourceTable) HasFilter() bool    { return t.filterOn || t.filter != ""
 
 func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.PasteMsg:
+		if t.filterOn {
+			clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(msg.Content)
+			t.filterInput += clean
+			t.applyFilter()
+		}
+		return t, nil
+	case tea.MouseWheelMsg:
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			if len(t.filtered) > 0 {
+				t.cursor = (t.cursor - 1 + len(t.filtered)) % len(t.filtered)
+			}
+		case tea.MouseWheelDown:
+			if len(t.filtered) > 0 {
+				t.cursor = (t.cursor + 1) % len(t.filtered)
+			}
+		}
+		return t, nil
+	case tea.KeyPressMsg:
 		if t.filterOn {
 			switch msg.String() {
 			case "enter":
@@ -162,8 +181,8 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 					t.applyFilter()
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					t.filterInput += string(msg.Runes)
+				if len(msg.Text) > 0 {
+					t.filterInput += msg.Text
 					t.applyFilter()
 				}
 			}
@@ -191,13 +210,63 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 			t.filter = ""
 			t.filterInput = ""
 			t.applyFilter()
-		case " ":
+		case "space":
 			if row := t.SelectedRow(); row != nil {
 				t.selected[row.Name] = !t.selected[row.Name]
+			}
+		case "ctrl+c":
+			if row := t.SelectedRow(); row != nil {
+				_ = clipboard.WriteAll(row.Name)
 			}
 		}
 	}
 	return t, nil
+}
+
+// visibleRowCount returns how many rows fit in the data area, matching View()'s math.
+func (t ResourceTable) visibleRowCount() int {
+	innerH := max(1, t.height-2)
+	v := innerH - 3
+	if t.filterOn || t.filter != "" {
+		v--
+	}
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
+// scrollStart returns the index of the first visible row (kept in sync with View()).
+func (t ResourceTable) scrollStart() int {
+	visible := t.visibleRowCount()
+	if t.cursor >= visible {
+		return t.cursor - visible + 1
+	}
+	return 0
+}
+
+// HandleClickAt moves the cursor to the row at panel-inner-Y. If leftClick,
+// also toggles multi-select on that row (same as pressing space).
+// Returns true if the click landed on a real row (not title / header / filter / empty area).
+func (t ResourceTable) HandleClickAt(innerY int, leftClick bool) (ResourceTable, bool) {
+	firstRowY := 2 // title (line 0) + header (line 1)
+	if t.filterOn || t.filter != "" {
+		firstRowY = 3 // + filter bar
+	}
+	if innerY < firstRowY {
+		return t, false
+	}
+	rowIdx := (innerY - firstRowY) + t.scrollStart()
+	if rowIdx < 0 || rowIdx >= len(t.filtered) {
+		return t, false
+	}
+	t.cursor = rowIdx
+	if leftClick {
+		if row := t.SelectedRow(); row != nil {
+			t.selected[row.Name] = !t.selected[row.Name]
+		}
+	}
+	return t, true
 }
 
 func (t *ResourceTable) applyFilter() {
@@ -226,11 +295,10 @@ func (t ResourceTable) View() string {
 		border = styles.FocusedBorder
 	}
 	innerW := max(1, t.width-2)
-	innerH := max(1, t.height-2)
 
 	desc, ok := k8sres.Resolve(t.kind)
 	if !ok {
-		return border.Width(innerW).Height(innerH).Render(
+		return border.Width(t.width).Height(t.height).Render(
 			styles.Muted.Render("  Select a resource type from the left panel"))
 	}
 
@@ -257,15 +325,8 @@ func (t ResourceTable) View() string {
 	header := buildHeader(desc, colWidths)
 
 	// Rows
-	visibleRows := innerH - 3 // title + header + optional filter
-	if filterBar != "" {
-		visibleRows--
-	}
-
-	start := 0
-	if t.cursor >= visibleRows {
-		start = t.cursor - visibleRows + 1
-	}
+	visibleRows := t.visibleRowCount()
+	start := t.scrollStart()
 
 	var rowLines []string
 	for i := start; i < len(t.filtered) && i < start+visibleRows; i++ {
@@ -286,14 +347,16 @@ func (t ResourceTable) View() string {
 	}
 
 	content := title + filterBar + "\n" + header + "\n" + strings.Join(rowLines, "\n")
-	return border.Width(innerW).Height(innerH).Render(content)
+	return border.Width(t.width).Height(t.height).Render(content)
 }
 
 func computeColWidths(cols []k8sres.Column, width int) []int {
 	if len(cols) == 0 {
 		return nil
 	}
-	maxW := width / len(cols)
+	// width available to columns = total - 2-char prefix - (N-1) single-space separators
+	available := width - 2 - (len(cols) - 1)
+	maxW := max(1, available/len(cols))
 	widths := make([]int, len(cols))
 	for i, c := range cols {
 		if c.Width > maxW {
@@ -343,6 +406,14 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 		}
 	}
 	line := prefix + strings.Join(parts, " ")
+	if lipgloss.Width(line) > width {
+		plain := ansiEscape.ReplaceAllString(line, "")
+		if len(plain) > width-1 {
+			line = plain[:width-1] + "…"
+		} else {
+			line = plain
+		}
+	}
 
 	if cursor {
 		return tableRowCursorBase.Width(width).Render(line)

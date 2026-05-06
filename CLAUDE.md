@@ -105,6 +105,11 @@ internal/ui/
 | `a` | attach / exec into pod (tmux: new window; non-tmux: suspend TUI) |
 | `s` | scale (Deployments / StatefulSets) |
 | `ctrl+r` | reconnect / refresh (stops watcher, reruns full connect) |
+| `ctrl+n` | namespace picker |
+| `ctrl+k` | cluster context picker |
+| `ctrl+z` | rollback last YAML apply (in YAML view) |
+| `ctrl+s` | YAML diff preview / save (in YAML editor) |
+| `ctrl+v` | paste into filter / search / editor inputs |
 | `:` | command palette (TODO) |
 | `esc` | back to table (or peel log viewer state) |
 | `q` | quit |

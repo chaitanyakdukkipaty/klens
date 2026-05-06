@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 )
 
@@ -31,11 +31,13 @@ func (h Header) View() string {
 	// All width arithmetic must use the inner content area, not the full terminal width.
 	inner := max(1, h.width-2)
 
-	// Build right side: shortcuts and optional version string.
-	right := strings.Join([]string{
-		styles.Muted.Render("ctrl+k") + styles.HelpDesc.Render(" ctx"),
-		styles.Muted.Render("ctrl+n") + styles.HelpDesc.Render(" ns"),
-	}, "  ")
+	// Build right side: shortcuts and optional version string. Keys use the
+	// unified HelpKey/HelpDesc styling so they're visually consistent with
+	// every other panel's help line and the status bar.
+	right := RenderHelpInline([]HelpItem{
+		{Key: "ctrl+k", Desc: "ctx"},
+		{Key: "ctrl+n", Desc: "ns"},
+	})
 	if h.version != "" {
 		right = styles.Muted.Render("k8s "+h.version) + "  " + right
 	}

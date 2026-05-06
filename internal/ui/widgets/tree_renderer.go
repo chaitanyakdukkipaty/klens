@@ -3,7 +3,7 @@ package widgets
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 )

@@ -3,8 +3,8 @@ package widgets
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 )
 
@@ -48,7 +48,7 @@ func (d ScaleDialog) Update(msg tea.Msg) (ScaleDialog, tea.Cmd) {
 	if !d.visible {
 		return d, nil
 	}
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return d, nil
 	}
@@ -102,5 +102,5 @@ func (d ScaleDialog) View() string {
 	body += hint
 	box := appstyles.DialogBox.Render(body)
 	return lipgloss.Place(60, 10, lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(appstyles.ColorAbyss))
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(appstyles.ColorAbyss)))
 }

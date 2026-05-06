@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/guptarohit/asciigraph"
 	k8smetrics "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/ui/styles"
@@ -29,15 +29,15 @@ type MetricsPanel struct {
 }
 
 func NewMetricsPanel(w, h int) MetricsPanel {
-	vp := viewport.New(max(1, w-4), max(1, h-8))
+	vp := viewport.New(viewport.WithWidth(max(1, w-4)), viewport.WithHeight(max(1, h-8)))
 	return MetricsPanel{viewport: vp, width: w, height: h}
 }
 
 func (m MetricsPanel) SetSize(w, h int) MetricsPanel {
 	m.width = w
 	m.height = h
-	m.viewport.Width = max(1, w-4)
-	m.viewport.Height = max(1, h-8)
+	m.viewport.SetWidth(max(1, w-4))
+	m.viewport.SetHeight(max(1, h-8))
 	return m
 }
 
@@ -134,10 +134,23 @@ func (m MetricsPanel) Update(msg tea.Msg) (MetricsPanel, tea.Cmd) {
 				m.rebuildContent()
 			}
 		}
-	case tea.KeyMsg:
+	case tea.MouseMsg:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "g":
+			m.viewport.GotoTop()
+			return m, nil
+		case "G":
+			m.viewport.GotoBottom()
+			return m, nil
+		default:
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -181,7 +194,20 @@ func (m MetricsPanel) View() string {
 		border = styles.FocusedBorder
 	}
 	title := styles.Title.Render(fmt.Sprintf("Metrics: %s", m.name))
-	help := styles.Muted.Render("  ↑↓ scroll  esc back  (refreshes every 15s)")
-	return border.Width(max(1, m.width-2)).Height(max(1, m.height-2)).Render(
-		title + "\n" + help + "\n\n" + m.viewport.View())
+	help := "  " + RenderHelpInline([]HelpItem{
+		{Key: "↑↓/jk", Desc: "scroll"},
+		{Key: "g", Desc: "top"},
+		{Key: "G", Desc: "bottom"},
+		{Key: "F", Desc: "fullscreen"},
+		{Key: "esc", Desc: "back"},
+	}) + styles.Muted.Render("  (refreshes every 15s)")
+	sbStr := renderScrollbar(
+		m.viewport.Height(),
+		m.viewport.VisibleLineCount(),
+		m.viewport.TotalLineCount(),
+		m.viewport.YOffset(),
+		m.focused,
+	)
+	return border.Width(max(1, m.width)).Height(max(1, m.height)).Render(
+		title + "\n" + help + "\n\n" + joinScrollbar(m.viewport.View(), sbStr))
 }

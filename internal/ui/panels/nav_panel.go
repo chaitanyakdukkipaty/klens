@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/atotto/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	k8sres "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 )
@@ -73,7 +73,26 @@ func (n NavPanel) SetActiveKind(kind string) NavPanel {
 
 func (n NavPanel) Update(msg tea.Msg) (NavPanel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.PasteMsg:
+		if n.filterOn {
+			clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(msg.Content)
+			n.filterInput += clean
+			n.applyNavFilter()
+		}
+		return n, nil
+	case tea.MouseWheelMsg:
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			if len(n.filtered) > 0 {
+				n.cursor = (n.cursor - 1 + len(n.filtered)) % len(n.filtered)
+			}
+		case tea.MouseWheelDown:
+			if len(n.filtered) > 0 {
+				n.cursor = (n.cursor + 1) % len(n.filtered)
+			}
+		}
+		return n, nil
+	case tea.KeyPressMsg:
 		if n.filterOn {
 			switch msg.String() {
 			case "enter":
@@ -97,8 +116,8 @@ func (n NavPanel) Update(msg tea.Msg) (NavPanel, tea.Cmd) {
 					n.applyNavFilter()
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
-					n.filterInput += string(msg.Runes)
+				if len(msg.Text) > 0 {
+					n.filterInput += msg.Text
 					n.applyNavFilter()
 				}
 			}
@@ -113,6 +132,12 @@ func (n NavPanel) Update(msg tea.Msg) (NavPanel, tea.Cmd) {
 			if len(n.filtered) > 0 {
 				n.cursor = (n.cursor + 1) % len(n.filtered)
 			}
+		case "g":
+			n.cursor = 0
+		case "G":
+			if len(n.filtered) > 0 {
+				n.cursor = len(n.filtered) - 1
+			}
 		case "/":
 			n.filterOn = true
 			n.filterInput = n.filter
@@ -123,6 +148,21 @@ func (n NavPanel) Update(msg tea.Msg) (NavPanel, tea.Cmd) {
 		}
 	}
 	return n, nil
+}
+
+// HandleClickAt moves the cursor to the item at panel-inner-Y.
+// Returns the new active kind ("" if click was on title / filter / empty area).
+func (n NavPanel) HandleClickAt(innerY int) (NavPanel, string) {
+	firstRowY := 1 // title at line 0
+	if n.filterOn || n.filter != "" {
+		firstRowY = 2 // + filter bar
+	}
+	idx := innerY - firstRowY
+	if idx < 0 || idx >= len(n.filtered) {
+		return n, ""
+	}
+	n.cursor = idx
+	return n, n.filtered[idx].kind
 }
 
 func (n *NavPanel) applyNavFilter() {
@@ -198,5 +238,5 @@ func (n NavPanel) View() string {
 	}
 
 	content := strings.Join(rows, "\n")
-	return border.Width(max(1, n.width-2)).Height(max(1, n.height-2)).Render(content)
+	return border.Width(max(1, n.width)).Height(max(1, n.height)).Render(content)
 }

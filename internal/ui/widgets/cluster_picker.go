@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 )
 
@@ -78,7 +78,7 @@ func (p ClusterPicker) Update(msg tea.Msg) (ClusterPicker, tea.Cmd) {
 	if !p.visible {
 		return p, nil
 	}
-	key, ok := msg.(tea.KeyMsg)
+	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return p, nil
 	}
@@ -116,8 +116,8 @@ func (p ClusterPicker) Update(msg tea.Msg) (ClusterPicker, tea.Cmd) {
 		}
 
 	default:
-		if key.Type == tea.KeyRunes {
-			p.filter += string(key.Runes)
+		if len(key.Text) > 0 {
+			p.filter += key.Text
 			p.cursor = 0
 		}
 	}
@@ -202,5 +202,5 @@ func (p ClusterPicker) View() string {
 
 	return lipgloss.Place(clusterPickerWidth+8, clusterPickerMaxItems+10,
 		lipgloss.Center, lipgloss.Center, box,
-		lipgloss.WithWhitespaceBackground(appstyles.ColorAbyss))
+		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(appstyles.ColorAbyss)))
 }

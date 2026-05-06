@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/chaitanyak/klens/internal/app"
 	"k8s.io/klog/v2"
 )
@@ -64,11 +64,7 @@ func main() {
 	}
 
 	m := app.New(readOnly)
-	p := tea.NewProgram(
-		m,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
