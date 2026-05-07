@@ -2,9 +2,10 @@ package panels
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
@@ -13,12 +14,26 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
+	k8sres "github.com/chaitanyak/klens/internal/k8s"
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/yaml"
 )
+
+// YAMLAutoScrollTickMsg drives drag-to-copy auto-scroll in the YAML viewer.
+type YAMLAutoScrollTickMsg struct{}
+
+// YAMLAutoScrollTickCmd schedules one auto-scroll tick (50 ms cadence). The
+// root model reissues this while a drag is in progress and the cursor sits
+// outside the viewport vertically.
+func YAMLAutoScrollTickCmd() tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return YAMLAutoScrollTickMsg{}
+	})
+}
+
+var yamlSelectionStyle = lipgloss.NewStyle().Reverse(true)
 
 // YAMLFetchedMsg carries the YAML string for a fetched resource.
 type YAMLFetchedMsg struct {
@@ -39,6 +54,21 @@ type YAMLViewer struct {
 	name      string
 	namespace string
 	raw       string
+
+	// rawLines and highlightedLines are parallel arrays — same length, same
+	// indices. raw drives clipboard output; highlighted drives display.
+	rawLines         []string
+	highlightedLines []string
+
+	// Drag-to-copy selection state. selStart/selEnd are indices into
+	// rawLines/highlightedLines. dragLastX/Y is the most recent drag cursor in
+	// panel-local coords, used by AutoScrollStep.
+	selecting  bool
+	selDragged bool
+	selStart   int
+	selEnd     int
+	dragLastX  int
+	dragLastY  int
 }
 
 func NewYAMLViewer(w, h int) YAMLViewer {
@@ -67,10 +97,15 @@ func (v YAMLViewer) Update(msg tea.Msg) (YAMLViewer, tea.Cmd) {
 		v.name = msg.Name
 		v.namespace = msg.Namespace
 		v.raw = msg.YAML
-		highlighted := highlightYAML(msg.YAML)
-		v.viewport.SetContent(highlighted)
+		v.rawLines = strings.Split(msg.YAML, "\n")
+		v.highlightedLines = strings.Split(highlightYAML(msg.YAML), "\n")
+		v.selecting = false
+		v.selDragged = false
+		v.selStart = -1
+		v.selEnd = -1
+		v.rebuild()
 		v.viewport.GotoTop()
-	case tea.MouseMsg:
+	case tea.MouseWheelMsg:
 		var cmd tea.Cmd
 		v.viewport, cmd = v.viewport.Update(msg)
 		return v, cmd
@@ -82,9 +117,6 @@ func (v YAMLViewer) Update(msg tea.Msg) (YAMLViewer, tea.Cmd) {
 		case "G":
 			v.viewport.GotoBottom()
 			return v, nil
-		case "ctrl+c":
-			_ = clipboard.WriteAll(v.raw)
-			return v, nil
 		default:
 			var cmd tea.Cmd
 			v.viewport, cmd = v.viewport.Update(msg)
@@ -92,6 +124,191 @@ func (v YAMLViewer) Update(msg tea.Msg) (YAMLViewer, tea.Cmd) {
 		}
 	}
 	return v, nil
+}
+
+// rebuild stitches highlightedLines back into a single string, applying a
+// reverse-style highlight to lines [lo..hi] of an active selection. Mirrors
+// log_viewer's per-line render strategy so Chroma styling stays intact.
+func (v *YAMLViewer) rebuild() {
+	if len(v.highlightedLines) == 0 {
+		v.viewport.SetContent("")
+		return
+	}
+	if !v.selecting || v.selStart < 0 || v.selEnd < 0 {
+		v.viewport.SetContent(strings.Join(v.highlightedLines, "\n"))
+		return
+	}
+	lo, hi := v.selStart, v.selEnd
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	if hi >= len(v.highlightedLines) {
+		hi = len(v.highlightedLines) - 1
+	}
+	out := make([]string, len(v.highlightedLines))
+	for i, line := range v.highlightedLines {
+		if i >= lo && i <= hi {
+			out[i] = yamlSelectionStyle.Render(line)
+		} else {
+			out[i] = line
+		}
+	}
+	v.viewport.SetContent(strings.Join(out, "\n"))
+}
+
+// viewportBounds returns the inclusive panel-local rectangle of the viewport
+// content area. Layout matches View(): title (row 0) + help (row 1) + blank
+// (row 2) + viewport content starting at row 3.
+func (v YAMLViewer) viewportBounds() (x1, y1, x2, y2 int, ok bool) {
+	if v.viewport.Height() <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	x1 = 1 // panel border-left
+	y1 = 1 + 3
+	x2 = max(x1, v.width-2)
+	y2 = y1 + v.viewport.Height() - 1
+	return x1, y1, x2, y2, true
+}
+
+func (v YAMLViewer) lineAtScreenY(localY int) (int, bool) {
+	_, y1, _, y2, ok := v.viewportBounds()
+	if !ok || localY < y1 || localY > y2 {
+		return 0, false
+	}
+	row := v.viewport.YOffset() + (localY - y1)
+	if row < 0 || row >= len(v.highlightedLines) {
+		return 0, false
+	}
+	return row, true
+}
+
+// HandleMouseDown begins a drag-select if the click lands on a YAML line in
+// the viewport. Returns started=true so the root model can launch the
+// auto-scroll tick.
+func (v YAMLViewer) HandleMouseDown(localX, localY int) (YAMLViewer, bool) {
+	idx, ok := v.lineAtScreenY(localY)
+	if !ok {
+		return v, false
+	}
+	v.selecting = true
+	v.selDragged = false
+	v.selStart = idx
+	v.selEnd = idx
+	v.dragLastX = localX
+	v.dragLastY = localY
+	v.rebuild()
+	return v, true
+}
+
+// HandleMouseDrag extends the selection. Records dragLastX/Y so AutoScrollStep
+// can drive scrolling when the cursor sits outside the viewport.
+func (v YAMLViewer) HandleMouseDrag(localX, localY int) YAMLViewer {
+	if !v.selecting {
+		return v
+	}
+	v.dragLastX = localX
+	v.dragLastY = localY
+	idx, ok := v.lineAtScreenY(localY)
+	if !ok {
+		return v
+	}
+	if idx != v.selEnd {
+		v.selDragged = true
+		v.selEnd = idx
+		v.rebuild()
+	}
+	return v
+}
+
+// HandleMouseUp finalises a drag-select. On a real drag (cursor crossed at
+// least one line boundary), copies the raw YAML lines in [lo..hi] to the
+// clipboard. A click without drag clears the selection but does not clobber
+// the clipboard.
+func (v YAMLViewer) HandleMouseUp(localX, localY int) (YAMLViewer, string) {
+	if !v.selecting {
+		return v, ""
+	}
+	dragged := v.selDragged
+	lo, hi := v.selStart, v.selEnd
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	v.selecting = false
+	v.selDragged = false
+	v.selStart = -1
+	v.selEnd = -1
+	v.rebuild()
+	if !dragged || lo < 0 || hi < 0 || lo >= len(v.rawLines) {
+		return v, ""
+	}
+	if hi >= len(v.rawLines) {
+		hi = len(v.rawLines) - 1
+	}
+	parts := v.rawLines[lo : hi+1]
+	if err := clipboard.WriteAll(strings.Join(parts, "\n")); err != nil {
+		return v, "copy failed: " + err.Error()
+	}
+	n := hi - lo + 1
+	return v, fmt.Sprintf("copied %d line%s to clipboard", n, plural(n))
+}
+
+// IsDragging reports whether a drag-select is in progress.
+func (v YAMLViewer) IsDragging() bool { return v.selecting }
+
+// AutoScrollStep advances the viewport one line up or down when the last
+// drag-cursor position sits outside the viewport vertically, and extends
+// selEnd to the newly-revealed first/last visible line.
+func (v YAMLViewer) AutoScrollStep() YAMLViewer {
+	if !v.selecting || len(v.highlightedLines) == 0 {
+		return v
+	}
+	_, y1, _, y2, ok := v.viewportBounds()
+	if !ok {
+		return v
+	}
+	if v.dragLastY >= y1 && v.dragLastY <= y2 {
+		return v
+	}
+	height := v.viewport.Height()
+	if height <= 0 {
+		return v
+	}
+	rows := len(v.highlightedLines)
+	maxOffset := rows - height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	cur := v.viewport.YOffset()
+	var next, endRow int
+	if v.dragLastY < y1 {
+		if cur <= 0 {
+			return v
+		}
+		next = cur - 1
+		endRow = next
+	} else {
+		if cur >= maxOffset {
+			return v
+		}
+		next = cur + 1
+		endRow = next + height - 1
+		if endRow >= rows {
+			endRow = rows - 1
+		}
+	}
+	v.viewport.SetYOffset(next)
+	if endRow < 0 {
+		endRow = 0
+	}
+	if endRow != v.selEnd {
+		v.selDragged = true
+		v.selEnd = endRow
+	}
+	v.rebuild()
+	return v
 }
 
 func (v YAMLViewer) View() string {
@@ -104,7 +321,6 @@ func (v YAMLViewer) View() string {
 		{Key: "↑↓/jk", Desc: "scroll"},
 		{Key: "g", Desc: "top"},
 		{Key: "G", Desc: "bottom"},
-		{Key: "ctrl+c", Desc: "copy"},
 		{Key: "e", Desc: "edit"},
 		{Key: "F", Desc: "fullscreen"},
 		{Key: "esc", Desc: "back"},
@@ -166,44 +382,11 @@ func FetchHelmReleaseYAMLCmd(u *unstructured.Unstructured) tea.Cmd {
 }
 
 func fetchObject(cs *kubernetes.Clientset, kind, name, namespace string) (interface{}, error) {
-	ctx := context.Background()
-	opts := metav1.GetOptions{}
-	switch kind {
-	case "Pod":
-		return cs.CoreV1().Pods(namespace).Get(ctx, name, opts)
-	case "Deployment":
-		return cs.AppsV1().Deployments(namespace).Get(ctx, name, opts)
-	case "StatefulSet":
-		return cs.AppsV1().StatefulSets(namespace).Get(ctx, name, opts)
-	case "DaemonSet":
-		return cs.AppsV1().DaemonSets(namespace).Get(ctx, name, opts)
-	case "ReplicaSet":
-		return cs.AppsV1().ReplicaSets(namespace).Get(ctx, name, opts)
-	case "Service":
-		return cs.CoreV1().Services(namespace).Get(ctx, name, opts)
-	case "Ingress":
-		return cs.NetworkingV1().Ingresses(namespace).Get(ctx, name, opts)
-	case "ConfigMap":
-		return cs.CoreV1().ConfigMaps(namespace).Get(ctx, name, opts)
-	case "Secret":
-		return cs.CoreV1().Secrets(namespace).Get(ctx, name, opts)
-	case "Node":
-		return cs.CoreV1().Nodes().Get(ctx, name, opts)
-	case "PersistentVolume":
-		return cs.CoreV1().PersistentVolumes().Get(ctx, name, opts)
-	case "PersistentVolumeClaim":
-		return cs.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, opts)
-	case "Job":
-		return cs.BatchV1().Jobs(namespace).Get(ctx, name, opts)
-	case "CronJob":
-		return cs.BatchV1().CronJobs(namespace).Get(ctx, name, opts)
-	case "ServiceAccount":
-		return cs.CoreV1().ServiceAccounts(namespace).Get(ctx, name, opts)
-	case "Namespace":
-		return cs.CoreV1().Namespaces().Get(ctx, name, opts)
-	default:
+	rd, ok := k8sres.Resolve(kind)
+	if !ok || rd.Fetch == nil {
 		return nil, fmt.Errorf("unsupported kind: %s", kind)
 	}
+	return rd.Fetch(cs, name, namespace)
 }
 
 func highlightYAML(src string) string {

@@ -1,7 +1,6 @@
 package panels
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,11 +10,9 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	k8sres "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 	"github.com/chaitanyak/klens/internal/ui/widgets"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	sigsyaml "sigs.k8s.io/yaml"
 )
@@ -401,45 +398,22 @@ func applyYAML(kind, name, namespace, yamlContent string) error {
 	return nil // clientset injected via closure in real usage — see integration in app/model.go
 }
 
-// ApplyYAMLCmd is the real apply command that uses a live clientset.
+// ApplyYAMLCmd is the real apply command that uses a live clientset. It looks
+// up the per-kind "apply" Action on the descriptor — the kind-keyed switch
+// that used to live here is now closures registered in panels/kinds.go.
 func ApplyYAMLCmd(cs *kubernetes.Clientset, kind, name, namespace, yamlContent string) tea.Cmd {
-	return func() tea.Msg {
-		jsonBytes, err := sigsyaml.YAMLToJSON([]byte(yamlContent))
-		if err != nil {
-			return YAMLApplyErrMsg{fmt.Errorf("invalid YAML: %w", err)}
-		}
-
-		ctx := context.Background()
-		opts := metav1.PatchOptions{FieldManager: "klens"}
-
-		var patchErr error
-		switch kind {
-		case "Pod":
-			_, patchErr = cs.CoreV1().Pods(namespace).Patch(ctx, name, types.MergePatchType, jsonBytes, opts)
-		case "Deployment":
-			_, patchErr = cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.MergePatchType, jsonBytes, opts)
-		case "StatefulSet":
-			_, patchErr = cs.AppsV1().StatefulSets(namespace).Patch(ctx, name, types.MergePatchType, jsonBytes, opts)
-		case "DaemonSet":
-			_, patchErr = cs.AppsV1().DaemonSets(namespace).Patch(ctx, name, types.MergePatchType, jsonBytes, opts)
-		case "Service":
-			_, patchErr = cs.CoreV1().Services(namespace).Patch(ctx, name, types.MergePatchType, jsonBytes, opts)
-		case "ConfigMap":
-			_, patchErr = cs.CoreV1().ConfigMaps(namespace).Patch(ctx, name, types.MergePatchType, jsonBytes, opts)
-		case "Secret":
-			_, patchErr = cs.CoreV1().Secrets(namespace).Patch(ctx, name, types.MergePatchType, jsonBytes, opts)
-		default:
+	action := k8sres.LookupAction(kind, "apply")
+	if action == nil {
+		return func() tea.Msg {
 			return YAMLApplyErrMsg{fmt.Errorf("patch not supported for kind %s via klens yet", kind)}
 		}
-
-		if patchErr != nil {
-			if k8serrors.IsForbidden(patchErr) {
-				return YAMLApplyErrMsg{fmt.Errorf("forbidden: %w", patchErr)}
-			}
-			return YAMLApplyErrMsg{patchErr}
-		}
-		return YAMLAppliedMsg{Kind: kind, Name: name, Namespace: namespace}
 	}
+	return action(k8sres.ActionDeps{
+		Clientset:   cs,
+		Name:        name,
+		Namespace:   namespace,
+		YAMLContent: yamlContent,
+	})
 }
 
 // helpers

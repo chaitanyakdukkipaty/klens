@@ -47,6 +47,21 @@ type hitZone struct {
 	idx            int // index into LogViewer.groups
 }
 
+// LogAutoScrollTickMsg drives drag-to-copy auto-scroll. The root model
+// schedules the first tick on mouse-down and reschedules from its handler
+// while a drag is in progress; mouse-up flips selecting=false, so the next
+// tick sees no drag and the loop dies on its own.
+type LogAutoScrollTickMsg struct{}
+
+// LogAutoScrollTickCmd schedules one auto-scroll tick. 50 ms ≈ 20 lines/sec
+// when the cursor sits outside the viewport — comparable to GUI drag-scroll
+// feel, and a no-op when the cursor is back inside the viewport.
+func LogAutoScrollTickCmd() tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+		return LogAutoScrollTickMsg{}
+	})
+}
+
 // logGroupState owns the per-group filter, search, scroll, autoScroll, and
 // pod-solo state. There is always at least one group — even when SetPods is
 // used (no tabs), a synthetic group with empty name represents "all pods".
@@ -83,6 +98,12 @@ type logGroupState struct {
 	selStartLine int
 	selEndLine   int
 	displayRows  []int
+
+	// dragLastX/Y is the last drag cursor position in panel-local coords. It
+	// powers auto-scroll while dragging when the cursor sits outside the
+	// viewport vertically and is updated by HandleMouseDown/Drag.
+	dragLastX int
+	dragLastY int
 }
 
 func newGroupState(name string) logGroupState {
@@ -397,11 +418,6 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 				g.filterOn = false
 				g.filter = g.filterInput
 				v.rebuildGroup(v.focusedGroup)
-			case "ctrl+c":
-				g.filterOn = false
-				g.filterInput = ""
-				g.filter = ""
-				v.rebuildGroup(v.focusedGroup)
 			case "backspace":
 				if len(g.filterInput) > 0 {
 					g.filterInput = g.filterInput[:len(g.filterInput)-1]
@@ -436,13 +452,6 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 				}
 			case "esc":
 				g.searchOn = false
-			case "ctrl+c":
-				g.searchOn = false
-				g.searchInput = ""
-				g.searchQuery = ""
-				g.searchMatches = nil
-				g.searchCurrent = -1
-				v.rebuildGroup(v.focusedGroup)
 			case "backspace":
 				if len(g.searchInput) > 0 {
 					g.searchInput = g.searchInput[:len(g.searchInput)-1]
@@ -545,21 +554,6 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 				g.podFilter = n
 				v.rebuildGroup(v.focusedGroup)
 			}
-		case "ctrl+c":
-			// Copy focused group's currently-visible (filtered) lines.
-			fg := v.groups[v.focusedGroup]
-			lowFilter := strings.ToLower(fg.filter)
-			var parts []string
-			for _, l := range v.lines {
-				if !v.lineBelongsToGroup(l, fg) {
-					continue
-				}
-				if lowFilter != "" && !strings.Contains(strings.ToLower(l.Text), lowFilter) {
-					continue
-				}
-				parts = append(parts, l.Text)
-			}
-			_ = clipboard.WriteAll(strings.Join(parts, "\n"))
 		default:
 			var cmd tea.Cmd
 			g.viewport, cmd = g.viewport.Update(msg)
@@ -1352,27 +1346,6 @@ func (v LogViewer) groupAtViewport(x, y int) (groupIdx, lineIdx int, ok bool) {
 	return 0, 0, false
 }
 
-// clampToVisible returns the v.lines index of the first or last displayed row
-// in the focused group's current viewport window, used to clamp drag targets
-// when the cursor leaves the viewport vertically.
-func (v LogViewer) clampToVisible(top bool) (int, bool) {
-	g := v.groups[v.focusedGroup]
-	if len(g.displayRows) == 0 {
-		return 0, false
-	}
-	row := g.viewport.YOffset()
-	if !top {
-		row += g.viewport.Height() - 1
-	}
-	if row < 0 {
-		row = 0
-	}
-	if row >= len(g.displayRows) {
-		row = len(g.displayRows) - 1
-	}
-	return g.displayRows[row], true
-}
-
 // HandleMouseDown begins a drag-select if the click lands on a log line in
 // any visible viewport. In split layouts a click in a non-focused stripe
 // switches focus to that stripe before starting selection. Returns
@@ -1393,44 +1366,116 @@ func (v LogViewer) HandleMouseDown(localX, localY int) (LogViewer, bool) {
 	g.selDragged = false
 	g.selStartLine = idx
 	g.selEndLine = idx
+	g.dragLastX = localX
+	g.dragLastY = localY
 	v.rebuildGroup(v.focusedGroup)
 	return v, true
 }
 
 // HandleMouseDrag extends the in-progress drag-select to localY. No-op if no
-// drag is in progress. When the cursor leaves the focused group's viewport
-// vertically, the selection is clamped to the first/last visible line
-// (no auto-scroll in v1). Selection stays scoped to the focused group even
-// if the cursor wanders into another stripe in split mode.
+// drag is in progress. The cursor position is recorded so AutoScrollStep can
+// drive viewport scrolling on its tick when the cursor sits outside the
+// viewport vertically (cell-motion mouse mode delivers no events while the
+// cursor is held still). Selection stays scoped to the focused group even if
+// the cursor wanders into another stripe in split mode.
 func (v LogViewer) HandleMouseDrag(localX, localY int) LogViewer {
 	g := &v.groups[v.focusedGroup]
 	if !g.selecting {
 		return v
 	}
+	g.dragLastX = localX
+	g.dragLastY = localY
 	idx, ok := v.lineAtScreenInGroup(v.focusedGroup, localX, localY)
 	if !ok {
-		_, vy1, _, vy2, vok := v.viewportBoundsFor(v.focusedGroup)
-		if !vok {
-			return v
-		}
-		if localY < vy1 {
-			idx, ok = v.clampToVisible(true)
-		} else if localY > vy2 {
-			idx, ok = v.clampToVisible(false)
-		} else {
-			// Inside the viewport's Y band but outside its X band (split mode)
-			// — keep current selFocus by treating as no-op.
-			return v
-		}
-		if !ok {
-			return v
-		}
+		// Outside the viewport — auto-scroll tick will extend selection.
+		return v
 	}
 	if idx != g.selEndLine {
 		g.selDragged = true
 		g.selEndLine = idx
 		v.rebuildGroup(v.focusedGroup)
 	}
+	return v
+}
+
+// IsDragging reports whether a drag-select is in progress on the focused
+// group. The root model uses this to decide whether to keep the auto-scroll
+// tick alive.
+func (v LogViewer) IsDragging() bool {
+	if len(v.groups) == 0 || v.focusedGroup < 0 || v.focusedGroup >= len(v.groups) {
+		return false
+	}
+	return v.groups[v.focusedGroup].selecting
+}
+
+// AutoScrollStep performs one viewport scroll step when the last known drag
+// cursor position sits above or below the focused group's viewport. selEndLine
+// is advanced to the newly-revealed first/last visible line so the selection
+// grows to match. No-op if not dragging or the cursor is inside the viewport.
+func (v LogViewer) AutoScrollStep() LogViewer {
+	if len(v.groups) == 0 {
+		return v
+	}
+	g := &v.groups[v.focusedGroup]
+	if !g.selecting {
+		return v
+	}
+	_, y1, _, y2, ok := v.viewportBoundsFor(v.focusedGroup)
+	if !ok {
+		return v
+	}
+	if g.dragLastY >= y1 && g.dragLastY <= y2 {
+		return v
+	}
+	height := g.viewport.Height()
+	if height <= 0 {
+		return v
+	}
+	rows := len(g.displayRows)
+	if rows == 0 {
+		return v
+	}
+	maxOffset := rows - height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	cur := g.viewport.YOffset()
+	var next int
+	if g.dragLastY < y1 {
+		if cur <= 0 {
+			return v
+		}
+		next = cur - 1
+	} else {
+		if cur >= maxOffset {
+			return v
+		}
+		next = cur + 1
+	}
+	g.viewport.SetYOffset(next)
+	// Disable autoScroll-to-tail when manually scrolling up; matches keyboard
+	// scroll semantics elsewhere in the file.
+	if next < cur {
+		g.autoScroll = false
+	}
+	var endRow int
+	if g.dragLastY < y1 {
+		endRow = next
+	} else {
+		endRow = next + height - 1
+		if endRow >= rows {
+			endRow = rows - 1
+		}
+	}
+	if endRow < 0 {
+		endRow = 0
+	}
+	newEnd := g.displayRows[endRow]
+	if newEnd != g.selEndLine {
+		g.selDragged = true
+		g.selEndLine = newEnd
+	}
+	v.rebuildGroup(v.focusedGroup)
 	return v
 }
 

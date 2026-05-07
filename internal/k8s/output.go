@@ -87,15 +87,18 @@ func PrintEventsTable(w io.Writer, events []corev1.Event) {
 }
 
 // PrintNodesTable writes a plain-text node table to w.
+// Column order (NAME, STATUS, ROLES, VERSION, AGE) matches the TUI registry
+// in resources.go — diverging here would silently confuse anyone comparing
+// `klens get nodes` output to the TUI table.
 func PrintNodesTable(w io.Writer, nodes []corev1.Node) {
-	fmt.Fprintf(w, "%-50s %-10s %-30s %-10s %s\n", "NAME", "STATUS", "ROLES", "AGE", "VERSION")
+	fmt.Fprintf(w, "%-50s %-10s %-30s %-16s %s\n", "NAME", "STATUS", "ROLES", "VERSION", "AGE")
 	for _, n := range nodes {
-		fmt.Fprintf(w, "%-50s %-10s %-30s %-10s %s\n",
+		fmt.Fprintf(w, "%-50s %-10s %-30s %-16s %s\n",
 			n.Name,
 			nodeStatus(n),
 			nodeRoles(n),
-			fmtAge(n.CreationTimestamp.Time),
 			n.Status.NodeInfo.KubeletVersion,
+			fmtAge(n.CreationTimestamp.Time),
 		)
 	}
 }

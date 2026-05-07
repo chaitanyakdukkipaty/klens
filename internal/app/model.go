@@ -69,12 +69,6 @@ type Model struct {
 	// false whenever the user returns to ModeTable.
 	fullScreen bool
 
-	// mouseEnabled controls whether the program captures mouse events. When
-	// false, the terminal handles mouse natively — drag-to-select + Cmd+C /
-	// Ctrl+Shift+C work for copying log/yaml text out of the TUI. Toggled by
-	// `M`. Default true.
-	mouseEnabled bool
-
 	// Pending operation waiting for confirm dialog
 	pendingOp pendingOpData
 
@@ -166,7 +160,6 @@ func New(readOnly bool) Model {
 		loading:         true,
 		readOnlyFlag:    readOnly,
 		readOnly:        readOnly,
-		mouseEnabled:    true,
 	}
 }
 
@@ -177,42 +170,10 @@ func (m Model) Init() tea.Cmd {
 
 // Update handles all messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Namespace picker intercepts key events when visible (modal).
-	if m.namespacePicker.IsVisible() {
-		if _, ok := msg.(tea.KeyPressMsg); ok {
-			var cmd tea.Cmd
-			m.namespacePicker, cmd = m.namespacePicker.Update(msg)
-			return m, cmd
-		}
-	}
-
-	// Cluster picker intercepts key events when visible (modal).
-	if m.clusterPicker.IsVisible() {
-		if _, ok := msg.(tea.KeyPressMsg); ok {
-			var cmd tea.Cmd
-			m.clusterPicker, cmd = m.clusterPicker.Update(msg)
-			return m, cmd
-		}
-	}
-
-	// Confirm dialog intercepts all input when visible (modal).
-	if m.confirm.IsVisible() {
-		var cmd tea.Cmd
-		m.confirm, cmd = m.confirm.Update(msg)
-		return m, cmd
-	}
-
-	// Scale dialog intercepts all input when visible (modal).
-	if m.scaleDialog.IsVisible() {
-		var cmd tea.Cmd
-		m.scaleDialog, cmd = m.scaleDialog.Update(msg)
-		return m, cmd
-	}
-
-	// Context menu intercepts all input when visible (modal).
-	if m.contextMenu.IsVisible() {
-		var cmd tea.Cmd
-		m.contextMenu, cmd = m.contextMenu.Update(msg)
+	// Modals intercept input first. The stack order (namespace picker,
+	// cluster picker, confirm, scale, context menu) matches the historical
+	// priority of the if-block ladder this replaced. See modals.go.
+	if cmd, handled := m.modals().Dispatch(msg); handled {
 		return m, cmd
 	}
 
@@ -336,6 +297,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, k8sops.MetricsTickCmd()
 
+	case panels.LogAutoScrollTickMsg:
+		if m.mode != ModeLogs || !m.logView.IsDragging() {
+			return m, nil
+		}
+		m.logView = m.logView.AutoScrollStep()
+		return m, panels.LogAutoScrollTickCmd()
+
+	case panels.YAMLAutoScrollTickMsg:
+		if m.mode != ModeYAML || !m.yamlView.IsDragging() {
+			return m, nil
+		}
+		m.yamlView = m.yamlView.AutoScrollStep()
+		return m, panels.YAMLAutoScrollTickCmd()
+
+	case panels.TableAutoScrollTickMsg:
+		if m.mode != ModeTable || !m.table.IsDragging() {
+			return m, nil
+		}
+		m.table = m.table.AutoScrollStep()
+		return m, panels.TableAutoScrollTickCmd()
+
 	case k8sops.MetricsUpdatedMsg:
 		m.metricsData = msg
 		if m.mode == ModeMetrics {
@@ -433,7 +415,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusBar = m.statusBar.SetMessage("no client: " + err.Error())
 			return m, nil
 		}
-		return m, k8sops.ScaleCmd(cs, msg.Kind, msg.Name, msg.Namespace, msg.Replicas)
+		action := k8sops.LookupAction(msg.Kind, "scale")
+		if action == nil {
+			m.statusBar = m.statusBar.SetMessage("scale not supported for " + msg.Kind)
+			return m, nil
+		}
+		return m, action(k8sops.ActionDeps{
+			Clientset: cs,
+			Name:      msg.Name,
+			Namespace: msg.Namespace,
+			Replicas:  msg.Replicas,
+		})
 
 	case widgets.ContextMenuPickedMsg:
 		m.contextMenu = m.contextMenu.Hide()
@@ -545,7 +537,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					switch click.Button {
 					case tea.MouseLeft:
-						m.table, _ = m.table.HandleClickAt(innerY, true)
+						shift := mouse.Mod&tea.ModShift != 0
+						innerX := mouse.X - navW
+						var started bool
+						m.table, started = m.table.HandleMouseDown(innerX, innerY, shift)
+						if started {
+							return m, panels.TableAutoScrollTickCmd()
+						}
 						return m, nil
 					case tea.MouseRight:
 						var hit bool
@@ -554,6 +552,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m = m.openContextMenu()
 						}
 						return m, nil
+					}
+				}
+				// YAML viewer click — start drag-select if it lands on a YAML line.
+				if m.mode == ModeYAML && click.Button == tea.MouseLeft {
+					var ox, oy int
+					if !m.fullScreen {
+						ox = m.layout.Nav().Width
+						oy = 1
+					}
+					localX := mouse.X - ox
+					localY := mouse.Y - oy
+					var started bool
+					m.yamlView, started = m.yamlView.HandleMouseDown(localX, localY)
+					if started {
+						return m, panels.YAMLAutoScrollTickCmd()
 					}
 				}
 			}
@@ -577,7 +590,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.focus = FocusContent
 						m.nav = m.nav.SetFocused(false)
 					}
-					return m, nil
+					return m, panels.LogAutoScrollTickCmd()
 				}
 				var hit bool
 				m.logView, hit = m.logView.HandleClickAt(localX, localY)
@@ -590,25 +603,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		// Drag/release for in-app log drag-select. Only active in ModeLogs;
-		// HandleMouseDrag/Up are no-ops when no selection is in flight, so
-		// stray motion/release events from other contexts are harmless.
-		if m.mode == ModeLogs {
+		// Drag/release routing for in-app drag-to-copy. HandleMouseDrag/Up are
+		// no-ops when no selection is in flight, so stray motion/release events
+		// from other contexts are harmless.
+		{
 			var ox, oy int
 			if !m.fullScreen {
 				ox = m.layout.Nav().Width
 				oy = 1
 			}
-			if motion, ok := msg.(tea.MouseMotionMsg); ok {
-				mp := motion.Mouse()
-				m.logView = m.logView.HandleMouseDrag(mp.X-ox, mp.Y-oy)
-				return m, nil
-			}
-			if release, ok := msg.(tea.MouseReleaseMsg); ok {
-				if release.Button == tea.MouseLeft {
+			navW := m.layout.Nav().Width
+			switch m.mode {
+			case ModeLogs:
+				if motion, ok := msg.(tea.MouseMotionMsg); ok {
+					mp := motion.Mouse()
+					m.logView = m.logView.HandleMouseDrag(mp.X-ox, mp.Y-oy)
+					return m, nil
+				}
+				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
 					mp := release.Mouse()
 					var status string
 					m.logView, status = m.logView.HandleMouseUp(mp.X-ox, mp.Y-oy)
+					if status != "" {
+						m.statusBar = m.statusBar.SetMessage(status)
+					}
+					return m, nil
+				}
+			case ModeYAML:
+				if motion, ok := msg.(tea.MouseMotionMsg); ok {
+					mp := motion.Mouse()
+					m.yamlView = m.yamlView.HandleMouseDrag(mp.X-ox, mp.Y-oy)
+					return m, nil
+				}
+				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
+					mp := release.Mouse()
+					var status string
+					m.yamlView, status = m.yamlView.HandleMouseUp(mp.X-ox, mp.Y-oy)
+					if status != "" {
+						m.statusBar = m.statusBar.SetMessage(status)
+					}
+					return m, nil
+				}
+			case ModeTable:
+				if motion, ok := msg.(tea.MouseMotionMsg); ok {
+					mp := motion.Mouse()
+					innerY := mp.Y - 2
+					innerX := mp.X - navW
+					m.table = m.table.HandleMouseDrag(innerX, innerY)
+					return m, nil
+				}
+				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
+					mp := release.Mouse()
+					innerY := mp.Y - 2
+					innerX := mp.X - navW
+					var status string
+					m.table, status = m.table.HandleMouseUp(innerX, innerY)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -674,25 +723,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
 				break
 			}
-			m.fullScreen = !m.fullScreen
+			m = m.toggleFullScreen()
 			m = m.resizePanels()
 			return m, nil
 		}
-	case "M":
-		// Toggle mouse capture so the user can drag-select text natively
-		// and Cmd+C / Ctrl+Shift+C through their terminal. While disabled,
-		// tab/stripe clicks and wheel scrolling are inactive — press M again
-		// to restore mouse-driven UX.
-		if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
-			break // literal in editor Insert mode
-		}
-		m.mouseEnabled = !m.mouseEnabled
-		if m.mouseEnabled {
-			m.statusBar = m.statusBar.SetMessage("mouse on (M to disable for drag-select)")
-		} else {
-			m.statusBar = m.statusBar.SetMessage("mouse off — drag to select, Cmd+C to copy, M to re-enable")
-		}
-		return m, nil
 	case "q":
 		if m.mode == ModeEditor {
 			var cmd tea.Cmd
@@ -1331,24 +1365,32 @@ func (m Model) executeConfirmedOp(result widgets.ConfirmResult) (Model, tea.Cmd)
 		m.statusBar = m.statusBar.SetMessage("no client: " + err.Error())
 		return m, nil
 	}
-	switch m.pendingOp.op {
-	case "delete":
+	action := k8sops.LookupAction(m.pendingOp.kind, m.pendingOp.op)
+	if action == nil {
+		return m, nil
+	}
+	deps := k8sops.ActionDeps{
+		Clientset: cs,
+		Name:      m.pendingOp.name,
+		Namespace: m.pendingOp.namespace,
+	}
+	if m.watcher != nil {
+		deps.Dynamic = m.watcher.DynamicClient()
+		deps.HelmGVR = m.watcher.HelmReleaseGVR()
+	}
+	// Multi-target ops (currently only delete) loop the action with each target.
+	if len(m.pendingOp.targets) > 0 {
 		m.table = m.table.ClearSelection()
 		var cmds []tea.Cmd
 		for _, t := range m.pendingOp.targets {
-			cmds = append(cmds, k8sops.DeleteCmd(cs, m.pendingOp.kind, t.name, t.namespace))
+			d := deps
+			d.Name = t.name
+			d.Namespace = t.namespace
+			cmds = append(cmds, action(d))
 		}
 		return m, tea.Batch(cmds...)
-	case "suspend":
-		if m.watcher != nil {
-			return m, k8sops.SuspendHelmReleaseCmd(m.watcher.DynamicClient(), m.watcher.HelmReleaseGVR(), m.pendingOp.name, m.pendingOp.namespace)
-		}
-	case "resume":
-		if m.watcher != nil {
-			return m, k8sops.ResumeHelmReleaseCmd(m.watcher.DynamicClient(), m.watcher.HelmReleaseGVR(), m.pendingOp.name, m.pendingOp.namespace)
-		}
 	}
-	return m, nil
+	return m, action(deps)
 }
 
 func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
@@ -1361,9 +1403,7 @@ func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
 	}
 	m.namespace = ns
 	m.header = m.header.SetNamespace(ns)
-	m.mode = ModeTable
-	m.fullScreen = false
-	m.focus = FocusNav
+	m = m.resetToTable()
 	m.table = m.table.ClearSelection()
 
 	if m.appConfig != nil {
@@ -1396,9 +1436,7 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 		m.logStreamer.Stop()
 		m.logStreamer = nil
 	}
-	m.mode = ModeTable
-	m.fullScreen = false
-	m.focus = FocusNav
+	m = m.resetToTable()
 
 	if err := m.clusterMgr.SwitchContext(ctx); err != nil {
 		m.statusBar = m.statusBar.SetMessage("context switch: " + err.Error())
@@ -1437,30 +1475,11 @@ func (m Model) buildTopology(kind, name string) *k8sops.TreeNode {
 	if m.watcher == nil {
 		return nil
 	}
-	switch kind {
-	case "Deployment":
-		deps := m.watcher.ListDeployments(m.namespace)
-		for _, d := range deps {
-			if d.Name == name {
-				return k8sops.BuildDeploymentTopology(d, m.watcher)
-			}
-		}
-	case "Service":
-		svcs := m.watcher.ListServices(m.namespace)
-		for _, s := range svcs {
-			if s.Name == name {
-				return k8sops.BuildServiceTopology(s, m.watcher)
-			}
-		}
-	case "Ingress":
-		ings := m.watcher.ListIngresses(m.namespace)
-		for _, ing := range ings {
-			if ing.Name == name {
-				return k8sops.BuildIngressTopology(ing, m.watcher)
-			}
-		}
+	rd, ok := k8sops.Resolve(kind)
+	if !ok || rd.BuildTopology == nil {
+		return nil
 	}
-	return nil
+	return rd.BuildTopology(m.watcher, m.namespace, name)
 }
 
 // kindSyncing reports whether the watcher's informer for `kind` has not yet
@@ -1549,11 +1568,7 @@ func currentReplicas(row *k8sops.ResourceRow) int32 {
 func (m Model) View() tea.View {
 	v := tea.NewView(m.renderContent())
 	v.AltScreen = true
-	if m.mouseEnabled {
-		v.MouseMode = tea.MouseModeCellMotion
-	} else {
-		v.MouseMode = tea.MouseModeNone
-	}
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
@@ -1758,43 +1773,11 @@ func (m Model) listRows(kind string) []k8sops.ResourceRow {
 	if m.watcher == nil {
 		return nil
 	}
-	ns := m.namespace
-	switch kind {
-	case "Pod":
-		return panels.BuildPodRows(m.watcher.ListPods(ns), m.metricsData)
-	case "Deployment":
-		return panels.BuildDeploymentRows(m.watcher.ListDeployments(ns))
-	case "StatefulSet":
-		return panels.BuildStatefulSetRows(m.watcher.ListStatefulSets(ns))
-	case "DaemonSet":
-		return panels.BuildDaemonSetRows(m.watcher.ListDaemonSets(ns))
-	case "ReplicaSet":
-		return panels.BuildReplicaSetRows(m.watcher.ListReplicaSets(ns))
-	case "Job":
-		return panels.BuildJobRows(m.watcher.ListJobs(ns))
-	case "CronJob":
-		return panels.BuildCronJobRows(m.watcher.ListCronJobs(ns))
-	case "Service":
-		return panels.BuildServiceRows(m.watcher.ListServices(ns))
-	case "Ingress":
-		return panels.BuildIngressRows(m.watcher.ListIngresses(ns))
-	case "ConfigMap":
-		return panels.BuildConfigMapRows(m.watcher.ListConfigMaps(ns))
-	case "Secret":
-		return panels.BuildSecretRows(m.watcher.ListSecrets(ns))
-	case "Node":
-		return panels.BuildNodeRows(m.watcher.ListNodes())
-	case "PersistentVolumeClaim":
-		return panels.BuildPVCRows(m.watcher.ListPVCs(ns))
-	case "PersistentVolume":
-		return panels.BuildPVRows(m.watcher.ListPersistentVolumes())
-	case "Event":
-		return panels.BuildEventRows(m.watcher.ListEvents(ns))
-	case "HelmRelease":
-		return panels.BuildHelmReleaseRows(m.watcher.ListHelmReleases(ns))
-	default:
+	rd, ok := k8sops.Resolve(kind)
+	if !ok || rd.ListRows == nil {
 		return nil
 	}
+	return rd.ListRows(m.watcher, m.namespace, k8sops.RowContext{Metrics: m.metricsData})
 }
 
 func (m *Model) stopAll() {

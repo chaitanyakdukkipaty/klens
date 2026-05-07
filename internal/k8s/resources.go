@@ -5,10 +5,56 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 )
 
+// ActionDeps carries everything an Action might need to execute. Callers
+// populate the fields they have; closures pull what they need.
+//
+// Clientset is the kubernetes.Interface (not the concrete *Clientset) so
+// tests can pass a fake clientset.
+type ActionDeps struct {
+	Clientset   kubernetes.Interface
+	Dynamic     dynamic.Interface
+	HelmGVR     schema.GroupVersionResource
+	Name        string
+	Namespace   string
+	Replicas    int32  // for scale operations
+	YAMLContent string // for apply operations — raw YAML payload to merge-patch
+}
+
+// Action returns a Bubbletea command that executes the operation. The op
+// name (the key under ResourceDescriptor.Actions) describes intent;
+// implementations are kind-specific.
+type Action func(ActionDeps) tea.Cmd
+
+// RowContext carries cross-cutting state needed by row extractors.
+// It is passed verbatim from caller (model) to descriptor.ListRows.
+type RowContext struct {
+	Metrics MetricsUpdatedMsg
+}
+
+// ListRowsFunc returns rows for a kind, given a watcher and namespace.
+// Implementations type-assert internally to the concrete Kubernetes type.
+type ListRowsFunc func(wf *WatcherFactory, namespace string, ctx RowContext) []ResourceRow
+
+// FetchFunc retrieves a live object by name (used by the YAML viewer).
+type FetchFunc func(cs *kubernetes.Clientset, name, namespace string) (any, error)
+
+// BuildTopologyFunc returns a topology tree rooted at the named resource.
+type BuildTopologyFunc func(wf *WatcherFactory, namespace, name string) *TreeNode
+
 // ResourceDescriptor describes a Kubernetes resource type.
+//
+// The metadata fields (Kind, Plural, Columns, Supports*) are static and live
+// in the Registry. The behavior closures (ListRows, Fetch, BuildTopology) are
+// attached via SetHandlers from a registration site so that per-kind code can
+// live in one place even when it depends on the UI layer (lipgloss-rendered
+// percentages, etc.) that the k8s package itself doesn't import.
 type ResourceDescriptor struct {
 	Kind             string
 	Plural           string
@@ -24,12 +70,26 @@ type ResourceDescriptor struct {
 	SupportsAttach   bool
 	SupportsScale    bool
 	SupportsDeletion bool
+
+	// Behavior — populated via SetHandlers, optional per kind.
+	ListRows      ListRowsFunc
+	Fetch         FetchFunc
+	BuildTopology BuildTopologyFunc
+
+	// Actions are op-name-keyed closures: "delete", "scale", "suspend",
+	// "resume", etc. The executeConfirmedOp path looks up the op on the
+	// descriptor and runs it — no kind-keyed switch in operations.go or in
+	// the model. Populated via RegisterAction.
+	Actions map[string]Action
 }
 
 // Column defines a table column for a resource type.
+// When Flex is true, Width is the minimum width and the column expands into
+// any surplus horizontal space available to the table.
 type Column struct {
 	Header string
 	Width  int
+	Flex   bool
 }
 
 // ResourceRow is a single row in the resource table.
@@ -48,9 +108,9 @@ type ResourceRow struct {
 var Registry = []ResourceDescriptor{
 	{Kind: "Pod", Plural: "pods", Namespaced: true, Aliases: []string{"po"},
 		Columns: []Column{
-				{"NAME", 40}, {"READY", 6}, {"STATUS", 15}, {"RESTARTS", 9}, {"AGE", 6},
-				{"CPU", 6}, {"%CPU/R", 7}, {"%CPU/L", 7},
-				{"MEM", 7}, {"%MEM/R", 7}, {"%MEM/L", 7},
+				{"NAME", 40, true}, {"READY", 6, false}, {"STATUS", 15, false}, {"RESTARTS", 9, false}, {"AGE", 6, false},
+				{"CPU", 6, false}, {"%CPU/R", 7, false}, {"%CPU/L", 7, false},
+				{"MEM", 7, false}, {"%MEM/R", 7, false}, {"%MEM/L", 7, false},
 			},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
@@ -59,7 +119,7 @@ var Registry = []ResourceDescriptor{
 		SupportsDeletion: true,
 	},
 	{Kind: "Deployment", Plural: "deployments", Namespaced: true, Aliases: []string{"deploy", "dp"},
-		Columns:          []Column{{"NAME", 40}, {"READY", 10}, {"UP-TO-DATE", 12}, {"AVAILABLE", 12}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"READY", 10, false}, {"UP-TO-DATE", 12, false}, {"AVAILABLE", 12, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsTopology: true,
@@ -67,114 +127,114 @@ var Registry = []ResourceDescriptor{
 		SupportsDeletion: true,
 	},
 	{Kind: "StatefulSet", Plural: "statefulsets", Namespaced: true, Aliases: []string{"sts"},
-		Columns:          []Column{{"NAME", 40}, {"READY", 10}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"READY", 10, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsScale:    true,
 		SupportsDeletion: true,
 	},
 	{Kind: "DaemonSet", Plural: "daemonsets", Namespaced: true, Aliases: []string{"ds"},
-		Columns:          []Column{{"NAME", 40}, {"DESIRED", 10}, {"READY", 8}, {"UP-TO-DATE", 12}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"DESIRED", 10, false}, {"READY", 8, false}, {"UP-TO-DATE", 12, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "ReplicaSet", Plural: "replicasets", Namespaced: true, Aliases: []string{"rs"},
-		Columns:          []Column{{"NAME", 40}, {"DESIRED", 10}, {"CURRENT", 10}, {"READY", 8}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"DESIRED", 10, false}, {"CURRENT", 10, false}, {"READY", 8, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsScale:    true,
 		SupportsDeletion: true,
 	},
 	{Kind: "Job", Plural: "jobs", Namespaced: true, Aliases: []string{"jo"},
-		Columns:          []Column{{"NAME", 40}, {"COMPLETIONS", 14}, {"DURATION", 12}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"COMPLETIONS", 14, false}, {"DURATION", 12, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "CronJob", Plural: "cronjobs", Namespaced: true, Aliases: []string{"cj"},
-		Columns:          []Column{{"NAME", 40}, {"SCHEDULE", 20}, {"LAST SCHEDULE", 16}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"SCHEDULE", 20, false}, {"LAST SCHEDULE", 16, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "Service", Plural: "services", Namespaced: true, Aliases: []string{"svc"},
-		Columns:          []Column{{"NAME", 40}, {"TYPE", 14}, {"CLUSTER-IP", 18}, {"PORT(S)", 20}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"TYPE", 14, false}, {"CLUSTER-IP", 18, false}, {"PORT(S)", 20, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsTopology: true,
 		SupportsDeletion: true,
 	},
 	{Kind: "Endpoints", Plural: "endpoints", Namespaced: true, Aliases: []string{"ep"},
-		Columns: []Column{{"NAME", 40}, {"ENDPOINTS", 40}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"ENDPOINTS", 40, false}, {"AGE", 10, false}},
 	},
 	{Kind: "Ingress", Plural: "ingresses", Namespaced: true, Aliases: []string{"ing"},
-		Columns:          []Column{{"NAME", 35}, {"ADDRESSES", 22}, {"RULES", 40}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 35, true}, {"ADDRESSES", 22, false}, {"RULES", 40, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsTopology: true,
 		SupportsDeletion: true,
 	},
 	{Kind: "ConfigMap", Plural: "configmaps", Namespaced: true, Aliases: []string{"cm"},
-		Columns:          []Column{{"NAME", 40}, {"DATA", 8}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"DATA", 8, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "Secret", Plural: "secrets", Namespaced: true, Aliases: []string{"sec"},
-		Columns:          []Column{{"NAME", 40}, {"TYPE", 30}, {"DATA", 8}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"TYPE", 30, false}, {"DATA", 8, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "ServiceAccount", Plural: "serviceaccounts", Namespaced: true, Aliases: []string{"sa"},
-		Columns:      []Column{{"NAME", 40}, {"SECRETS", 10}, {"AGE", 10}},
+		Columns:      []Column{{"NAME", 40, true}, {"SECRETS", 10, false}, {"AGE", 10, false}},
 		SupportsYAML: true,
 	},
 	{Kind: "PersistentVolumeClaim", Plural: "persistentvolumeclaims", Namespaced: true, Aliases: []string{"pvc"},
-		Columns:          []Column{{"NAME", 40}, {"STATUS", 12}, {"VOLUME", 30}, {"CAPACITY", 12}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"STATUS", 12, false}, {"VOLUME", 30, false}, {"CAPACITY", 12, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "HorizontalPodAutoscaler", Plural: "horizontalpodautoscalers", Namespaced: true, Aliases: []string{"hpa"},
-		Columns: []Column{{"NAME", 40}, {"REFERENCE", 30}, {"TARGETS", 20}, {"MIN", 6}, {"MAX", 6}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"REFERENCE", 30, false}, {"TARGETS", 20, false}, {"MIN", 6, false}, {"MAX", 6, false}, {"AGE", 10, false}},
 	},
 	{Kind: "NetworkPolicy", Plural: "networkpolicies", Namespaced: true, Aliases: []string{"netpol"},
-		Columns: []Column{{"NAME", 40}, {"POD-SELECTOR", 30}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"POD-SELECTOR", 30, false}, {"AGE", 10, false}},
 	},
 	{Kind: "Role", Plural: "roles", APIGroup: "rbac.authorization.k8s.io", Namespaced: true, Aliases: []string{"role"},
-		Columns: []Column{{"NAME", 40}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"AGE", 10, false}},
 	},
 	{Kind: "RoleBinding", Plural: "rolebindings", APIGroup: "rbac.authorization.k8s.io", Namespaced: true, Aliases: []string{"rb"},
-		Columns: []Column{{"NAME", 40}, {"ROLE", 30}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"ROLE", 30, false}, {"AGE", 10, false}},
 	},
 	// Cluster-scoped
 	{Kind: "Node", Plural: "nodes", Namespaced: false, Aliases: []string{"no"},
-		Columns:         []Column{{"NAME", 40}, {"STATUS", 14}, {"ROLES", 20}, {"VERSION", 16}, {"AGE", 10}},
+		Columns:         []Column{{"NAME", 40, true}, {"STATUS", 14, false}, {"ROLES", 20, false}, {"VERSION", 16, false}, {"AGE", 10, false}},
 		SupportsYAML:    true,
 		SupportsMetrics: true,
 	},
 	{Kind: "PersistentVolume", Plural: "persistentvolumes", Namespaced: false, Aliases: []string{"pv"},
-		Columns:          []Column{{"NAME", 40}, {"CAPACITY", 12}, {"ACCESS MODES", 16}, {"STATUS", 12}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"CAPACITY", 12, false}, {"ACCESS MODES", 16, false}, {"STATUS", 12, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "Namespace", Plural: "namespaces", Namespaced: false, Aliases: []string{"ns"},
-		Columns:          []Column{{"NAME", 40}, {"STATUS", 14}, {"AGE", 10}},
+		Columns:          []Column{{"NAME", 40, true}, {"STATUS", 14, false}, {"AGE", 10, false}},
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
 	{Kind: "ClusterRole", Plural: "clusterroles", APIGroup: "rbac.authorization.k8s.io", Namespaced: false, Aliases: []string{"cr"},
-		Columns: []Column{{"NAME", 40}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"AGE", 10, false}},
 	},
 	{Kind: "ClusterRoleBinding", Plural: "clusterrolebindings", APIGroup: "rbac.authorization.k8s.io", Namespaced: false, Aliases: []string{"crb"},
-		Columns: []Column{{"NAME", 40}, {"ROLE", 30}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"ROLE", 30, false}, {"AGE", 10, false}},
 	},
 	{Kind: "StorageClass", Plural: "storageclasses", Namespaced: false, Aliases: []string{"sc"},
-		Columns: []Column{{"NAME", 40}, {"PROVISIONER", 30}, {"AGE", 10}},
+		Columns: []Column{{"NAME", 40, true}, {"PROVISIONER", 30, false}, {"AGE", 10, false}},
 	},
 	{Kind: "Event", Plural: "events", Namespaced: true, Aliases: []string{"ev"},
-		Columns: []Column{{"LAST SEEN", 12}, {"COUNT", 6}, {"AGE", 10}, {"TYPE", 10}, {"REASON", 20}, {"OBJECT", 30}, {"MESSAGE", 40}},
+		Columns: []Column{{"LAST SEEN", 12, false}, {"COUNT", 6, false}, {"AGE", 10, false}, {"TYPE", 10, false}, {"REASON", 20, false}, {"OBJECT", 30, false}, {"MESSAGE", 40, true}},
 	},
 	{Kind: "HelmRelease", Plural: "helmreleases",
 		APIGroup: "helm.toolkit.fluxcd.io", APIVersion: "v2",
 		Namespaced: true, Aliases: []string{"hr"},
-		Columns:      []Column{{"NAME", 36}, {"CHART", 24}, {"VERSION", 12}, {"READY", 8}, {"STATUS", 40}, {"SUSPENDED", 10}, {"AGE", 10}},
+		Columns:      []Column{{"NAME", 36, true}, {"CHART", 24, false}, {"VERSION", 12, false}, {"READY", 8, false}, {"STATUS", 40, false}, {"SUSPENDED", 10, false}, {"AGE", 10, false}},
 		SupportsYAML: true,
 	},
 }
@@ -200,6 +260,57 @@ func Resolve(input string) (ResourceDescriptor, bool) {
 		return ResourceDescriptor{}, false
 	}
 	return Registry[i], true
+}
+
+// SetHandlers attaches behavior closures to the descriptor for `kind`. Returns
+// false if the kind is not registered. Pass nil for any handler that does not
+// apply (e.g. BuildTopology for kinds without SupportsTopology).
+//
+// This registration pattern lets per-kind glue live in one file (typically
+// internal/ui/panels/kinds.go) while keeping the metadata Registry pure data.
+func SetHandlers(kind string, list ListRowsFunc, fetch FetchFunc, topology BuildTopologyFunc) bool {
+	i, ok := aliasMap[strings.ToLower(kind)]
+	if !ok {
+		return false
+	}
+	if list != nil {
+		Registry[i].ListRows = list
+	}
+	if fetch != nil {
+		Registry[i].Fetch = fetch
+	}
+	if topology != nil {
+		Registry[i].BuildTopology = topology
+	}
+	return true
+}
+
+// RegisterAction attaches an Action under `op` to the descriptor for `kind`.
+// Returns false if the kind is not registered.
+//
+// Multiple calls for the same (kind, op) pair overwrite. Op names are
+// arbitrary strings agreed between the caller (typically the model) and the
+// registration site — common ones are "delete", "scale", "suspend", "resume".
+func RegisterAction(kind, op string, action Action) bool {
+	i, ok := aliasMap[strings.ToLower(kind)]
+	if !ok {
+		return false
+	}
+	if Registry[i].Actions == nil {
+		Registry[i].Actions = make(map[string]Action)
+	}
+	Registry[i].Actions[op] = action
+	return true
+}
+
+// LookupAction returns the action registered for (kind, op), or nil if either
+// the kind isn't registered or no action exists for that op.
+func LookupAction(kind, op string) Action {
+	rd, ok := Resolve(kind)
+	if !ok {
+		return nil
+	}
+	return rd.Actions[op]
 }
 
 // AgeString converts a creation timestamp to a human-readable age string.

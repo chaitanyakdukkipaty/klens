@@ -97,7 +97,9 @@ type WatcherFactory struct {
 	syncing        bool
 	accessDenied   map[string]struct{}
 	kindsSynced    map[string]bool // per-kind initial LIST completion
-	mu             sync.RWMutex
+	informerKinds  map[string]bool // populated by Start(); single source of truth
+	// for "is this kind informer-backed at all?"
+	mu sync.RWMutex
 
 	// Event coalescing: instead of emitting one ResourceUpdatedMsg per
 	// informer event, dirtyKinds accumulates kinds touched within the last
@@ -135,6 +137,7 @@ func NewWatcherFactory(cs *kubernetes.Clientset, cfg *rest.Config, namespace str
 		msgCh:          msgCh,
 		accessDenied:   make(map[string]struct{}),
 		kindsSynced:    make(map[string]bool),
+		informerKinds:  make(map[string]bool),
 	}
 }
 
@@ -191,30 +194,20 @@ func (w *WatcherFactory) IsSyncing() bool {
 	return w.syncing
 }
 
-// trackedKinds is the canonical set of resource kinds this WatcherFactory runs
-// informers for. KindSynced returns true (= "ready, do not gate UI") for any
-// kind outside this set so a future nav-panel addition that forgets to set up
-// an informer here doesn't leave the table stuck on "Syncing…" forever.
-var trackedKinds = map[string]bool{
-	"Pod": true, "Service": true, "Endpoints": true, "Node": true,
-	"Namespace": true, "ConfigMap": true, "Secret": true, "ServiceAccount": true,
-	"PersistentVolume": true, "PersistentVolumeClaim": true, "Event": true,
-	"Deployment": true, "StatefulSet": true, "DaemonSet": true, "ReplicaSet": true,
-	"Job": true, "CronJob": true, "Ingress": true, "NetworkPolicy": true,
-	"HelmRelease": true,
-}
-
 // KindSynced reports whether the informer for `kind` has completed its initial
 // LIST. The model uses this to render "Syncing <kind>…" in the table when the
 // user navigates to a kind whose informer hasn't synced yet. For kinds we
 // don't run an informer for, returns true so unrelated nav entries don't get
 // stuck on the syncing placeholder.
+//
+// The set of informer-backed kinds is whatever Start() wired into syncList —
+// no parallel hard-coded map to drift out of sync.
 func (w *WatcherFactory) KindSynced(kind string) bool {
-	if !trackedKinds[kind] {
-		return true
-	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
+	if !w.informerKinds[kind] {
+		return true
+	}
 	return w.kindsSynced[kind]
 }
 
@@ -318,6 +311,21 @@ func (w *WatcherFactory) Start() {
 		{"Ingress", setup(w.factory.Networking().V1().Ingresses().Informer(), "Ingress")},
 		{"NetworkPolicy", setup(w.factory.Networking().V1().NetworkPolicies().Informer(), "NetworkPolicy")},
 	}
+
+	// Record which kinds are informer-backed so KindSynced can distinguish
+	// "no informer for this kind" (UI does not gate) from "informer pending
+	// initial LIST" (UI shows Syncing). HelmRelease is registered up-front
+	// even though its informer is wired asynchronously below — otherwise
+	// KindSynced("HelmRelease") would briefly return true during the GVR
+	// discovery window, masking the loading state.
+	w.mu.Lock()
+	for _, ki := range syncList {
+		w.informerKinds[ki.kind] = true
+	}
+	if w.dynamicFactory != nil {
+		w.informerKinds["HelmRelease"] = true
+	}
+	w.mu.Unlock()
 
 	w.factory.Start(ctx.Done())
 

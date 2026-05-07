@@ -11,9 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -25,78 +23,11 @@ type OperationResultMsg struct {
 	Err       error
 }
 
-// DeleteCmd deletes a resource by kind/name/namespace.
-func DeleteCmd(cs *kubernetes.Clientset, kind, name, namespace string) tea.Cmd {
-	return func() tea.Msg {
-		ctx := context.Background()
-		grace := int64(0)
-		opts := metav1.DeleteOptions{GracePeriodSeconds: &grace}
-		var err error
-		switch kind {
-		case "Pod":
-			err = cs.CoreV1().Pods(namespace).Delete(ctx, name, opts)
-		case "Deployment":
-			err = cs.AppsV1().Deployments(namespace).Delete(ctx, name, opts)
-		case "StatefulSet":
-			err = cs.AppsV1().StatefulSets(namespace).Delete(ctx, name, opts)
-		case "DaemonSet":
-			err = cs.AppsV1().DaemonSets(namespace).Delete(ctx, name, opts)
-		case "ReplicaSet":
-			err = cs.AppsV1().ReplicaSets(namespace).Delete(ctx, name, opts)
-		case "Service":
-			err = cs.CoreV1().Services(namespace).Delete(ctx, name, opts)
-		case "ConfigMap":
-			err = cs.CoreV1().ConfigMaps(namespace).Delete(ctx, name, opts)
-		case "Secret":
-			err = cs.CoreV1().Secrets(namespace).Delete(ctx, name, opts)
-		case "Ingress":
-			err = cs.NetworkingV1().Ingresses(namespace).Delete(ctx, name, opts)
-		case "Job":
-			err = cs.BatchV1().Jobs(namespace).Delete(ctx, name, opts)
-		case "CronJob":
-			err = cs.BatchV1().CronJobs(namespace).Delete(ctx, name, opts)
-		case "PersistentVolumeClaim":
-			err = cs.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, name, opts)
-		case "PersistentVolume":
-			err = cs.CoreV1().PersistentVolumes().Delete(ctx, name, opts)
-		case "Namespace":
-			err = cs.CoreV1().Namespaces().Delete(ctx, name, opts)
-		default:
-			err = fmt.Errorf("delete not supported for %s", kind)
-		}
-		if err != nil {
-			return OperationResultMsg{Operation: "delete", Resource: name, Err: err}
-		}
-		return OperationResultMsg{Operation: "delete", Resource: name, Success: true}
-	}
-}
-
-// ScaleCmd scales a scalable resource to the given replica count.
-func ScaleCmd(cs *kubernetes.Clientset, kind, name, namespace string, replicas int32) tea.Cmd {
-	return func() tea.Msg {
-		ctx := context.Background()
-		patch := map[string]interface{}{
-			"spec": map[string]interface{}{"replicas": replicas},
-		}
-		patchBytes, _ := json.Marshal(patch)
-		opts := metav1.PatchOptions{}
-		var err error
-		switch kind {
-		case "Deployment":
-			_, err = cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.MergePatchType, patchBytes, opts)
-		case "StatefulSet":
-			_, err = cs.AppsV1().StatefulSets(namespace).Patch(ctx, name, types.MergePatchType, patchBytes, opts)
-		case "ReplicaSet":
-			_, err = cs.AppsV1().ReplicaSets(namespace).Patch(ctx, name, types.MergePatchType, patchBytes, opts)
-		default:
-			err = fmt.Errorf("scale not supported for %s", kind)
-		}
-		if err != nil {
-			return OperationResultMsg{Operation: "scale", Resource: name, Err: err}
-		}
-		return OperationResultMsg{Operation: "scale", Resource: name, Success: true}
-	}
-}
+// Per-kind delete and scale dispatch live as Actions on the
+// ResourceDescriptor (see RegisterAction in resources.go and the
+// registration site in internal/ui/panels/kinds.go). Callers look up
+// k8s.LookupAction(kind, "delete") or LookupAction(kind, "scale") rather
+// than going through a kind-keyed switch here.
 
 // RolloutRestartCmd restarts a deployment by patching the pod template annotation.
 func RolloutRestartCmd(cs *kubernetes.Clientset, kind, name, namespace string) tea.Cmd {
@@ -246,32 +177,8 @@ func RolloutUndoCmd(cs *kubernetes.Clientset, kind, name, namespace string) tea.
 	}
 }
 
-// SuspendHelmReleaseCmd sets spec.suspend=true on a FluxCD HelmRelease.
-func SuspendHelmReleaseCmd(dc dynamic.Interface, gvr schema.GroupVersionResource, name, namespace string) tea.Cmd {
-	return helmSuspendPatchCmd(dc, gvr, name, namespace, true)
-}
-
-// ResumeHelmReleaseCmd sets spec.suspend=false on a FluxCD HelmRelease.
-func ResumeHelmReleaseCmd(dc dynamic.Interface, gvr schema.GroupVersionResource, name, namespace string) tea.Cmd {
-	return helmSuspendPatchCmd(dc, gvr, name, namespace, false)
-}
-
-func helmSuspendPatchCmd(dc dynamic.Interface, gvr schema.GroupVersionResource, name, namespace string, suspend bool) tea.Cmd {
-	return func() tea.Msg {
-		ctx := context.Background()
-		patch := map[string]interface{}{"spec": map[string]interface{}{"suspend": suspend}}
-		patchBytes, _ := json.Marshal(patch)
-		_, err := dc.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
-		op := "suspend"
-		if !suspend {
-			op = "resume"
-		}
-		if err != nil {
-			return OperationResultMsg{Operation: op, Resource: name, Err: err}
-		}
-		return OperationResultMsg{Operation: op, Resource: name, Success: true}
-	}
-}
+// HelmRelease suspend/resume are registered as Actions on the descriptor
+// (see registerActions in internal/ui/panels/kinds.go).
 
 // ensure appsv1 is used
 var _ = appsv1.Deployment{}

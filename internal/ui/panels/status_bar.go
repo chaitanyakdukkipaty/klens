@@ -29,7 +29,6 @@ var defaultHelp = []HelpItem{
 	{Key: "l", Desc: "logs"},
 	{Key: "t", Desc: "topology"},
 	{Key: "m", Desc: "metrics"},
-	{Key: "M", Desc: "mouse"},
 	{Key: ":", Desc: "cmd"},
 	{Key: "q", Desc: "quit"},
 }
