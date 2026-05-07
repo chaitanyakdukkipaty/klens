@@ -537,10 +537,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					switch click.Button {
 					case tea.MouseLeft:
-						shift := mouse.Mod&tea.ModShift != 0
 						innerX := mouse.X - navW
 						var started bool
-						m.table, started = m.table.HandleMouseDown(innerX, innerY, shift)
+						m.table, started = m.table.HandleMouseDown(innerX, innerY)
 						if started {
 							return m, panels.TableAutoScrollTickCmd()
 						}

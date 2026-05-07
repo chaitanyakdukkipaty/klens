@@ -49,8 +49,8 @@ type hitZone struct {
 
 // LogAutoScrollTickMsg drives drag-to-copy auto-scroll. The root model
 // schedules the first tick on mouse-down and reschedules from its handler
-// while a drag is in progress; mouse-up flips selecting=false, so the next
-// tick sees no drag and the loop dies on its own.
+// while a drag is in progress; mouse-up flips drag.Active=false, so the
+// next tick sees no drag and the loop dies on its own.
 type LogAutoScrollTickMsg struct{}
 
 // LogAutoScrollTickCmd schedules one auto-scroll tick. 50 ms ≈ 20 lines/sec
@@ -88,22 +88,13 @@ type logGroupState struct {
 
 	lineCountStr string
 
-	// In-app drag-to-copy selection. selStart/selEnd are indices into
-	// LogViewer.lines; selDragged distinguishes a real drag from a click that
-	// never moved (so a stray click doesn't clobber the clipboard). displayRows
-	// is built parallel to viewport content lines to translate clicks back to
-	// LogViewer.lines indices.
-	selecting    bool
-	selDragged   bool
-	selStartLine int
-	selEndLine   int
-	displayRows  []int
+	// drag holds drag-to-copy lifecycle state (indices into LogViewer.lines).
+	// See DragSelection in drag.go.
+	drag DragSelection
 
-	// dragLastX/Y is the last drag cursor position in panel-local coords. It
-	// powers auto-scroll while dragging when the cursor sits outside the
-	// viewport vertically and is updated by HandleMouseDown/Drag.
-	dragLastX int
-	dragLastY int
+	// displayRows is built parallel to viewport content lines to translate
+	// click coords back to LogViewer.lines indices. Panel-specific.
+	displayRows []int
 }
 
 func newGroupState(name string) logGroupState {
@@ -116,20 +107,14 @@ func newGroupState(name string) logGroupState {
 		podFilter:     -1,
 		searchCurrent: -1,
 		lineCountStr:  "  0 lines",
-		selStartLine:  -1,
-		selEndLine:    -1,
+		drag:          NewDragSelection(),
 	}
 }
 
 // clearSelection resets in-app drag-select state. Call on actions that
 // invalidate the previous selection (esc, layout cycle, group switch, filter
 // change). Does not rebuild — callers do that anyway.
-func (g *logGroupState) clearSelection() {
-	g.selecting = false
-	g.selDragged = false
-	g.selStartLine = -1
-	g.selEndLine = -1
-}
+func (g *logGroupState) clearSelection() { g.drag.Reset() }
 
 // LogViewer displays merged streaming logs from multiple pods, organized into
 // one or more groups (tabs). Each group owns its own filter, search, scroll
@@ -299,7 +284,7 @@ func (v LogViewer) HasActiveState() bool {
 		return false
 	}
 	g := v.groups[v.focusedGroup]
-	return g.selecting || g.podFilter >= 0 || g.filter != "" || g.filterOn || g.searchQuery != "" || g.searchOn
+	return g.drag.Active || g.podFilter >= 0 || g.filter != "" || g.filterOn || g.searchQuery != "" || g.searchOn
 }
 
 // IsCapturingInput reports whether the focused group's filter or search input is open.
@@ -318,7 +303,7 @@ func (v LogViewer) HandleEsc() LogViewer {
 		return v
 	}
 	g := &v.groups[v.focusedGroup]
-	if g.selecting {
+	if g.drag.Active {
 		g.clearSelection()
 		v.rebuildGroup(v.focusedGroup)
 		return v
@@ -395,7 +380,7 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 			// indices into v.lines, so cancelling any in-flight selection is
 			// safer than rewriting indices (rare path on chatty pods).
 			for i := range v.groups {
-				if v.groups[i].selecting {
+				if v.groups[i].drag.Active {
 					v.groups[i].clearSelection()
 				}
 			}
@@ -690,8 +675,8 @@ func (v *LogViewer) rebuildGroup(idx int) {
 
 	// Selection range — only the focused group renders highlighting.
 	selLo, selHi := -1, -1
-	if idx == v.focusedGroup && g.selecting && g.selStartLine >= 0 && g.selEndLine >= 0 {
-		selLo, selHi = g.selStartLine, g.selEndLine
+	if idx == v.focusedGroup && g.drag.Active && g.drag.Start >= 0 && g.drag.End >= 0 {
+		selLo, selHi = g.drag.Start, g.drag.End
 		if selLo > selHi {
 			selLo, selHi = selHi, selLo
 		}
@@ -1362,12 +1347,7 @@ func (v LogViewer) HandleMouseDown(localX, localY int) (LogViewer, bool) {
 		v.focusedGroup = groupIdx
 	}
 	g := &v.groups[v.focusedGroup]
-	g.selecting = true
-	g.selDragged = false
-	g.selStartLine = idx
-	g.selEndLine = idx
-	g.dragLastX = localX
-	g.dragLastY = localY
+	g.drag.Begin(idx, localX, localY)
 	v.rebuildGroup(v.focusedGroup)
 	return v, true
 }
@@ -1380,19 +1360,16 @@ func (v LogViewer) HandleMouseDown(localX, localY int) (LogViewer, bool) {
 // the cursor wanders into another stripe in split mode.
 func (v LogViewer) HandleMouseDrag(localX, localY int) LogViewer {
 	g := &v.groups[v.focusedGroup]
-	if !g.selecting {
+	if !g.drag.Active {
 		return v
 	}
-	g.dragLastX = localX
-	g.dragLastY = localY
+	g.drag.Track(localX, localY)
 	idx, ok := v.lineAtScreenInGroup(v.focusedGroup, localX, localY)
 	if !ok {
 		// Outside the viewport — auto-scroll tick will extend selection.
 		return v
 	}
-	if idx != g.selEndLine {
-		g.selDragged = true
-		g.selEndLine = idx
+	if g.drag.Extend(idx) {
 		v.rebuildGroup(v.focusedGroup)
 	}
 	return v
@@ -1405,7 +1382,7 @@ func (v LogViewer) IsDragging() bool {
 	if len(v.groups) == 0 || v.focusedGroup < 0 || v.focusedGroup >= len(v.groups) {
 		return false
 	}
-	return v.groups[v.focusedGroup].selecting
+	return v.groups[v.focusedGroup].drag.Active
 }
 
 // AutoScrollStep performs one viewport scroll step when the last known drag
@@ -1417,14 +1394,14 @@ func (v LogViewer) AutoScrollStep() LogViewer {
 		return v
 	}
 	g := &v.groups[v.focusedGroup]
-	if !g.selecting {
+	if !g.drag.Active {
 		return v
 	}
 	_, y1, _, y2, ok := v.viewportBoundsFor(v.focusedGroup)
 	if !ok {
 		return v
 	}
-	if g.dragLastY >= y1 && g.dragLastY <= y2 {
+	if g.drag.LastY >= y1 && g.drag.LastY <= y2 {
 		return v
 	}
 	height := g.viewport.Height()
@@ -1441,7 +1418,7 @@ func (v LogViewer) AutoScrollStep() LogViewer {
 	}
 	cur := g.viewport.YOffset()
 	var next int
-	if g.dragLastY < y1 {
+	if g.drag.LastY < y1 {
 		if cur <= 0 {
 			return v
 		}
@@ -1459,7 +1436,7 @@ func (v LogViewer) AutoScrollStep() LogViewer {
 		g.autoScroll = false
 	}
 	var endRow int
-	if g.dragLastY < y1 {
+	if g.drag.LastY < y1 {
 		endRow = next
 	} else {
 		endRow = next + height - 1
@@ -1471,10 +1448,7 @@ func (v LogViewer) AutoScrollStep() LogViewer {
 		endRow = 0
 	}
 	newEnd := g.displayRows[endRow]
-	if newEnd != g.selEndLine {
-		g.selDragged = true
-		g.selEndLine = newEnd
-	}
+	g.drag.Extend(newEnd)
 	v.rebuildGroup(v.focusedGroup)
 	return v
 }
@@ -1486,14 +1460,11 @@ func (v LogViewer) AutoScrollStep() LogViewer {
 // shouldn't clobber the clipboard).
 func (v LogViewer) HandleMouseUp(localX, localY int) (LogViewer, string) {
 	g := &v.groups[v.focusedGroup]
-	if !g.selecting {
+	if !g.drag.Active {
 		return v, ""
 	}
-	dragged := g.selDragged
-	lo, hi := g.selStartLine, g.selEndLine
-	if lo > hi {
-		lo, hi = hi, lo
-	}
+	dragged := g.drag.Moved
+	lo, hi := g.drag.Range()
 	g.clearSelection()
 	v.rebuildGroup(v.focusedGroup)
 	if !dragged || lo < 0 || hi < 0 || lo >= len(v.lines) {

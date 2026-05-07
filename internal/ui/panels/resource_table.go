@@ -67,16 +67,9 @@ type ResourceTable struct {
 	filterInput string
 	syncing  bool
 
-	// Drag-to-copy selection over a range of filtered rows. selStart/selEnd
-	// are indices into t.filtered. selFullRow is set at mouse-down based on
-	// whether shift was held — controls names-vs-tab-separated-row clipboard
-	// output. dragLastY is the most recent drag cursor in panel-inner coords.
-	selecting  bool
-	selDragged bool
-	selStart   int
-	selEnd     int
-	selFullRow bool
-	dragLastY  int
+	// drag holds drag-to-copy lifecycle state (indices into t.filtered).
+	// See DragSelection in drag.go.
+	drag DragSelection
 }
 
 func NewResourceTable(w, h int) ResourceTable {
@@ -290,23 +283,17 @@ func (t ResourceTable) rowAtInnerY(innerY int) (int, bool) {
 }
 
 // IsDragging reports whether a drag-select is in progress.
-func (t ResourceTable) IsDragging() bool { return t.selecting }
+func (t ResourceTable) IsDragging() bool { return t.drag.Active }
 
 // HandleMouseDown starts a drag-select on the row under (innerX, innerY).
-// shift=true means the drag will copy full row content rather than names on
-// release. Multi-select is NOT toggled here — that happens in HandleMouseUp
-// for clicks that didn't drag, preserving the prior single-click semantics.
-func (t ResourceTable) HandleMouseDown(innerX, innerY int, shift bool) (ResourceTable, bool) {
+// Multi-select is NOT toggled here — that happens in HandleMouseUp for
+// clicks that didn't drag, preserving the prior single-click semantics.
+func (t ResourceTable) HandleMouseDown(innerX, innerY int) (ResourceTable, bool) {
 	row, ok := t.rowAtInnerY(innerY)
 	if !ok {
 		return t, false
 	}
-	t.selecting = true
-	t.selDragged = false
-	t.selStart = row
-	t.selEnd = row
-	t.selFullRow = shift
-	t.dragLastY = innerY
+	t.drag.Begin(row, innerX, innerY)
 	t.cursor = row
 	return t, true
 }
@@ -314,50 +301,37 @@ func (t ResourceTable) HandleMouseDown(innerX, innerY int, shift bool) (Resource
 // HandleMouseDrag extends the drag-select. Auto-scroll past the visible band
 // is handled separately by AutoScrollStep, which fires on a tick.
 func (t ResourceTable) HandleMouseDrag(innerX, innerY int) ResourceTable {
-	if !t.selecting {
+	if !t.drag.Active {
 		return t
 	}
-	t.dragLastY = innerY
+	t.drag.Track(innerX, innerY)
 	row, ok := t.rowAtInnerY(innerY)
 	if !ok {
 		return t
 	}
-	if row != t.selEnd {
-		t.selDragged = true
-		t.selEnd = row
+	if t.drag.Extend(row) {
 		t.cursor = row
 	}
 	return t
 }
 
 // HandleMouseUp finalises a drag-select. A real drag copies the [lo..hi]
-// range to the clipboard (names by default, tab-separated full rows when
-// shift was held at mouse-down). A click without drag falls back to the
-// single-click behaviour: toggle multi-select on the clicked row.
+// range of resource names to the clipboard. A click without drag falls back
+// to the single-click behaviour: toggle multi-select on the clicked row.
 func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string) {
-	if !t.selecting {
+	if !t.drag.Active {
 		return t, ""
 	}
-	dragged := t.selDragged
-	fullRow := t.selFullRow
-	lo, hi := t.selStart, t.selEnd
-	if lo > hi {
-		lo, hi = hi, lo
-	}
-	t.selecting = false
-	t.selDragged = false
-	t.selFullRow = false
+	dragged := t.drag.Moved
+	lo, hi := t.drag.Range()
+	t.drag.Reset()
 	if !dragged {
 		if lo >= 0 && lo < len(t.filtered) {
 			t.selected[t.filtered[lo].Name] = !t.selected[t.filtered[lo].Name]
 		}
-		t.selStart = -1
-		t.selEnd = -1
 		return t, ""
 	}
 	if lo < 0 || hi < 0 || lo >= len(t.filtered) {
-		t.selStart = -1
-		t.selEnd = -1
 		return t, ""
 	}
 	if hi >= len(t.filtered) {
@@ -365,29 +339,15 @@ func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string)
 	}
 	parts := make([]string, 0, hi-lo+1)
 	for i := lo; i <= hi; i++ {
-		r := t.filtered[i]
-		if fullRow {
-			values := r.Values
-			if len(values) == 0 {
-				values = append([]string{r.Name}, append([]string{r.Status, r.Age}, r.Extra...)...)
-			}
-			parts = append(parts, strings.Join(values, "\t"))
-		} else {
-			parts = append(parts, r.Name)
-		}
+		parts = append(parts, t.filtered[i].Name)
 	}
-	t.selStart = -1
-	t.selEnd = -1
 	if err := clipboard.WriteAll(strings.Join(parts, "\n")); err != nil {
 		return t, "copy failed: " + err.Error()
 	}
 	n := hi - lo + 1
 	noun := "name"
-	if fullRow {
-		noun = "row"
-	}
 	if n != 1 {
-		noun += "s"
+		noun = "names"
 	}
 	return t, fmt.Sprintf("copied %d %s", n, noun)
 }
@@ -395,15 +355,15 @@ func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string)
 // AutoScrollStep advances the cursor (and hence scrollStart) by one row when
 // the last drag cursor sat above or below the visible row band.
 func (t ResourceTable) AutoScrollStep() ResourceTable {
-	if !t.selecting || len(t.filtered) == 0 {
+	if !t.drag.Active || len(t.filtered) == 0 {
 		return t
 	}
 	firstY := t.firstVisibleRowY()
 	lastY := firstY + t.visibleRowCount() - 1
-	if t.dragLastY >= firstY && t.dragLastY <= lastY {
+	if t.drag.LastY >= firstY && t.drag.LastY <= lastY {
 		return t
 	}
-	if t.dragLastY < firstY {
+	if t.drag.LastY < firstY {
 		if t.cursor <= 0 {
 			return t
 		}
@@ -414,8 +374,7 @@ func (t ResourceTable) AutoScrollStep() ResourceTable {
 		}
 		t.cursor++
 	}
-	t.selDragged = true
-	t.selEnd = t.cursor
+	t.drag.Extend(t.cursor)
 	return t
 }
 
@@ -503,11 +462,8 @@ func (t ResourceTable) View() string {
 	start := t.scrollStart()
 
 	dragLo, dragHi := -1, -1
-	if t.selecting {
-		dragLo, dragHi = t.selStart, t.selEnd
-		if dragLo > dragHi {
-			dragLo, dragHi = dragHi, dragLo
-		}
+	if t.drag.Active {
+		dragLo, dragHi = t.drag.Range()
 	}
 
 	var rowLines []string

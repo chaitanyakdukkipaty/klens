@@ -60,15 +60,9 @@ type YAMLViewer struct {
 	rawLines         []string
 	highlightedLines []string
 
-	// Drag-to-copy selection state. selStart/selEnd are indices into
-	// rawLines/highlightedLines. dragLastX/Y is the most recent drag cursor in
-	// panel-local coords, used by AutoScrollStep.
-	selecting  bool
-	selDragged bool
-	selStart   int
-	selEnd     int
-	dragLastX  int
-	dragLastY  int
+	// drag holds drag-to-copy lifecycle state (indices into rawLines /
+	// highlightedLines). See DragSelection in drag.go.
+	drag DragSelection
 }
 
 func NewYAMLViewer(w, h int) YAMLViewer {
@@ -99,10 +93,7 @@ func (v YAMLViewer) Update(msg tea.Msg) (YAMLViewer, tea.Cmd) {
 		v.raw = msg.YAML
 		v.rawLines = strings.Split(msg.YAML, "\n")
 		v.highlightedLines = strings.Split(highlightYAML(msg.YAML), "\n")
-		v.selecting = false
-		v.selDragged = false
-		v.selStart = -1
-		v.selEnd = -1
+		v.drag.Reset()
 		v.rebuild()
 		v.viewport.GotoTop()
 	case tea.MouseWheelMsg:
@@ -134,14 +125,11 @@ func (v *YAMLViewer) rebuild() {
 		v.viewport.SetContent("")
 		return
 	}
-	if !v.selecting || v.selStart < 0 || v.selEnd < 0 {
+	if !v.drag.Active || v.drag.Start < 0 || v.drag.End < 0 {
 		v.viewport.SetContent(strings.Join(v.highlightedLines, "\n"))
 		return
 	}
-	lo, hi := v.selStart, v.selEnd
-	if lo > hi {
-		lo, hi = hi, lo
-	}
+	lo, hi := v.drag.Range()
 	if lo < 0 {
 		lo = 0
 	}
@@ -193,12 +181,7 @@ func (v YAMLViewer) HandleMouseDown(localX, localY int) (YAMLViewer, bool) {
 	if !ok {
 		return v, false
 	}
-	v.selecting = true
-	v.selDragged = false
-	v.selStart = idx
-	v.selEnd = idx
-	v.dragLastX = localX
-	v.dragLastY = localY
+	v.drag.Begin(idx, localX, localY)
 	v.rebuild()
 	return v, true
 }
@@ -206,18 +189,15 @@ func (v YAMLViewer) HandleMouseDown(localX, localY int) (YAMLViewer, bool) {
 // HandleMouseDrag extends the selection. Records dragLastX/Y so AutoScrollStep
 // can drive scrolling when the cursor sits outside the viewport.
 func (v YAMLViewer) HandleMouseDrag(localX, localY int) YAMLViewer {
-	if !v.selecting {
+	if !v.drag.Active {
 		return v
 	}
-	v.dragLastX = localX
-	v.dragLastY = localY
+	v.drag.Track(localX, localY)
 	idx, ok := v.lineAtScreenY(localY)
 	if !ok {
 		return v
 	}
-	if idx != v.selEnd {
-		v.selDragged = true
-		v.selEnd = idx
+	if v.drag.Extend(idx) {
 		v.rebuild()
 	}
 	return v
@@ -228,18 +208,12 @@ func (v YAMLViewer) HandleMouseDrag(localX, localY int) YAMLViewer {
 // clipboard. A click without drag clears the selection but does not clobber
 // the clipboard.
 func (v YAMLViewer) HandleMouseUp(localX, localY int) (YAMLViewer, string) {
-	if !v.selecting {
+	if !v.drag.Active {
 		return v, ""
 	}
-	dragged := v.selDragged
-	lo, hi := v.selStart, v.selEnd
-	if lo > hi {
-		lo, hi = hi, lo
-	}
-	v.selecting = false
-	v.selDragged = false
-	v.selStart = -1
-	v.selEnd = -1
+	dragged := v.drag.Moved
+	lo, hi := v.drag.Range()
+	v.drag.Reset()
 	v.rebuild()
 	if !dragged || lo < 0 || hi < 0 || lo >= len(v.rawLines) {
 		return v, ""
@@ -256,20 +230,20 @@ func (v YAMLViewer) HandleMouseUp(localX, localY int) (YAMLViewer, string) {
 }
 
 // IsDragging reports whether a drag-select is in progress.
-func (v YAMLViewer) IsDragging() bool { return v.selecting }
+func (v YAMLViewer) IsDragging() bool { return v.drag.Active }
 
 // AutoScrollStep advances the viewport one line up or down when the last
 // drag-cursor position sits outside the viewport vertically, and extends
 // selEnd to the newly-revealed first/last visible line.
 func (v YAMLViewer) AutoScrollStep() YAMLViewer {
-	if !v.selecting || len(v.highlightedLines) == 0 {
+	if !v.drag.Active || len(v.highlightedLines) == 0 {
 		return v
 	}
 	_, y1, _, y2, ok := v.viewportBounds()
 	if !ok {
 		return v
 	}
-	if v.dragLastY >= y1 && v.dragLastY <= y2 {
+	if v.drag.LastY >= y1 && v.drag.LastY <= y2 {
 		return v
 	}
 	height := v.viewport.Height()
@@ -283,7 +257,7 @@ func (v YAMLViewer) AutoScrollStep() YAMLViewer {
 	}
 	cur := v.viewport.YOffset()
 	var next, endRow int
-	if v.dragLastY < y1 {
+	if v.drag.LastY < y1 {
 		if cur <= 0 {
 			return v
 		}
@@ -303,11 +277,9 @@ func (v YAMLViewer) AutoScrollStep() YAMLViewer {
 	if endRow < 0 {
 		endRow = 0
 	}
-	if endRow != v.selEnd {
-		v.selDragged = true
-		v.selEnd = endRow
+	if v.drag.Extend(endRow) {
+		v.rebuild()
 	}
-	v.rebuild()
 	return v
 }
 
