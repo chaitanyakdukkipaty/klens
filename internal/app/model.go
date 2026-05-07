@@ -69,6 +69,12 @@ type Model struct {
 	// false whenever the user returns to ModeTable.
 	fullScreen bool
 
+	// mouseEnabled controls whether the program captures mouse events. When
+	// false, the terminal handles mouse natively — drag-to-select + Cmd+C /
+	// Ctrl+Shift+C work for copying log/yaml text out of the TUI. Toggled by
+	// `M`. Default true.
+	mouseEnabled bool
+
 	// Pending operation waiting for confirm dialog
 	pendingOp pendingOpData
 
@@ -160,6 +166,7 @@ func New(readOnly bool) Model {
 		loading:         true,
 		readOnlyFlag:    readOnly,
 		readOnly:        readOnly,
+		mouseEnabled:    true,
 	}
 }
 
@@ -238,10 +245,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			k8sops.MetricsTickCmd(),
 		)
 
+	// (kindSyncing/setKindAndSync helpers are declared below near setStatusBarKind)
+
 	case k8sops.CacheSyncedMsg:
 		m.syncing = false
-		m.table = m.table.SetSyncing(false)
+		// Pods are synced (the primary informer drives this message). Update the
+		// table's syncing badge based on whether the *currently active* kind is
+		// itself synced — Pod is always true here, but if the user resumed on a
+		// non-Pod kind whose informer is still loading, the badge stays on.
+		m.table = m.table.SetSyncing(m.kindSyncing(m.nav.ActiveKind()))
 		return m, tea.Batch(k8sops.WatchCmd(m.msgCh), m.buildTableCmd())
+
+	case k8sops.KindSyncedMsg:
+		// A non-primary informer finished its initial LIST. Refresh the table
+		// only if the user is currently looking at that kind — otherwise the
+		// next ResourceUpdatedMsg from the coalesce loop will pick it up.
+		if m.mode == ModeTable && m.nav.ActiveKind() == msg.Kind {
+			m.table = m.table.SetSyncing(false)
+			return m, tea.Batch(k8sops.WatchCmd(m.msgCh), m.buildTableCmd())
+		}
+		return m, k8sops.WatchCmd(m.msgCh)
 
 	case switchNamespaceMsg:
 		return m.switchNamespace(msg.namespace)
@@ -321,7 +344,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, k8sops.MetricsTickCmd())
 		}
 		if m.mode == ModeTable && m.nav.ActiveKind() == "Pod" {
-			m.table = m.table.WithRows(m.listRows("Pod"))
+			// Patch only the metrics-related Values + Status on existing rows;
+			// no sort, no filter recompute. New pods that appear between ticks
+			// will arrive via the regular ResourceUpdatedMsg path.
+			m.table = m.table.PatchValuesByName(m.listRows("Pod"))
 		}
 		return m, k8sops.MetricsTickCmd()
 
@@ -499,7 +525,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.nav = m.nav.SetFocused(false)
 					m.table = m.table.SetFocused(true)
 					if newKind != prevKind {
-						m.table = m.table.SetKind(newKind)
+						m.table = m.setKindAndSync(newKind)
 						m.setStatusBarKind(newKind)
 						return m, m.buildTableCmd()
 					}
@@ -531,7 +557,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			// Logs panel click routing: switch tabs/stripes by clicking on them.
+			// Logs panel click routing. Try drag-select first: HandleMouseDown
+			// only succeeds when the click lands on viewport content (auto-
+			// switches focus across stripes in split mode), so chrome clicks
+			// (tab bar, stripe borders/titles) fall through to HandleClickAt.
 			// Origin is (navW, 1) in normal layout; (0, 0) in fullscreen.
 			if click.Button == tea.MouseLeft && m.mode == ModeLogs {
 				var ox, oy int
@@ -541,12 +570,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				localX := mouse.X - ox
 				localY := mouse.Y - oy
+				var started bool
+				m.logView, started = m.logView.HandleMouseDown(localX, localY)
+				if started {
+					if m.focus != FocusContent {
+						m.focus = FocusContent
+						m.nav = m.nav.SetFocused(false)
+					}
+					return m, nil
+				}
 				var hit bool
 				m.logView, hit = m.logView.HandleClickAt(localX, localY)
 				if hit {
 					if m.focus != FocusContent {
 						m.focus = FocusContent
 						m.nav = m.nav.SetFocused(false)
+					}
+					return m, nil
+				}
+			}
+		}
+		// Drag/release for in-app log drag-select. Only active in ModeLogs;
+		// HandleMouseDrag/Up are no-ops when no selection is in flight, so
+		// stray motion/release events from other contexts are harmless.
+		if m.mode == ModeLogs {
+			var ox, oy int
+			if !m.fullScreen {
+				ox = m.layout.Nav().Width
+				oy = 1
+			}
+			if motion, ok := msg.(tea.MouseMotionMsg); ok {
+				mp := motion.Mouse()
+				m.logView = m.logView.HandleMouseDrag(mp.X-ox, mp.Y-oy)
+				return m, nil
+			}
+			if release, ok := msg.(tea.MouseReleaseMsg); ok {
+				if release.Button == tea.MouseLeft {
+					mp := release.Mouse()
+					var status string
+					m.logView, status = m.logView.HandleMouseUp(mp.X-ox, mp.Y-oy)
+					if status != "" {
+						m.statusBar = m.statusBar.SetMessage(status)
 					}
 					return m, nil
 				}
@@ -594,7 +658,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.nav, cmd = m.nav.Update(msg)
 		if m.nav.ActiveKind() != prev {
-			m.table = m.table.SetKind(m.nav.ActiveKind())
+			m.table = m.setKindAndSync(m.nav.ActiveKind())
 			m.setStatusBarKind(m.nav.ActiveKind())
 			return m, tea.Batch(cmd, m.buildTableCmd())
 		}
@@ -614,6 +678,21 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m = m.resizePanels()
 			return m, nil
 		}
+	case "M":
+		// Toggle mouse capture so the user can drag-select text natively
+		// and Cmd+C / Ctrl+Shift+C through their terminal. While disabled,
+		// tab/stripe clicks and wheel scrolling are inactive — press M again
+		// to restore mouse-driven UX.
+		if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
+			break // literal in editor Insert mode
+		}
+		m.mouseEnabled = !m.mouseEnabled
+		if m.mouseEnabled {
+			m.statusBar = m.statusBar.SetMessage("mouse on (M to disable for drag-select)")
+		} else {
+			m.statusBar = m.statusBar.SetMessage("mouse off — drag to select, Cmd+C to copy, M to re-enable")
+		}
+		return m, nil
 	case "q":
 		if m.mode == ModeEditor {
 			var cmd tea.Cmd
@@ -785,7 +864,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		prev := m.nav.ActiveKind()
 		m.nav, cmd = m.nav.Update(msg)
 		if m.nav.ActiveKind() != prev {
-			m.table = m.table.SetKind(m.nav.ActiveKind())
+			m.table = m.setKindAndSync(m.nav.ActiveKind())
 			m.setStatusBarKind(m.nav.ActiveKind())
 			return m, tea.Batch(cmd, m.buildTableCmd())
 		}
@@ -1384,6 +1463,22 @@ func (m Model) buildTopology(kind, name string) *k8sops.TreeNode {
 	return nil
 }
 
+// kindSyncing reports whether the watcher's informer for `kind` has not yet
+// finished its initial LIST. Used to render the "Syncing <kind>…" placeholder
+// in the resource table when the user navigates to a not-yet-synced kind.
+func (m Model) kindSyncing(kind string) bool {
+	if m.watcher == nil {
+		return true
+	}
+	return !m.watcher.KindSynced(kind)
+}
+
+// setKindAndSync swaps the resource table's active kind and updates its
+// syncing badge to match whether that informer has data ready yet.
+func (m Model) setKindAndSync(kind string) panels.ResourceTable {
+	return m.table.SetKind(kind).SetSyncing(m.kindSyncing(kind))
+}
+
 func (m *Model) setStatusBarKind(kind string) {
 	m.statusBar = m.statusBar.SetActiveKind(kind)
 	rd, _ := k8sops.Resolve(kind)
@@ -1454,7 +1549,11 @@ func currentReplicas(row *k8sops.ResourceRow) int32 {
 func (m Model) View() tea.View {
 	v := tea.NewView(m.renderContent())
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	return v
 }
 

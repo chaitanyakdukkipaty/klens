@@ -72,6 +72,17 @@ type logGroupState struct {
 	podFilter int
 
 	lineCountStr string
+
+	// In-app drag-to-copy selection. selStart/selEnd are indices into
+	// LogViewer.lines; selDragged distinguishes a real drag from a click that
+	// never moved (so a stray click doesn't clobber the clipboard). displayRows
+	// is built parallel to viewport content lines to translate clicks back to
+	// LogViewer.lines indices.
+	selecting    bool
+	selDragged   bool
+	selStartLine int
+	selEndLine   int
+	displayRows  []int
 }
 
 func newGroupState(name string) logGroupState {
@@ -84,7 +95,19 @@ func newGroupState(name string) logGroupState {
 		podFilter:     -1,
 		searchCurrent: -1,
 		lineCountStr:  "  0 lines",
+		selStartLine:  -1,
+		selEndLine:    -1,
 	}
+}
+
+// clearSelection resets in-app drag-select state. Call on actions that
+// invalidate the previous selection (esc, layout cycle, group switch, filter
+// change). Does not rebuild — callers do that anyway.
+func (g *logGroupState) clearSelection() {
+	g.selecting = false
+	g.selDragged = false
+	g.selStartLine = -1
+	g.selEndLine = -1
 }
 
 // LogViewer displays merged streaming logs from multiple pods, organized into
@@ -120,7 +143,7 @@ func NewLogViewer(w, h int) LogViewer {
 	v := LogViewer{
 		width:      w,
 		height:     h,
-		jsonIndent: true,
+		jsonIndent: false,
 		groups:     []logGroupState{newGroupState("")},
 		layout:     LayoutTabs,
 	}
@@ -201,7 +224,7 @@ func (v LogViewer) SetPods(pods []string) LogViewer {
 	v.lines = nil
 	v.colorCache = nil
 	v.lowerCache = nil
-	v.jsonIndent = true
+	v.jsonIndent = false
 	v.lastLineAt = time.Time{}
 	v.groups = []logGroupState{newGroupState("")}
 	v.focusedGroup = 0
@@ -232,7 +255,7 @@ func (v LogViewer) SetPodGroups(groups []k8slogs.LogGroup) LogViewer {
 	v.lines = nil
 	v.colorCache = nil
 	v.lowerCache = nil
-	v.jsonIndent = true
+	v.jsonIndent = false
 	v.lastLineAt = time.Time{}
 	v.groups = gs
 	v.focusedGroup = 0
@@ -252,7 +275,7 @@ func (v LogViewer) HasActiveState() bool {
 		return false
 	}
 	g := v.groups[v.focusedGroup]
-	return g.podFilter >= 0 || g.filter != "" || g.filterOn || g.searchQuery != "" || g.searchOn
+	return g.selecting || g.podFilter >= 0 || g.filter != "" || g.filterOn || g.searchQuery != "" || g.searchOn
 }
 
 // IsCapturingInput reports whether the focused group's filter or search input is open.
@@ -271,6 +294,11 @@ func (v LogViewer) HandleEsc() LogViewer {
 		return v
 	}
 	g := &v.groups[v.focusedGroup]
+	if g.selecting {
+		g.clearSelection()
+		v.rebuildGroup(v.focusedGroup)
+		return v
+	}
 	if g.searchOn {
 		g.searchOn = false
 		return v
@@ -337,6 +365,14 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 			v.lines = v.lines[trim:]
 			v.colorCache = v.colorCache[trim:]
 			v.lowerCache = v.lowerCache[trim:]
+			// A trim shifts every absolute v.lines index. Drag-select stores
+			// indices into v.lines, so cancelling any in-flight selection is
+			// safer than rewriting indices (rare path on chatty pods).
+			for i := range v.groups {
+				if v.groups[i].selecting {
+					v.groups[i].clearSelection()
+				}
+			}
 		}
 		v.rebuildAll()
 		for i := range v.groups {
@@ -453,6 +489,8 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 			g.autoScroll = false
 		case "tab":
 			if len(v.tabGroups) > 1 {
+				v.groups[v.focusedGroup].clearSelection()
+				v.rebuildGroup(v.focusedGroup)
 				v.focusedGroup = (v.focusedGroup + 1) % len(v.groups)
 				if v.layout == LayoutTabs {
 					ng := &v.groups[v.focusedGroup]
@@ -473,15 +511,22 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 		case "0":
 			g.viewport.SetXOffset(0)
 			if len(v.tabGroups) > 1 {
+				if v.focusedGroup != 0 {
+					v.groups[v.focusedGroup].clearSelection()
+					v.rebuildGroup(v.focusedGroup)
+				}
 				v.focusedGroup = 0
 			} else {
+				g.clearSelection()
 				g.podFilter = -1
 				v.rebuildGroup(v.focusedGroup)
 			}
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			n := int(msg.String()[0]-'0') - 1
 			if len(v.tabGroups) > 1 {
-				if n < len(v.groups) {
+				if n < len(v.groups) && n != v.focusedGroup {
+					v.groups[v.focusedGroup].clearSelection()
+					v.rebuildGroup(v.focusedGroup)
 					v.focusedGroup = n
 					if v.layout == LayoutTabs {
 						ng := &v.groups[v.focusedGroup]
@@ -491,6 +536,7 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 					}
 				}
 			} else if n < len(v.pods) {
+				g.clearSelection()
 				g.podFilter = n
 				v.rebuildGroup(v.focusedGroup)
 			}
@@ -559,6 +605,9 @@ func (v LogViewer) canSplit() bool {
 // cycleLayout advances the layout mode if the group count permits; otherwise
 // records a transient status message and stays in LayoutTabs.
 func (v LogViewer) cycleLayout() LogViewer {
+	for i := range v.groups {
+		v.groups[i].clearSelection()
+	}
 	if !v.canSplit() {
 		v.statusMsg = fmt.Sprintf("split view requires 2-%d groups", splitViewCap)
 		v.layout = LayoutTabs
@@ -626,6 +675,7 @@ func (v *LogViewer) rebuildGroup(idx int) {
 	}
 	g := &v.groups[idx]
 	g.searchMatches = nil
+	g.displayRows = g.displayRows[:0]
 
 	activeFilter := g.filter
 	if g.filterOn {
@@ -638,6 +688,15 @@ func (v *LogViewer) rebuildGroup(idx int) {
 		activeSearch = g.searchInput
 	}
 	lowSearch := strings.ToLower(activeSearch)
+
+	// Selection range — only the focused group renders highlighting.
+	selLo, selHi := -1, -1
+	if idx == v.focusedGroup && g.selecting && g.selStartLine >= 0 && g.selEndLine >= 0 {
+		selLo, selHi = g.selStartLine, g.selEndLine
+		if selLo > selHi {
+			selLo, selHi = selHi, selLo
+		}
+	}
 
 	var sb strings.Builder
 	viewLine := 0
@@ -661,19 +720,37 @@ func (v *LogViewer) rebuildGroup(idx int) {
 		}
 		shown++
 
-		// Search highlight takes priority over JSON colorization (both emit ANSI codes).
+		selected := selLo >= 0 && i >= selLo && i <= selHi
+
+		// Search highlight takes priority over JSON colorization (both emit ANSI
+		// codes). For selected lines we skip both — composing reverse-video over
+		// nested SGR codes is unreliable across terminals, and a clean reverse
+		// is what users expect from a selection highlight.
 		text := l.Text
-		if lowSearch != "" && strings.Contains(lowText, lowSearch) {
+		if !selected {
+			if lowSearch != "" && strings.Contains(lowText, lowSearch) {
+				g.searchMatches = append(g.searchMatches, viewLine)
+				text = highlightMatches(l.Text, lowSearch)
+			} else if !l.IsSystem && i < len(v.colorCache) && v.colorCache[i] != "" {
+				text = v.colorCache[i]
+			}
+		} else if lowSearch != "" && strings.Contains(lowText, lowSearch) {
+			// Still record the match index so n/N navigation works after
+			// selection clears.
 			g.searchMatches = append(g.searchMatches, viewLine)
-			text = highlightMatches(l.Text, lowSearch)
-		} else if !l.IsSystem && i < len(v.colorCache) && v.colorCache[i] != "" {
-			text = v.colorCache[i]
 		}
 
 		rendered := renderLogLineText(l, text)
+		if selected {
+			rendered = lipgloss.NewStyle().Reverse(true).Render(rendered)
+		}
 		sb.WriteString(rendered)
 		sb.WriteByte('\n')
-		viewLine += strings.Count(rendered, "\n") + 1
+		rows := strings.Count(rendered, "\n") + 1
+		for r := 0; r < rows; r++ {
+			g.displayRows = append(g.displayRows, i)
+		}
+		viewLine += rows
 	}
 
 	if len(g.searchMatches) == 0 {
@@ -806,8 +883,8 @@ func (v LogViewer) renderTabs() string {
 
 	scrollStatus := liveOrPaused(g, v.lastLineAt)
 	indentHint := ""
-	if !v.jsonIndent {
-		indentHint = "  " + styles.Muted.Render("[json flat]")
+	if v.jsonIndent {
+		indentHint = "  " + styles.Muted.Render("[json indent]")
 	}
 
 	tabBar := ""
@@ -1068,6 +1145,10 @@ func renderSearchBar(g logGroupState) string {
 func (v LogViewer) HandleClickAt(x, y int) (LogViewer, bool) {
 	for _, z := range v.tabHitZones() {
 		if x >= z.x1 && x <= z.x2 && y >= z.y1 && y <= z.y2 {
+			if v.focusedGroup != z.idx {
+				v.groups[v.focusedGroup].clearSelection()
+				v.rebuildGroup(v.focusedGroup)
+			}
 			v.focusedGroup = z.idx
 			if v.layout == LayoutTabs && v.groups[z.idx].autoScroll {
 				v.groups[z.idx].viewport.GotoBottom()
@@ -1077,11 +1158,313 @@ func (v LogViewer) HandleClickAt(x, y int) (LogViewer, bool) {
 	}
 	for _, z := range v.stripeHitZones() {
 		if x >= z.x1 && x <= z.x2 && y >= z.y1 && y <= z.y2 {
+			if v.focusedGroup != z.idx {
+				v.groups[v.focusedGroup].clearSelection()
+				v.rebuildGroup(v.focusedGroup)
+			}
 			v.focusedGroup = z.idx
 			return v, true
 		}
 	}
 	return v, false
+}
+
+// stripeBoundsFor returns panel-local bounds (inclusive) of group i's outer
+// stripe rectangle in split layouts. Returns ok=false in tabs mode or for
+// out-of-range indices.
+func (v LogViewer) stripeBoundsFor(i int) (x1, y1, x2, y2 int, ok bool) {
+	if v.layout == LayoutTabs {
+		return 0, 0, 0, 0, false
+	}
+	n := len(v.groups)
+	if n == 0 || i < 0 || i >= n {
+		return 0, 0, 0, 0, false
+	}
+	innerW := max(1, v.width-2)
+	innerH := max(1, v.height-2-2) // outer border (2) + outer header (title + blank = 2)
+	switch v.layout {
+	case LayoutHorizontal:
+		stripeH := innerH / n
+		extra := innerH - stripeH*n
+		y := 1 + 2 // outer border-top + outer header (title + blank)
+		for k := 0; k < i; k++ {
+			h := stripeH
+			if k == n-1 {
+				h += extra
+			}
+			y += h
+		}
+		h := stripeH
+		if i == n-1 {
+			h += extra
+		}
+		return 1, y, innerW, y + h - 1, true
+	case LayoutVertical:
+		stripeW := innerW / n
+		extra := innerW - stripeW*n
+		yTop := 1 + 2
+		yBot := yTop + innerH - 1
+		x := 1
+		for k := 0; k < i; k++ {
+			w := stripeW
+			if k == n-1 {
+				w += extra
+			}
+			x += w
+		}
+		w := stripeW
+		if i == n-1 {
+			w += extra
+		}
+		return x, yTop, x + w - 1, yBot, true
+	}
+	return 0, 0, 0, 0, false
+}
+
+// viewportBoundsFor returns the panel-local rectangle of group i's viewport
+// content area (inclusive). In LayoutTabs only the focused group has a
+// visible viewport; non-focused groups return ok=false.
+func (v LogViewer) viewportBoundsFor(i int) (x1, y1, x2, y2 int, ok bool) {
+	if i < 0 || i >= len(v.groups) {
+		return 0, 0, 0, 0, false
+	}
+	g := v.groups[i]
+	if v.layout == LayoutTabs {
+		if i != v.focusedGroup {
+			return 0, 0, 0, 0, false
+		}
+		row := 1 // outer panel border-top
+		row++    // title row
+		if len(v.tabGroups) > 1 {
+			row++
+		}
+		if g.filterOn || g.filter != "" {
+			row++
+		}
+		if g.searchOn || g.searchQuery != "" {
+			row++
+		}
+		row++ // help line
+		row++ // blank line ("\n\n" between header and viewport)
+		return 1, row, max(1, v.width-2), row + g.viewport.Height() - 1, true
+	}
+	sx1, sy1, sx2, sy2, sok := v.stripeBoundsFor(i)
+	if !sok {
+		return 0, 0, 0, 0, false
+	}
+	chrome := 1 // stripe border-top
+	chrome++    // stripe title
+	if g.filterOn || g.filter != "" {
+		chrome++
+	}
+	if g.searchOn || g.searchQuery != "" {
+		chrome++
+	}
+	chrome++ // help line (no blank row in split — only "\n" between header and viewport)
+	vpY1 := sy1 + chrome
+	vpY2 := vpY1 + g.viewport.Height() - 1
+	if vpY2 > sy2-1 {
+		vpY2 = sy2 - 1
+	}
+	return sx1 + 1, vpY1, sx2 - 1, vpY2, true
+}
+
+// lineAtScreenInGroup returns the v.lines index for the screen point inside
+// group i's viewport. Returns ok=false if the point is outside that group's
+// viewport content area.
+func (v LogViewer) lineAtScreenInGroup(i, x, y int) (int, bool) {
+	x1, y1, x2, y2, ok := v.viewportBoundsFor(i)
+	if !ok {
+		return 0, false
+	}
+	if x < x1 || x > x2 || y < y1 || y > y2 {
+		return 0, false
+	}
+	g := v.groups[i]
+	displayRow := g.viewport.YOffset() + (y - y1)
+	if displayRow < 0 || displayRow >= len(g.displayRows) {
+		return 0, false
+	}
+	return g.displayRows[displayRow], true
+}
+
+// LineAtScreenY translates a panel-local Y coordinate into the v.lines index
+// in the focused group's viewport. Backward-compat wrapper around
+// lineAtScreenInGroup that ignores X (sufficient for tabs mode where the
+// viewport spans the full panel width).
+func (v LogViewer) LineAtScreenY(localY int) (int, bool) {
+	x1, _, _, _, ok := v.viewportBoundsFor(v.focusedGroup)
+	if !ok {
+		return 0, false
+	}
+	return v.lineAtScreenInGroup(v.focusedGroup, x1, localY)
+}
+
+// groupAtViewport finds which group's viewport content the point lies in.
+// In tabs mode the focused group is the only candidate; in split mode every
+// group's stripe is checked. Returns ok=false if the point is on chrome or
+// outside any viewport.
+func (v LogViewer) groupAtViewport(x, y int) (groupIdx, lineIdx int, ok bool) {
+	if v.layout == LayoutTabs {
+		idx, hit := v.lineAtScreenInGroup(v.focusedGroup, x, y)
+		if !hit {
+			return 0, 0, false
+		}
+		return v.focusedGroup, idx, true
+	}
+	for i := range v.groups {
+		idx, hit := v.lineAtScreenInGroup(i, x, y)
+		if hit {
+			return i, idx, true
+		}
+	}
+	return 0, 0, false
+}
+
+// clampToVisible returns the v.lines index of the first or last displayed row
+// in the focused group's current viewport window, used to clamp drag targets
+// when the cursor leaves the viewport vertically.
+func (v LogViewer) clampToVisible(top bool) (int, bool) {
+	g := v.groups[v.focusedGroup]
+	if len(g.displayRows) == 0 {
+		return 0, false
+	}
+	row := g.viewport.YOffset()
+	if !top {
+		row += g.viewport.Height() - 1
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= len(g.displayRows) {
+		row = len(g.displayRows) - 1
+	}
+	return g.displayRows[row], true
+}
+
+// HandleMouseDown begins a drag-select if the click lands on a log line in
+// any visible viewport. In split layouts a click in a non-focused stripe
+// switches focus to that stripe before starting selection. Returns
+// started=true when a selection has begun, in which case the caller should
+// suppress other click routing (tab/stripe/focus).
+func (v LogViewer) HandleMouseDown(localX, localY int) (LogViewer, bool) {
+	groupIdx, idx, ok := v.groupAtViewport(localX, localY)
+	if !ok {
+		return v, false
+	}
+	if groupIdx != v.focusedGroup {
+		v.groups[v.focusedGroup].clearSelection()
+		v.rebuildGroup(v.focusedGroup)
+		v.focusedGroup = groupIdx
+	}
+	g := &v.groups[v.focusedGroup]
+	g.selecting = true
+	g.selDragged = false
+	g.selStartLine = idx
+	g.selEndLine = idx
+	v.rebuildGroup(v.focusedGroup)
+	return v, true
+}
+
+// HandleMouseDrag extends the in-progress drag-select to localY. No-op if no
+// drag is in progress. When the cursor leaves the focused group's viewport
+// vertically, the selection is clamped to the first/last visible line
+// (no auto-scroll in v1). Selection stays scoped to the focused group even
+// if the cursor wanders into another stripe in split mode.
+func (v LogViewer) HandleMouseDrag(localX, localY int) LogViewer {
+	g := &v.groups[v.focusedGroup]
+	if !g.selecting {
+		return v
+	}
+	idx, ok := v.lineAtScreenInGroup(v.focusedGroup, localX, localY)
+	if !ok {
+		_, vy1, _, vy2, vok := v.viewportBoundsFor(v.focusedGroup)
+		if !vok {
+			return v
+		}
+		if localY < vy1 {
+			idx, ok = v.clampToVisible(true)
+		} else if localY > vy2 {
+			idx, ok = v.clampToVisible(false)
+		} else {
+			// Inside the viewport's Y band but outside its X band (split mode)
+			// — keep current selFocus by treating as no-op.
+			return v
+		}
+		if !ok {
+			return v
+		}
+	}
+	if idx != g.selEndLine {
+		g.selDragged = true
+		g.selEndLine = idx
+		v.rebuildGroup(v.focusedGroup)
+	}
+	return v
+}
+
+// HandleMouseUp finalizes a drag-select. If the user actually dragged
+// (cursor moved between lines), copies the selected lines' raw text to the
+// clipboard and returns a status string for the status bar. A click without
+// drag clears the selection and returns "" (no clipboard write — clicks
+// shouldn't clobber the clipboard).
+func (v LogViewer) HandleMouseUp(localX, localY int) (LogViewer, string) {
+	g := &v.groups[v.focusedGroup]
+	if !g.selecting {
+		return v, ""
+	}
+	dragged := g.selDragged
+	lo, hi := g.selStartLine, g.selEndLine
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	g.clearSelection()
+	v.rebuildGroup(v.focusedGroup)
+	if !dragged || lo < 0 || hi < 0 || lo >= len(v.lines) {
+		return v, ""
+	}
+	if hi >= len(v.lines) {
+		hi = len(v.lines) - 1
+	}
+	fg := v.groups[v.focusedGroup]
+	activeFilter := fg.filter
+	if fg.filterOn {
+		activeFilter = fg.filterInput
+	}
+	lowFilter := strings.ToLower(activeFilter)
+	var parts []string
+	for i := lo; i <= hi; i++ {
+		l := v.lines[i]
+		if !v.lineBelongsToGroup(l, fg) {
+			continue
+		}
+		if lowFilter != "" {
+			var lowText string
+			if i < len(v.lowerCache) {
+				lowText = v.lowerCache[i]
+			} else {
+				lowText = strings.ToLower(l.Text)
+			}
+			if !strings.Contains(lowText, lowFilter) {
+				continue
+			}
+		}
+		parts = append(parts, l.Text)
+	}
+	if len(parts) == 0 {
+		return v, ""
+	}
+	if err := clipboard.WriteAll(strings.Join(parts, "\n")); err != nil {
+		return v, "copy failed: " + err.Error()
+	}
+	return v, fmt.Sprintf("copied %d line%s to clipboard", len(parts), plural(len(parts)))
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // tabHitZones reports clickable rectangles for the tab bar in LayoutTabs.

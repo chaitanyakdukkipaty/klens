@@ -439,6 +439,37 @@ func padOrTrunc(s string, w int) string {
 	return s + strings.Repeat(" ", w-visW)
 }
 
+// PatchValuesByName overlays Values + Status on existing rows whose Name
+// matches an incoming row, without resorting or recomputing the filter slice.
+// Used on metrics-tick refresh of the Pod table where pod identities and order
+// are unchanged but a few columns (CPU/MEM and percentages) need new values.
+// O(N) and avoids the O(N log N) sort + style allocation that WithRows does.
+func (t ResourceTable) PatchValuesByName(rows []k8sres.ResourceRow) ResourceTable {
+	if len(t.rows) == 0 || len(rows) == 0 {
+		return t
+	}
+	byName := make(map[string]int, len(rows))
+	for i, r := range rows {
+		byName[r.Name] = i
+	}
+	for i := range t.rows {
+		j, ok := byName[t.rows[i].Name]
+		if !ok {
+			continue
+		}
+		t.rows[i].Values = rows[j].Values
+		t.rows[i].Status = rows[j].Status
+	}
+	// Re-derive the filtered subslice without resorting. applyFilter is O(N)
+	// substring scan; if no filter is active we just alias filtered to rows.
+	if t.filterInput != "" {
+		t.applyFilter()
+	} else {
+		t.filtered = t.rows
+	}
+	return t
+}
+
 // PopulateRows converts raw k8s objects into ResourceRows for the given kind.
 func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 	t.rows = rows
@@ -468,17 +499,16 @@ func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg) []k8
 		ready := 0
 		total := len(p.Spec.Containers)
 		restarts := 0
+		status := string(p.Status.Phase)
+		waitingFound := false
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.Ready {
 				ready++
 			}
 			restarts += int(cs.RestartCount)
-		}
-		status := string(p.Status.Phase)
-		for _, cs := range p.Status.ContainerStatuses {
-			if cs.State.Waiting != nil {
+			if !waitingFound && cs.State.Waiting != nil {
 				status = cs.State.Waiting.Reason
-				break
+				waitingFound = true
 			}
 		}
 		if p.DeletionTimestamp != nil {

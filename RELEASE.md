@@ -77,6 +77,7 @@ git push origin v0.X.Y
 
 | Version | Date | Summary |
 |---|---|---|
+| v0.6.0 | 2026-05-07 | In-app drag-to-copy in log viewer (works in tabs and split layouts); mouse capture toggle (`M`); async per-kind informer sync with 100ms event coalescing; faster pod metrics refresh; JSON flat as default in log viewer |
 | v0.5.0 | 2026-05-07 | Migrate to Bubble Tea v2 (charm.land); right-click context menu; full-screen toggle (`F`); inline help panel; expanded scrollbar/log viewer/model refactor |
 | v0.4.0 | 2026-05-04 | Scrollbars in log viewer and YAML editor; mouse wheel scrolling; ctrl+v paste in all inputs; unicode input fix |
 | v0.3.1 | 2026-05-04 | Fix q key quit inside filter/search/edit modes; ctrl+z YAML rollback; async Helm GVR; terminal size guard |
