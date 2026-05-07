@@ -120,11 +120,12 @@ type LogViewer struct {
 	pods          []string
 
 	// Master log buffer — shared across all groups, filtered per-group at render time.
-	lines      []k8slogs.LogLine
-	colorCache []string // parallel to lines; Chroma-colorized JSON or "" for plain text
-	lowerCache []string // parallel to lines; pre-cached strings.ToLower(line.Text)
-	jsonIndent bool     // pretty-print JSON with indentation; toggle with J
-	lastLineAt time.Time
+	lines       []k8slogs.LogLine
+	colorCache  []string // parallel to lines; Chroma-colorized JSON or "" for plain text
+	indentCache []string // parallel to lines; json.MarshalIndent of valid JSON, "" otherwise
+	lowerCache  []string // parallel to lines; pre-cached strings.ToLower(line.Text)
+	jsonIndent  bool     // pretty-print JSON with indentation; toggle with J
+	lastLineAt  time.Time
 
 	tabGroups []string // empty when in single-group (no tabs) mode
 
@@ -223,6 +224,7 @@ func (v LogViewer) SetPods(pods []string) LogViewer {
 	v.tabGroups = nil
 	v.lines = nil
 	v.colorCache = nil
+	v.indentCache = nil
 	v.lowerCache = nil
 	v.jsonIndent = false
 	v.lastLineAt = time.Time{}
@@ -254,6 +256,7 @@ func (v LogViewer) SetPodGroups(groups []k8slogs.LogGroup) LogViewer {
 	v.tabGroups = tabs
 	v.lines = nil
 	v.colorCache = nil
+	v.indentCache = nil
 	v.lowerCache = nil
 	v.jsonIndent = false
 	v.lastLineAt = time.Time{}
@@ -355,6 +358,7 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 		for _, line := range msg.Lines {
 			v.lines = append(v.lines, line)
 			v.colorCache = append(v.colorCache, tryColorizeJSON(line.Text, v.jsonIndent))
+			v.indentCache = append(v.indentCache, tryIndentJSON(line.Text))
 			v.lowerCache = append(v.lowerCache, strings.ToLower(line.Text))
 		}
 		if len(msg.Lines) > 0 {
@@ -364,6 +368,7 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 			trim := len(v.lines) - maxLogLines
 			v.lines = v.lines[trim:]
 			v.colorCache = v.colorCache[trim:]
+			v.indentCache = v.indentCache[trim:]
 			v.lowerCache = v.lowerCache[trim:]
 			// A trim shifts every absolute v.lines index. Drag-select stores
 			// indices into v.lines, so cancelling any in-flight selection is
@@ -723,9 +728,11 @@ func (v *LogViewer) rebuildGroup(idx int) {
 		selected := selLo >= 0 && i >= selLo && i <= selHi
 
 		// Search highlight takes priority over JSON colorization (both emit ANSI
-		// codes). For selected lines we skip both — composing reverse-video over
-		// nested SGR codes is unreliable across terminals, and a clean reverse
-		// is what users expect from a selection highlight.
+		// codes). For selected lines we skip Chroma — composing reverse-video
+		// over nested SGR codes is unreliable across terminals, and a clean
+		// reverse is what users expect from a selection highlight. But in
+		// indented JSON mode we use the plain indented form so the line keeps
+		// its row count (otherwise it'd collapse from N rows to 1 on selection).
 		text := l.Text
 		if !selected {
 			if lowSearch != "" && strings.Contains(lowText, lowSearch) {
@@ -734,10 +741,15 @@ func (v *LogViewer) rebuildGroup(idx int) {
 			} else if !l.IsSystem && i < len(v.colorCache) && v.colorCache[i] != "" {
 				text = v.colorCache[i]
 			}
-		} else if lowSearch != "" && strings.Contains(lowText, lowSearch) {
-			// Still record the match index so n/N navigation works after
-			// selection clears.
-			g.searchMatches = append(g.searchMatches, viewLine)
+		} else {
+			if lowSearch != "" && strings.Contains(lowText, lowSearch) {
+				// Still record the match index so n/N navigation works after
+				// selection clears.
+				g.searchMatches = append(g.searchMatches, viewLine)
+			}
+			if v.jsonIndent && !l.IsSystem && i < len(v.indentCache) && v.indentCache[i] != "" {
+				text = v.indentCache[i]
+			}
 		}
 
 		rendered := renderLogLineText(l, text)
@@ -800,6 +812,25 @@ func renderLogLineText(l k8slogs.LogLine, text string) string {
 		return styles.Muted.Italic(true).Render(text)
 	}
 	return prefix + text
+}
+
+// tryIndentJSON returns json.MarshalIndent of text if text is valid JSON.
+// Returns "" for non-JSON. Used to render selected lines without Chroma SGR
+// codes while preserving the row count of the indented view (so a line's
+// height doesn't change when it's included in a drag-select).
+func tryIndentJSON(text string) string {
+	if len(text) == 0 || (text[0] != '{' && text[0] != '[') {
+		return ""
+	}
+	var obj interface{}
+	if err := json.Unmarshal([]byte(text), &obj); err != nil {
+		return ""
+	}
+	pretty, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(pretty)
 }
 
 // tryColorizeJSON pretty-prints (when indent=true) and Chroma-colorizes text if it is valid JSON.
