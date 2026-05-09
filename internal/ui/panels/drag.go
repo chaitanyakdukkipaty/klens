@@ -11,9 +11,11 @@ package panels
 // panel-specific. Only the state machine common to all three is here.
 type DragSelection struct {
 	Active bool // mouse button held; true between Begin and Reset
-	Moved  bool // cursor crossed at least one unit boundary since Begin
+	Moved  bool // cursor moved from its anchor position since Begin
 	Start  int  // index into the panel's content units
 	End    int  // index, may be < Start
+	StartX int  // anchor X at Begin, panel-local coords
+	StartY int  // anchor Y at Begin, panel-local coords
 	LastX  int  // most recent drag X in panel-local coords
 	LastY  int  // most recent drag Y in panel-local coords
 }
@@ -40,6 +42,8 @@ func (d *DragSelection) Begin(idx, x, y int) {
 	d.Moved = false
 	d.Start = idx
 	d.End = idx
+	d.StartX = x
+	d.StartY = y
 	d.LastX = x
 	d.LastY = y
 }
@@ -50,6 +54,9 @@ func (d *DragSelection) Begin(idx, x, y int) {
 func (d *DragSelection) Track(x, y int) {
 	d.LastX = x
 	d.LastY = y
+	if x != d.StartX || y != d.StartY {
+		d.Moved = true
+	}
 }
 
 // Extend updates End to idx if it differs from the current End. Returns

@@ -73,16 +73,46 @@ detect_platform() {
 # Get latest release version
 get_latest_version() {
     local version
-    version=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+
+    # Allow caller to pin a version and skip lookup entirely.
+    if [ -n "${KLENS_VERSION:-}" ]; then
+        log_info "Using KLENS_VERSION override: $KLENS_VERSION" >&2
+        echo "$KLENS_VERSION"
+        return
+    fi
+
+    # Primary: follow the redirect on github.com/.../releases/latest. This
+    # endpoint is HTML, not the rate-limited API, so it works for unauthenticated
+    # users on shared IPs.
+    local final_url
+    final_url=$(curl -sLI -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)
+    if [ -n "$final_url" ]; then
+        version=$(printf '%s\n' "$final_url" | sed -nE 's|.*/releases/tag/([^/?#]+).*|\1|p')
+    fi
+
+    # Fallback: the JSON API. Subject to the 60/hr unauth limit, but works when
+    # GITHUB_TOKEN is set.
+    if [ -z "$version" ]; then
+        local auth_header=()
+        if [ -n "${GITHUB_TOKEN:-}" ]; then
+            auth_header=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+        fi
+        version=$(curl -s "${auth_header[@]}" "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
 
     if [ -z "$version" ]; then
-        log_error "Failed to get latest version from GitHub API"
-        log_error "This could be due to rate limiting or network issues"
-        log_error "You can also check manually at: https://github.com/${REPO}/releases/latest"
+        log_error "Failed to determine the latest klens version."
+        log_error "GitHub may be rate-limiting this IP (60 unauthenticated requests/hour)."
+        log_error "Workarounds:"
+        log_error "  1. Pin a version:   KLENS_VERSION=v0.7.0 curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash"
+        log_error "  2. Authenticate:    GITHUB_TOKEN=ghp_... curl -sSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash"
+        log_error "  3. Check manually:  https://github.com/${REPO}/releases/latest"
         exit 1
     fi
 
-    log_info "GitHub API returned version: $version"
+    log_info "Resolved latest version: $version" >&2
     echo "$version"
 }
 

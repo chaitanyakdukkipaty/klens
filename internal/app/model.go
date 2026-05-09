@@ -726,7 +726,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m = m.resizePanels()
 			return m, nil
 		}
-	case "q":
+	case "q", "ctrl+c":
 		if m.mode == ModeEditor {
 			var cmd tea.Cmd
 			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
@@ -1539,7 +1539,7 @@ func (m *Model) setStatusBarKind(kind string) {
 	}
 	help = append(help,
 		panels.HelpItem{Key: "ctrl+r", Desc: "refresh"},
-		panels.HelpItem{Key: "q", Desc: "quit"},
+		panels.HelpItem{Key: "q/ctrl+c", Desc: "quit"},
 	)
 	m.statusBar = m.statusBar.SetHelp(help)
 }

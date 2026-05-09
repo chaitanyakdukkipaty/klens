@@ -149,6 +149,14 @@ func (t ResourceTable) SelectionCount() int {
 	return n
 }
 
+func (t ResourceTable) supportsMultiSelect() bool {
+	rd, ok := k8sres.Resolve(t.kind)
+	if !ok {
+		return false
+	}
+	return rd.SupportsLogs || rd.SupportsDeletion || t.kind == "HelmRelease"
+}
+
 func (t ResourceTable) FilterActive() bool { return t.filterOn }
 func (t ResourceTable) HasFilter() bool    { return t.filterOn || t.filter != "" }
 
@@ -164,12 +172,12 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		switch msg.Button {
 		case tea.MouseWheelUp:
-			if len(t.filtered) > 0 {
-				t.cursor = (t.cursor - 1 + len(t.filtered)) % len(t.filtered)
+			if t.cursor > 0 {
+				t.cursor--
 			}
 		case tea.MouseWheelDown:
-			if len(t.filtered) > 0 {
-				t.cursor = (t.cursor + 1) % len(t.filtered)
+			if t.cursor < len(t.filtered)-1 {
+				t.cursor++
 			}
 		}
 		return t, nil
@@ -206,12 +214,12 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "up", "k":
-			if len(t.filtered) > 0 {
-				t.cursor = (t.cursor - 1 + len(t.filtered)) % len(t.filtered)
+			if t.cursor > 0 {
+				t.cursor--
 			}
 		case "down", "j":
-			if len(t.filtered) > 0 {
-				t.cursor = (t.cursor + 1) % len(t.filtered)
+			if t.cursor < len(t.filtered)-1 {
+				t.cursor++
 			}
 		case "g":
 			t.cursor = 0
@@ -227,8 +235,10 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 			t.filterInput = ""
 			t.applyFilter()
 		case "space":
-			if row := t.SelectedRow(); row != nil {
-				t.selected[row.Name] = !t.selected[row.Name]
+			if t.supportsMultiSelect() {
+				if row := t.SelectedRow(); row != nil {
+					t.selected[row.Name] = !t.selected[row.Name]
+				}
 			}
 		}
 	}
@@ -326,7 +336,7 @@ func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string)
 	lo, hi := t.drag.Range()
 	t.drag.Reset()
 	if !dragged {
-		if lo >= 0 && lo < len(t.filtered) {
+		if t.supportsMultiSelect() && lo >= 0 && lo < len(t.filtered) {
 			t.selected[t.filtered[lo].Name] = !t.selected[t.filtered[lo].Name]
 		}
 		return t, ""
@@ -339,7 +349,12 @@ func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string)
 	}
 	parts := make([]string, 0, hi-lo+1)
 	for i := lo; i <= hi; i++ {
-		parts = append(parts, t.filtered[i].Name)
+		row := t.filtered[i]
+		if t.kind == "Event" && len(row.Values) > 6 {
+			parts = append(parts, row.Name+": "+row.Values[6])
+		} else {
+			parts = append(parts, row.Name)
+		}
 	}
 	if err := clipboard.WriteAll(strings.Join(parts, "\n")); err != nil {
 		return t, "copy failed: " + err.Error()
@@ -348,6 +363,12 @@ func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string)
 	noun := "name"
 	if n != 1 {
 		noun = "names"
+	}
+	if t.kind == "Event" {
+		noun = "event"
+		if n != 1 {
+			noun = "events"
+		}
 	}
 	return t, fmt.Sprintf("copied %d %s", n, noun)
 }
@@ -394,7 +415,7 @@ func (t ResourceTable) HandleClickAt(innerY int, leftClick bool) (ResourceTable,
 		return t, false
 	}
 	t.cursor = rowIdx
-	if leftClick {
+	if leftClick && t.supportsMultiSelect() {
 		if row := t.SelectedRow(); row != nil {
 			t.selected[row.Name] = !t.selected[row.Name]
 		}
@@ -580,7 +601,7 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 	}
 
 	if cursor {
-		return tableRowCursorBase.Width(width).Render(line)
+		return tableRowCursorBase.Width(width).Render(ansiEscape.ReplaceAllString(line, ""))
 	}
 	return tableRowBase.Width(width).Render(line)
 }
