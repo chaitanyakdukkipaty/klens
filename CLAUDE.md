@@ -57,6 +57,7 @@ internal/k8s/
   operations.go               → delete/scale/rollout/drain/cordon
   portforward.go              → client-go SPDY port-forward (no subprocess)
   exec.go                     → remotecommand SPDY exec (pod attach)
+  portforward.go              → SPDY port-forward sessions + PortForwardManager (active sessions registry)
 internal/config/config.go     → persisted user preferences (namespace lists, last active namespace per cluster,
                                 read_only flag); stored at ~/.config/klens/config.json
 internal/skills/
@@ -104,6 +105,8 @@ internal/ui/
 | `d` | delete (with confirmation) |
 | `a` | attach / exec into pod (tmux: new window; non-tmux: suspend TUI) |
 | `s` | scale (Deployments / StatefulSets) |
+| `shift+f` / `f` | port-forward (Pods) — modal dialog picks remote/local ports |
+| `ctrl+f` | active port-forwards list (anywhere except ModeLogs) |
 | `ctrl+r` | reconnect / refresh (stops watcher, reruns full connect) |
 | `ctrl+n` | namespace picker |
 | `ctrl+k` | cluster context picker |

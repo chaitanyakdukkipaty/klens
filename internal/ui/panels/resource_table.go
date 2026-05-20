@@ -677,8 +677,11 @@ func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 }
 
 // BuildPodRows converts pod list to resource rows.
-// Columns: NAME, READY, STATUS, RESTARTS, AGE, CPU, %CPU/R, %CPU/L, MEM, %MEM/R, %MEM/L
-func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg) []k8sres.ResourceRow {
+// Columns: NAME, PF, READY, STATUS, RESTARTS, AGE, CPU, %CPU/R, %CPU/L, MEM, %MEM/R, %MEM/L
+//
+// pfActive may be nil — in that case the PF column shows the inactive marker
+// for every row.
+func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg, pfActive func(ns, name string) bool) []k8sres.ResourceRow {
 	rows := make([]k8sres.ResourceRow, 0, len(pods))
 	for _, p := range pods {
 		ready := 0
@@ -720,7 +723,7 @@ func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg) []k8
 			Namespace: p.Namespace,
 			Status:    status,
 			Values: []string{
-				p.Name, fmt.Sprintf("%d/%d", ready, total), status, fmt.Sprintf("%d", restarts), age,
+				p.Name, pfMarker(pfActive, p.Namespace, p.Name), fmt.Sprintf("%d/%d", ready, total), status, fmt.Sprintf("%d", restarts), age,
 				cpuStr, cpuRStr, cpuLStr, memStr, memRStr, memLStr,
 			},
 			Raw: p,
@@ -728,6 +731,21 @@ func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg) []k8
 	}
 	return rows
 }
+
+// pfMarker returns the stylized indicator for the PF column. Active sessions
+// render the U+24C5 circled P in the primary accent color; inactive cells
+// show a muted bullet so the column stays visually anchored.
+func pfMarker(pfActive func(ns, name string) bool, ns, name string) string {
+	if pfActive != nil && pfActive(ns, name) {
+		return pfActiveStyle.Render("Ⓟ")
+	}
+	return pfInactiveStyle.Render("•")
+}
+
+var (
+	pfActiveStyle   = styles.Primary.Bold(true)
+	pfInactiveStyle = styles.Muted
+)
 
 func PodResourceTotals(p *corev1.Pod) (cpuReqM, cpuLimM, memReqB, memLimB int64) {
 	for _, c := range p.Spec.Containers {

@@ -39,6 +39,7 @@ func TestRowsAlignWithColumns(t *testing.T) {
 				return panels.BuildPodRows(
 					[]*corev1.Pod{{ObjectMeta: meta, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}},
 					k8s.MetricsUpdatedMsg{},
+					nil,
 				)
 			},
 		},

@@ -59,6 +59,8 @@ type Model struct {
 	namespacePicker widgets.NamespacePicker
 	clusterPicker   widgets.ClusterPicker
 	contextMenu     widgets.ContextMenu
+	pfDialog        widgets.PortForwardDialog
+	pfList          widgets.PortForwardList
 	statusBar       panels.StatusBar
 	focus           FocusTarget
 	mode            ContentMode
@@ -75,7 +77,8 @@ type Model struct {
 	// Cluster state
 	clusterMgr        *cluster.Manager
 	watcher           *k8sops.WatcherFactory
-	logStreamer        *k8sops.LogStreamer
+	logStreamer       *k8sops.LogStreamer
+	pfManager         *k8sops.PortForwardManager
 	metricsData       k8sops.MetricsUpdatedMsg
 	msgCh             chan tea.Msg
 	namespace         string
@@ -152,6 +155,9 @@ func New(readOnly bool) Model {
 		namespacePicker: widgets.NewNamespacePicker(),
 		clusterPicker:   widgets.NewClusterPicker(),
 		contextMenu:     widgets.NewContextMenu(),
+		pfDialog:        widgets.NewPortForwardDialog(),
+		pfList:          widgets.NewPortForwardList(),
+		pfManager:       k8sops.NewPortForwardManager(),
 		statusBar:       panels.NewStatusBar(80),
 		focus:           FocusNav,
 		mode:            ModeTable,
@@ -426,6 +432,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Namespace: msg.Namespace,
 			Replicas:  msg.Replicas,
 		})
+
+	case widgets.PortForwardRequest:
+		if !msg.Confirmed {
+			return m, nil
+		}
+		return m.startPortForward(msg)
+
+	case widgets.PortForwardListAction:
+		if msg.Closed {
+			return m, nil
+		}
+		if msg.Stop {
+			m.pfManager.Stop(msg.SessionID)
+			m.pfList = m.pfList.SetSessions(m.pfManager.List())
+			m.statusBar = m.statusBar.SetMessage("port-forward stopped: " + msg.SessionID)
+			// Refresh pod table so the PF column updates immediately.
+			if m.mode == ModeTable && m.nav.ActiveKind() == "Pod" {
+				return m, m.buildTableCmd()
+			}
+		}
+		return m, nil
+
+	case k8sops.PortForwardReadyMsg:
+		if msg.Err != nil {
+			m.statusBar = m.statusBar.SetMessage("port-forward failed: " + msg.Err.Error())
+			return m, nil
+		}
+		m.pfManager.Add(msg.Session)
+		m.statusBar = m.statusBar.SetMessage(fmt.Sprintf(
+			"port-forward 127.0.0.1:%d → %s/%s:%d  (ctrl+f to manage)",
+			msg.Session.LocalPort, msg.Session.Namespace, msg.Session.PodName, msg.Session.RemotePort))
+		if m.mode == ModeTable && m.nav.ActiveKind() == "Pod" {
+			return m, m.buildTableCmd()
+		}
+		return m, nil
+
+	case k8sops.PortForwardClosedMsg:
+		m.pfManager.Remove(msg.ID)
+		if msg.Err != nil {
+			m.statusBar = m.statusBar.SetMessage("port-forward closed: " + msg.ID + " — " + msg.Err.Error())
+		} else {
+			m.statusBar = m.statusBar.SetMessage("port-forward closed: " + msg.ID)
+		}
+		if m.pfList.IsVisible() {
+			m.pfList = m.pfList.SetSessions(m.pfManager.List())
+		}
+		if m.mode == ModeTable && m.nav.ActiveKind() == "Pod" {
+			return m, m.buildTableCmd()
+		}
+		return m, nil
 
 	case widgets.ContextMenuPickedMsg:
 		m.contextMenu = m.contextMenu.Hide()
@@ -804,6 +860,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.clusterPicker = m.clusterPicker.Show(m.clusterMgr.Contexts(), m.clusterMgr.ActiveContext())
 		}
 		return m, nil
+	case "ctrl+f":
+		// PF list modal is global — works in any mode, regardless of focus.
+		// The log viewer also binds ctrl+f, but only while in ModeLogs, so we
+		// intentionally don't intercept there.
+		if m.mode != ModeLogs {
+			m.pfList = m.pfList.Show(m.pfManager.List())
+			return m, nil
+		}
 	case "ctrl+r":
 		if m.watcher != nil {
 			m.watcher.Stop()
@@ -827,7 +891,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// Action keys fire even when nav panel has focus (but not during filter input)
 		if !m.nav.FilterActive() {
 			switch msg.String() {
-			case "y", "e", "l", "t", "m", "d", "a", "s":
+			case "y", "e", "l", "t", "m", "d", "a", "s", "f", "F":
 				return m.handleTableKeys(msg)
 			}
 		}
@@ -954,6 +1018,8 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.actionResumeHelm()
 	case "a":
 		return m.actionAttach()
+	case "f", "F":
+		return m.actionPortForward()
 	}
 	// Pass remaining keys to table
 	var cmd tea.Cmd
@@ -976,6 +1042,8 @@ func (m Model) dispatchTableAction(action string) (Model, tea.Cmd) {
 		return m.actionMetrics()
 	case "a":
 		return m.actionAttach()
+	case "f":
+		return m.actionPortForward()
 	case "scale":
 		return m.actionScale()
 	case "suspend":
@@ -1075,6 +1143,9 @@ func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
 	}
 	if rd.SupportsMetrics {
 		items = append(items, widgets.MenuItem{Label: "View Metrics", Action: "m", Hint: "m"})
+	}
+	if rd.SupportsPortForward {
+		items = append(items, widgets.MenuItem{Label: "Port Forward…", Action: "f", Hint: "f"})
 	}
 	if !readOnly {
 		if rd.SupportsAttach {
@@ -1276,6 +1347,103 @@ func (m Model) actionResumeHelm() (Model, tea.Cmd) {
 	return m, nil
 }
 
+// actionPortForward toggles port-forwarding for the selected pod: if any
+// forward is currently active against it, all of its forwards are stopped;
+// otherwise the dialog opens to start a new one. PF is non-mutating (it opens
+// a local socket; no cluster state changes), so it is intentionally NOT gated
+// on m.readOnly — k9s behaves the same.
+func (m Model) actionPortForward() (Model, tea.Cmd) {
+	row := m.table.SelectedRow()
+	if row == nil {
+		m.statusBar = m.statusBar.SetMessage("no pod selected")
+		return m, nil
+	}
+	rd, _ := k8sops.Resolve(m.nav.ActiveKind())
+	if !rd.SupportsPortForward {
+		m.statusBar = m.statusBar.SetMessage("port-forward not supported for " + m.nav.ActiveKind())
+		return m, nil
+	}
+	pod, ok := row.Raw.(*corev1.Pod)
+	if !ok {
+		return m, nil
+	}
+
+	// Toggle: if this pod already has at least one active forward, shift+f
+	// stops all of them rather than opening a second forward.
+	stopped := m.stopPodPortForwards(pod.Namespace, pod.Name)
+	if stopped > 0 {
+		m.statusBar = m.statusBar.SetMessage(fmt.Sprintf(
+			"stopped %d port-forward(s) for %s/%s", stopped, pod.Namespace, pod.Name))
+		if m.pfList.IsVisible() {
+			m.pfList = m.pfList.SetSessions(m.pfManager.List())
+		}
+		return m, m.buildTableCmd()
+	}
+
+	options := portOptionsForPod(pod)
+	m.pfDialog = m.pfDialog.Show("Pod", pod.Name, pod.Namespace, options)
+	return m, nil
+}
+
+// stopPodPortForwards stops every active forward targeting the named pod and
+// returns the number stopped. Returns 0 if none were active.
+func (m *Model) stopPodPortForwards(namespace, name string) int {
+	if m.pfManager == nil {
+		return 0
+	}
+	var ids []string
+	for _, s := range m.pfManager.List() {
+		if s.Namespace == namespace && s.PodName == name {
+			ids = append(ids, s.ID)
+		}
+	}
+	for _, id := range ids {
+		m.pfManager.Stop(id)
+	}
+	return len(ids)
+}
+
+// portOptionsForPod returns one PortOption per declared container port. Many
+// container specs omit `ports` — in that case the dialog falls back to the
+// custom-input path (see PortForwardDialog.Show with empty options).
+func portOptionsForPod(pod *corev1.Pod) []widgets.PortOption {
+	var options []widgets.PortOption
+	for _, c := range pod.Spec.Containers {
+		for _, p := range c.Ports {
+			options = append(options, widgets.PortOption{
+				Container: c.Name,
+				PortName:  p.Name,
+				Port:      int(p.ContainerPort),
+			})
+		}
+	}
+	return options
+}
+
+// startPortForward kicks off a port-forward against the pod the dialog
+// described. For Pod kind the dialog's Name *is* the pod name; future Service
+// support would resolve a backing pod here first.
+func (m Model) startPortForward(req widgets.PortForwardRequest) (Model, tea.Cmd) {
+	if m.clusterMgr == nil {
+		return m, nil
+	}
+	cs, err := m.clusterMgr.ActiveClientset()
+	if err != nil || cs == nil {
+		m.statusBar = m.statusBar.SetMessage("no cluster connection")
+		return m, nil
+	}
+	cfg, err := m.clusterMgr.ActiveRestConfig()
+	if err != nil {
+		m.statusBar = m.statusBar.SetMessage("rest config: " + err.Error())
+		return m, nil
+	}
+	return m, k8sops.StartPortForwardCmd(
+		cs, cfg, m.msgCh,
+		req.Kind, req.Name, req.Namespace, req.Name,
+		req.LocalPort, req.RemotePort,
+	)
+}
+
 func (m Model) actionAttach() (Model, tea.Cmd) {
 	if m.readOnly {
 		m.statusBar = m.statusBar.SetMessage("read-only mode")
@@ -1435,6 +1603,11 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 		m.logStreamer.Stop()
 		m.logStreamer = nil
 	}
+	if m.pfManager != nil {
+		// Port-forwards target the previous cluster's pods; the local sockets
+		// would still accept connections after the switch but proxy to nothing.
+		m.pfManager.StopAll()
+	}
 	m = m.resetToTable()
 
 	if err := m.clusterMgr.SwitchContext(ctx); err != nil {
@@ -1520,6 +1693,9 @@ func (m *Model) setStatusBarKind(kind string) {
 	if rd.SupportsMetrics {
 		help = append(help, panels.HelpItem{Key: "m", Desc: "metrics"})
 	}
+	if rd.SupportsPortForward {
+		help = append(help, panels.HelpItem{Key: "shift+f", Desc: "port-forward"})
+	}
 	if !m.readOnly {
 		if rd.SupportsAttach {
 			help = append(help, panels.HelpItem{Key: "a", Desc: "attach"})
@@ -1602,6 +1778,14 @@ func (m Model) renderContent() string {
 
 	if m.contextMenu.IsVisible() {
 		return m.modalOverlay(m.contextMenu.View())
+	}
+
+	if m.pfDialog.IsVisible() {
+		return m.modalOverlay(m.pfDialog.View())
+	}
+
+	if m.pfList.IsVisible() {
+		return m.modalOverlay(m.pfList.View())
 	}
 
 	return m.baseView()
@@ -1776,7 +1960,25 @@ func (m Model) listRows(kind string) []k8sops.ResourceRow {
 	if !ok || rd.ListRows == nil {
 		return nil
 	}
-	return rd.ListRows(m.watcher, m.namespace, k8sops.RowContext{Metrics: m.metricsData})
+	return rd.ListRows(m.watcher, m.namespace, k8sops.RowContext{
+		Metrics:           m.metricsData,
+		PortForwardActive: m.podHasActivePortForward,
+	})
+}
+
+// podHasActivePortForward reports whether any tracked port-forward session is
+// running against the given pod. Wired into RowContext so BuildPodRows can
+// render the PF column without depending on the app package directly.
+func (m Model) podHasActivePortForward(namespace, name string) bool {
+	if m.pfManager == nil {
+		return false
+	}
+	for _, s := range m.pfManager.List() {
+		if s.Namespace == namespace && s.PodName == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) stopAll() {
@@ -1785,6 +1987,9 @@ func (m *Model) stopAll() {
 	}
 	if m.logStreamer != nil {
 		m.logStreamer.Stop()
+	}
+	if m.pfManager != nil {
+		m.pfManager.StopAll()
 	}
 }
 

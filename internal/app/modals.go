@@ -126,5 +126,27 @@ func (m *Model) modals() ModalStack {
 				return cmd
 			},
 		},
+		{
+			Name:      "pfDialog",
+			IsVisible: m.pfDialog.IsVisible,
+			Update: func(msg tea.Msg) tea.Cmd {
+				var cmd tea.Cmd
+				m.pfDialog, cmd = m.pfDialog.Update(msg)
+				return cmd
+			},
+		},
+		{
+			Name:      "pfList",
+			IsVisible: m.pfList.IsVisible,
+			// PF list is long-lived (user might leave it open while watching
+			// forwards). Only intercept key events so PortForwardClosedMsg,
+			// MetricsTick, and informer updates can flow through to the model.
+			Handles: keyPressOnly,
+			Update: func(msg tea.Msg) tea.Cmd {
+				var cmd tea.Cmd
+				m.pfList, cmd = m.pfList.Update(msg)
+				return cmd
+			},
+		},
 	}
 }

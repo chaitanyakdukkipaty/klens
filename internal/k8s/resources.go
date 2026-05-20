@@ -36,6 +36,10 @@ type Action func(ActionDeps) tea.Cmd
 // It is passed verbatim from caller (model) to descriptor.ListRows.
 type RowContext struct {
 	Metrics MetricsUpdatedMsg
+	// PortForwardActive reports whether the named pod has at least one
+	// active port-forward session. Optional — nil means "no PF state to
+	// show", in which case the PF column renders an inactive marker.
+	PortForwardActive func(namespace, name string) bool
 }
 
 // ListRowsFunc returns rows for a kind, given a watcher and namespace.
@@ -63,13 +67,14 @@ type ResourceDescriptor struct {
 	Namespaced       bool
 	Aliases          []string
 	Columns          []Column
-	SupportsYAML     bool
-	SupportsLogs     bool
-	SupportsTopology bool
-	SupportsMetrics  bool
-	SupportsAttach   bool
-	SupportsScale    bool
-	SupportsDeletion bool
+	SupportsYAML        bool
+	SupportsLogs        bool
+	SupportsTopology    bool
+	SupportsMetrics     bool
+	SupportsAttach      bool
+	SupportsScale       bool
+	SupportsDeletion    bool
+	SupportsPortForward bool
 
 	// Behavior — populated via SetHandlers, optional per kind.
 	ListRows      ListRowsFunc
@@ -108,15 +113,16 @@ type ResourceRow struct {
 var Registry = []ResourceDescriptor{
 	{Kind: "Pod", Plural: "pods", Namespaced: true, Aliases: []string{"po"},
 		Columns: []Column{
-				{"NAME", 40, true}, {"READY", 6, false}, {"STATUS", 15, false}, {"RESTARTS", 9, false}, {"AGE", 6, false},
+				{"NAME", 40, true}, {"PF", 3, false}, {"READY", 6, false}, {"STATUS", 15, false}, {"RESTARTS", 9, false}, {"AGE", 6, false},
 				{"CPU", 6, false}, {"%CPU/R", 7, false}, {"%CPU/L", 7, false},
 				{"MEM", 7, false}, {"%MEM/R", 7, false}, {"%MEM/L", 7, false},
 			},
-		SupportsYAML:     true,
-		SupportsLogs:     true,
-		SupportsMetrics:  true,
-		SupportsAttach:   true,
-		SupportsDeletion: true,
+		SupportsYAML:        true,
+		SupportsLogs:        true,
+		SupportsMetrics:     true,
+		SupportsAttach:      true,
+		SupportsDeletion:    true,
+		SupportsPortForward: true,
 	},
 	{Kind: "Deployment", Plural: "deployments", Namespaced: true, Aliases: []string{"deploy", "dp"},
 		Columns:          []Column{{"NAME", 40, true}, {"READY", 10, false}, {"UP-TO-DATE", 12, false}, {"AVAILABLE", 12, false}, {"AGE", 10, false}},

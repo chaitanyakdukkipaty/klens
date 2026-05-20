@@ -32,7 +32,9 @@ func init() {
 	// shape that used to live as a switch in model.buildTopology.
 	k8sres.SetHandlers("Pod",
 		func(wf *k8sres.WatcherFactory, ns string, ctx k8sres.RowContext) []k8sres.ResourceRow {
-			return rows(func() []k8sres.ResourceRow { return BuildPodRows(wf.ListPods(ns), ctx.Metrics) })
+			return rows(func() []k8sres.ResourceRow {
+				return BuildPodRows(wf.ListPods(ns), ctx.Metrics, ctx.PortForwardActive)
+			})
 		},
 		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
 			return get(func(c context.Context) (any, error) {
