@@ -1463,7 +1463,11 @@ func (m Model) actionAttach() (Model, tea.Cmd) {
 		container = pod.Spec.Containers[0].Name
 	}
 	if os.Getenv("TMUX") != "" {
-		return m, k8sops.TmuxAttachWindowCmd(row.Namespace, row.Name, container)
+		kubeCtx := ""
+		if m.clusterMgr != nil {
+			kubeCtx = m.clusterMgr.ActiveContext()
+		}
+		return m, k8sops.TmuxAttachWindowCmd(kubeCtx, row.Namespace, row.Name, container)
 	}
 	// Non-tmux fallback: suspend TUI and exec directly.
 	if m.clusterMgr == nil {

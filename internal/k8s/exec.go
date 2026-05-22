@@ -88,17 +88,23 @@ func AttachCmd(cs *kubernetes.Clientset, cfg *rest.Config, namespace, pod string
 
 // TmuxAttachWindowCmd opens a new tmux window running kubectl exec into the pod.
 // It captures the new window's index so the TUI can switch to it later.
-func TmuxAttachWindowCmd(namespace, pod, container string) tea.Cmd {
+// kubeContext pins the exec to the cluster klens is currently viewing — without
+// it, kubectl would use the on-disk current-context, which drifts after ctrl+k.
+func TmuxAttachWindowCmd(kubeContext, namespace, pod, container string) tea.Cmd {
 	return func() tea.Msg {
+		ctxFlag := ""
+		if kubeContext != "" {
+			ctxFlag = fmt.Sprintf(" --context=%s", kubeContext)
+		}
 		var kubectlCmd string
 		if container != "" {
 			kubectlCmd = fmt.Sprintf(
-				"kubectl exec -i -t -n %s %s -c %s -- sh -c 'clear; (bash || ash || sh)'",
-				namespace, pod, container)
+				"kubectl%s exec -i -t -n %s %s -c %s -- sh -c 'clear; (bash || ash || sh)'",
+				ctxFlag, namespace, pod, container)
 		} else {
 			kubectlCmd = fmt.Sprintf(
-				"kubectl exec -i -t -n %s %s -- sh -c 'clear; (bash || ash || sh)'",
-				namespace, pod)
+				"kubectl%s exec -i -t -n %s %s -- sh -c 'clear; (bash || ash || sh)'",
+				ctxFlag, namespace, pod)
 		}
 		windowName := pod
 		if len(windowName) > 30 {
