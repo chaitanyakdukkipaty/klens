@@ -1878,10 +1878,23 @@ func (m Model) resizePanels() Model {
 
 func (m Model) connectCmd() tea.Cmd {
 	ch := m.msgCh
+	// Preserve the in-app active context across refresh (ctrl+r). On first
+	// connect m.clusterMgr is nil, so we fall through to kubeconfig's
+	// current-context. After the user has switched via ctrl+k, that selection
+	// would otherwise be lost when we reload the kubeconfig below.
+	preferredCtx := ""
+	if m.clusterMgr != nil {
+		preferredCtx = m.clusterMgr.ActiveContext()
+	}
 	return func() tea.Msg {
 		mgr, err := cluster.New()
 		if err != nil {
 			return errMsg{err: fmt.Errorf("kubeconfig: %w", err)}
+		}
+		if preferredCtx != "" && preferredCtx != mgr.ActiveContext() {
+			if err := mgr.SwitchContext(preferredCtx); err != nil {
+				return errMsg{err: fmt.Errorf("restore context %q: %w", preferredCtx, err), ctx: mgr.ActiveContext()}
+			}
 		}
 		cs, err := mgr.ActiveClientset()
 		if err != nil {
