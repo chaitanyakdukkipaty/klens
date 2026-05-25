@@ -786,7 +786,11 @@ func renderLogLineText(l k8slogs.LogLine, text string) string {
 	if colorIdx >= len(styles.LogPrefixColors) {
 		colorIdx = colorIdx % len(styles.LogPrefixColors)
 	}
-	prefix := styles.LogPrefixStyles[colorIdx].Render(fmt.Sprintf("[%s] ", l.Pod))
+	label := l.Pod
+	if l.Container != "" {
+		label = l.Pod + "/" + l.Container
+	}
+	prefix := styles.LogPrefixStyles[colorIdx].Render(fmt.Sprintf("[%s] ", label))
 	if l.IsSystem {
 		return styles.Muted.Italic(true).Render(text)
 	}

@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -53,10 +54,11 @@ func NewLogStreamer(cs *kubernetes.Clientset, namespace string) *LogStreamer {
 	}
 }
 
-// Start begins streaming from the given pod names (all containers merged).
+// Start begins streaming from the given pod names. Multi-container pods are
+// fanned out: one stream per container, labelled with the container name.
 func (s *LogStreamer) Start(pods []string) {
 	for i, pod := range pods {
-		go s.streamPodInGroup(pod, "", i%8)
+		go s.streamPod(pod, "", i%8)
 	}
 }
 
@@ -66,7 +68,7 @@ func (s *LogStreamer) StartGrouped(groups []LogGroup) {
 	colorIdx := 0
 	for _, g := range groups {
 		for _, pod := range g.Pods {
-			go s.streamPodInGroup(pod, g.Name, colorIdx%8)
+			go s.streamPod(pod, g.Name, colorIdx%8)
 			colorIdx++
 		}
 	}
@@ -103,9 +105,45 @@ func (s *LogStreamer) ReadCmd() tea.Cmd {
 	}
 }
 
-func (s *LogStreamer) streamPodInGroup(podName, group string, colorIdx int) {
+// streamPod discovers the pod's containers and starts one log stream per
+// container. With a single container the GetLogs API accepts an unset
+// Container field; with multiple it requires one — so we always inspect.
+// If the pod lookup fails we fall back to a single container-less stream;
+// the inner retry/backoff loop will surface any underlying error.
+func (s *LogStreamer) streamPod(podName, group string, colorIdx int) {
+	containers := s.discoverContainers(podName)
+	if len(containers) == 0 {
+		s.streamContainer(podName, "", group, colorIdx)
+		return
+	}
+	for i := 1; i < len(containers); i++ {
+		go s.streamContainer(podName, containers[i], group, colorIdx)
+	}
+	s.streamContainer(podName, containers[0], group, colorIdx)
+}
+
+func (s *LogStreamer) discoverContainers(podName string) []string {
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	pod, err := s.cs.CoreV1().Pods(s.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+func (s *LogStreamer) streamContainer(podName, container, group string, colorIdx int) {
+	label := podName
+	if container != "" {
+		label = podName + "/" + container
+	}
 	tailLines := int64(200)
 	opts := &corev1.PodLogOptions{
+		Container: container,
 		Follow:    true,
 		TailLines: &tailLines,
 	}
@@ -121,7 +159,7 @@ func (s *LogStreamer) streamPodInGroup(podName, group string, colorIdx int) {
 		req := s.cs.CoreV1().Pods(s.namespace).GetLogs(podName, opts)
 		stream, err := req.Stream(s.ctx)
 		if err != nil {
-			s.sendSystem(podName, group, colorIdx, fmt.Sprintf("[%s] stream error: %v (retry %d)", podName, err, attempt+1))
+			s.sendSystem(podName, container, group, colorIdx, fmt.Sprintf("[%s] stream error: %v (retry %d)", label, err, attempt+1))
 			select {
 			case <-time.After(backoff):
 			case <-s.ctx.Done():
@@ -132,7 +170,7 @@ func (s *LogStreamer) streamPodInGroup(podName, group string, colorIdx int) {
 		}
 
 		backoff = time.Second // reset on successful connect
-		s.sendSystem(podName, group, colorIdx, fmt.Sprintf("[%s] connected", podName))
+		s.sendSystem(podName, container, group, colorIdx, fmt.Sprintf("[%s] connected", label))
 
 		scanner := bufio.NewScanner(stream)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -142,7 +180,7 @@ func (s *LogStreamer) streamPodInGroup(podName, group string, colorIdx int) {
 				return
 			}
 			select {
-			case s.lineCh <- LogLine{Pod: podName, Group: group, Text: scanner.Text(), ColorIdx: colorIdx}:
+			case s.lineCh <- LogLine{Pod: podName, Container: container, Group: group, Text: scanner.Text(), ColorIdx: colorIdx}:
 			case <-s.ctx.Done():
 				stream.Close()
 				return
@@ -153,7 +191,7 @@ func (s *LogStreamer) streamPodInGroup(podName, group string, colorIdx int) {
 		if s.ctx.Err() != nil {
 			return
 		}
-		s.sendSystem(podName, group, colorIdx, fmt.Sprintf("[%s] stream ended, reconnecting…", podName))
+		s.sendSystem(podName, container, group, colorIdx, fmt.Sprintf("[%s] stream ended, reconnecting…", label))
 		select {
 		case <-time.After(backoff):
 		case <-s.ctx.Done():
@@ -161,12 +199,12 @@ func (s *LogStreamer) streamPodInGroup(podName, group string, colorIdx int) {
 		}
 		backoff = time.Duration(math.Min(float64(backoff*2), float64(maxBackoff)))
 	}
-	s.sendSystem(podName, group, colorIdx, fmt.Sprintf("[%s] max retries reached", podName))
+	s.sendSystem(podName, container, group, colorIdx, fmt.Sprintf("[%s] max retries reached", label))
 }
 
-func (s *LogStreamer) sendSystem(pod, group string, colorIdx int, msg string) {
+func (s *LogStreamer) sendSystem(pod, container, group string, colorIdx int, msg string) {
 	select {
-	case s.lineCh <- LogLine{Pod: pod, Group: group, ColorIdx: colorIdx, Text: msg, IsSystem: true}:
+	case s.lineCh <- LogLine{Pod: pod, Container: container, Group: group, ColorIdx: colorIdx, Text: msg, IsSystem: true}:
 	default:
 	}
 }
