@@ -5,13 +5,12 @@ import (
 	"github.com/chaitanyak/klens/internal/ui/panels"
 )
 
-// YAMLEditController wraps panels.YAMLEditor. It owns the vim-style Insert /
-// Normal / DiffConfirm state machine that previously leaked through
-// IsInsertMode() to the root: the root used to ask the panel whether to
-// suppress F (fullscreen toggle) and esc (exit mode) during text entry.
-// Now the controller's HandleKey makes that decision and the root only sees
-// consumed=true (panel ate the key as input) or consumed=false (the global
-// keybinding should run).
+// YAMLEditController wraps panels.YAMLEditor. The vim-style Insert / Normal /
+// DiffConfirm state machine lives inside the panel itself — the controller is
+// a thin forwarder so the root sees the same Controller surface as every
+// other mode. There used to be an IsInsertMode() accessor that leaked the
+// editor's state to the root (and then to this controller); that accessor
+// has been removed and the panel's HandleKey makes the consume/refuse call.
 type YAMLEditController struct {
 	panel panels.YAMLEditor
 }
@@ -45,39 +44,11 @@ func (c YAMLEditController) Update(msg tea.Msg) (Controller, tea.Cmd) {
 	return c, cmd
 }
 
-// HandleKey routes a keypress respecting the editor's modal state.
-//   - In Insert mode, ESC transitions back to Normal (panel handles it) and
-//     F / q / ctrl+c are literal characters absorbed by the textarea.
-//   - In Normal / DiffConfirm / Applying, ESC falls through to the root so
-//     the fullscreen-peel / mode-exit cascade runs, F goes to fullscreen,
-//     and q / ctrl+c are still absorbed (the editor explicitly protects the
-//     buffer from accidental quits — matches the historical
-//     `if m.mode == ModeEditor` route in root.handleKey).
+// HandleKey forwards the key to the panel's own HandleKey, which owns the
+// modal routing. The controller stays out of the decision so adding a new
+// editor state (e.g. visual-select) is a panel-only change.
 func (c YAMLEditController) HandleKey(k tea.KeyPressMsg) (Controller, tea.Cmd, bool) {
-	insert := c.panel.IsInsertMode()
-	switch k.String() {
-	case "esc":
-		if insert {
-			p, cmd := c.panel.Update(k)
-			c.panel = p
-			return c, cmd, true
-		}
-		return c, nil, false
-	case "F":
-		if insert {
-			p, cmd := c.panel.Update(k)
-			c.panel = p
-			return c, cmd, true
-		}
-		return c, nil, false
-	case "q", "ctrl+c":
-		// Editor never lets q / ctrl+c reach the global quit handler — it
-		// would destroy in-flight edits. Always route to the panel.
-		p, cmd := c.panel.Update(k)
-		c.panel = p
-		return c, cmd, true
-	}
-	p, cmd := c.panel.Update(k)
+	p, cmd, consumed := c.panel.HandleKey(k)
 	c.panel = p
-	return c, cmd, true
+	return c, cmd, consumed
 }

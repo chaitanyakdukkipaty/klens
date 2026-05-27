@@ -6,12 +6,13 @@ import (
 	"github.com/chaitanyak/klens/internal/ui/panels"
 )
 
-// LogsController wraps panels.LogViewer. It owns the layered esc-peel and
-// input-capture detection that previously leaked through accessors on the
-// panel (HasActiveState / HandleEsc / IsCapturingInput) to the root model.
-// The root delegates ESC and q/ctrl+c through HandleKey, and the controller
-// answers consumed=true when it ate the key or consumed=false when the root
-// should run its own fall-through (fullscreen peel, quit, etc.).
+// LogsController wraps panels.LogViewer. The layered esc-peel and the
+// input-capture detection that used to drive routing live inside the panel
+// itself now — the controller is a thin forwarder so the root sees the same
+// Controller surface as every other mode. There used to be HasActiveState /
+// HandleEsc / IsCapturingInput accessors that leaked the viewer's state to
+// the root (and then to this controller); those accessors have been removed
+// and the panel's HandleKey makes the consume/refuse call.
 //
 // The log streamer lifecycle stays on the root for now — see
 // docs/architecture/02-mode-controllers.md "Risks → logStreamer ownership"
@@ -58,31 +59,13 @@ func (c LogsController) Update(msg tea.Msg) (Controller, tea.Cmd) {
 	return c, cmd
 }
 
-// HandleKey routes a keypress, hiding the panel's layered state from the
-// root. The peel order is preserved: ESC peels exactly one layer of panel
-// state; with no peelable state ESC returns consumed=false so the root can
-// continue its fullscreen → mode-exit cascade. q / ctrl+c / F are forwarded
-// to the panel only while an input capture (filter / search) is open;
-// otherwise they fall through so the global keybindings still work.
+// HandleKey forwards the key to the panel's own HandleKey, which owns the
+// peel order and the input-capture decision. The controller stays out of
+// it so adding a new layer (e.g. column-mode) is a panel-only change.
 func (c LogsController) HandleKey(k tea.KeyPressMsg) (Controller, tea.Cmd, bool) {
-	switch k.String() {
-	case "esc":
-		if c.panel.HasActiveState() {
-			c.panel = c.panel.HandleEsc()
-			return c, nil, true
-		}
-		return c, nil, false
-	case "q", "ctrl+c", "F":
-		if c.panel.IsCapturingInput() {
-			p, cmd := c.panel.Update(k)
-			c.panel = p
-			return c, cmd, true
-		}
-		return c, nil, false
-	}
-	p, cmd := c.panel.Update(k)
+	p, cmd, consumed := c.panel.HandleKey(k)
 	c.panel = p
-	return c, cmd, true
+	return c, cmd, consumed
 }
 
 // ConsumeStatusMsg drains the panel's transient status (drag-to-copy "copied

@@ -273,10 +273,39 @@ func (v LogViewer) SetPodGroups(groups []k8slogs.LogGroup) LogViewer {
 	return v
 }
 
-// HasActiveState reports whether any peelable state is active on the focused
-// group, OR the viewer is in a non-default layout. The model's esc handler
-// uses this to decide whether to peel state vs. exit log mode entirely.
-func (v LogViewer) HasActiveState() bool {
+// HandleKey routes a keypress through the viewer's layered state machine and
+// reports whether the viewer consumed it. The peel order on ESC is: drag
+// selection → search input → filter input → pod solo → search query →
+// filter query → split layout. Each ESC peels exactly one layer; when nothing
+// remains to peel, ESC returns consumed=false so the root's fullscreen-peel /
+// mode-exit cascade can run. q / ctrl+c / F absorb as literal text only while
+// a filter or search input is open — otherwise they fall through to the root
+// so the global keybindings still work.
+//
+// This is the single seam through which the root reaches the viewer — no
+// state-introspection accessors are exposed.
+func (v LogViewer) HandleKey(k tea.KeyPressMsg) (LogViewer, tea.Cmd, bool) {
+	switch k.String() {
+	case "esc":
+		if v.hasActiveState() {
+			return v.handleEsc(), nil, true
+		}
+		return v, nil, false
+	case "q", "ctrl+c", "F":
+		if v.isCapturingInput() {
+			next, cmd := v.Update(k)
+			return next, cmd, true
+		}
+		return v, nil, false
+	}
+	next, cmd := v.Update(k)
+	return next, cmd, true
+}
+
+// hasActiveState reports whether any peelable state is active on the focused
+// group, OR the viewer is in a non-default layout. Used by HandleKey to
+// decide whether to peel state vs. yield ESC to the root.
+func (v LogViewer) hasActiveState() bool {
 	if v.layout != LayoutTabs {
 		return true
 	}
@@ -287,8 +316,10 @@ func (v LogViewer) HasActiveState() bool {
 	return g.drag.Active || g.podFilter >= 0 || g.filter != "" || g.filterOn || g.searchQuery != "" || g.searchOn
 }
 
-// IsCapturingInput reports whether the focused group's filter or search input is open.
-func (v LogViewer) IsCapturingInput() bool {
+// isCapturingInput reports whether the focused group's filter or search
+// input is open. Used by HandleKey to absorb q / ctrl+c / F as literal text
+// while typing into a filter or search field.
+func (v LogViewer) isCapturingInput() bool {
 	if len(v.groups) == 0 {
 		return false
 	}
@@ -296,9 +327,9 @@ func (v LogViewer) IsCapturingInput() bool {
 	return g.filterOn || g.searchOn
 }
 
-// HandleEsc peels one layer of state on the focused group, then returns to
-// LayoutTabs from any split layout, then yields control to the caller (model).
-func (v LogViewer) HandleEsc() LogViewer {
+// handleEsc peels one layer of state on the focused group, then returns to
+// LayoutTabs from any split layout. Called by HandleKey on ESC.
+func (v LogViewer) handleEsc() LogViewer {
 	if len(v.groups) == 0 {
 		return v
 	}

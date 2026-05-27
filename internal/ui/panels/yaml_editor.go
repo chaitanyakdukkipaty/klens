@@ -95,7 +95,27 @@ func (e YAMLEditor) LoadYAML(kind, name, namespace, content string) YAMLEditor {
 
 func (e YAMLEditor) Modified() string { return e.textarea.Value() }
 func (e YAMLEditor) Original() string { return e.original }
-func (e YAMLEditor) IsInsertMode() bool { return e.state == editorInsert }
+
+// HandleKey routes a keypress through the editor's modal state machine and
+// reports whether the editor consumed it. Insert mode absorbs every literal
+// (including F / q / ctrl+c) so live edits aren't destroyed by global
+// shortcuts; Normal / DiffConfirm / Applying refuse ESC and F so the root's
+// fullscreen-peel and mode-exit cascade still runs. q / ctrl+c are always
+// consumed to keep an in-flight buffer from being quit by accident.
+//
+// This is the single seam through which the root reaches the editor — no
+// state-introspection accessors are exposed.
+func (e YAMLEditor) HandleKey(k tea.KeyPressMsg) (YAMLEditor, tea.Cmd, bool) {
+	insert := e.state == editorInsert
+	switch k.String() {
+	case "esc", "F":
+		if !insert {
+			return e, nil, false
+		}
+	}
+	next, cmd := e.Update(k)
+	return next, cmd, true
+}
 
 // sendKey sends a synthetic key press to the textarea (special keys like KeyUp, KeyEnter, etc.)
 // and returns the updated editor.
