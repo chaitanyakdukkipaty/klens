@@ -808,8 +808,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
 			return m, cmd
 		}
-		// If table has any filter (active or committed), let the table handle ESC to clear it.
-		if m.mode == ModeTable && m.table.HasFilter() {
+		// If table has filter or h-scroll state, let the table handle ESC to peel it.
+		if m.mode == ModeTable && (m.table.HasFilter() || m.table.HasMsgScroll()) {
 			var cmd tea.Cmd
 			m.table, cmd = m.table.Update(msg)
 			return m, cmd
@@ -1716,6 +1716,9 @@ func (m *Model) setStatusBarKind(kind string) {
 		if rd.SupportsDeletion || kind == "HelmRelease" {
 			help = append(help, panels.HelpItem{Key: "d", Desc: "delete"})
 		}
+	}
+	if kind == "Event" {
+		help = append(help, panels.HelpItem{Key: "shift+←/→", Desc: "scroll msg"})
 	}
 	help = append(help,
 		panels.HelpItem{Key: "ctrl+r", Desc: "refresh"},

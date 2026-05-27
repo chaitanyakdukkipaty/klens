@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
 	tea "charm.land/bubbletea/v2"
@@ -66,6 +67,9 @@ type ResourceTable struct {
 	filterOn bool
 	filterInput string
 	syncing  bool
+	// msgScroll is the rune offset applied to the MESSAGE column when kind=="Event".
+	// shift+left / shift+right adjust it; SetKind and applyFilter reset it.
+	msgScroll int
 
 	// drag holds drag-to-copy lifecycle state (indices into t.filtered).
 	// See DragSelection in drag.go.
@@ -90,6 +94,7 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.filter = ""
 		t.filterInput = ""
 		t.filterOn = false
+		t.msgScroll = 0
 	}
 	t.kind = kind
 	return t
@@ -159,6 +164,11 @@ func (t ResourceTable) supportsMultiSelect() bool {
 
 func (t ResourceTable) FilterActive() bool { return t.filterOn }
 func (t ResourceTable) HasFilter() bool    { return t.filterOn || t.filter != "" }
+
+// HasMsgScroll reports whether the Event view is currently scrolled
+// horizontally. Used by the root model to peel scroll state on `esc`
+// before falling back to focus-shift.
+func (t ResourceTable) HasMsgScroll() bool { return t.kind == "Event" && t.msgScroll > 0 }
 
 func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -231,9 +241,29 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 			t.filterOn = true
 			t.filterInput = t.filter
 		case "esc":
+			if t.kind == "Event" && t.msgScroll > 0 {
+				t.msgScroll = 0
+				return t, nil
+			}
 			t.filter = ""
 			t.filterInput = ""
 			t.applyFilter()
+		case "shift+right":
+			if t.kind == "Event" {
+				maxRunes := t.maxEventMessageRunes()
+				if t.msgScroll+eventMsgScrollStep < maxRunes {
+					t.msgScroll += eventMsgScrollStep
+				} else if maxRunes > 0 {
+					t.msgScroll = maxRunes - 1
+				}
+			}
+		case "shift+left":
+			if t.kind == "Event" {
+				t.msgScroll -= eventMsgScrollStep
+				if t.msgScroll < 0 {
+					t.msgScroll = 0
+				}
+			}
 		case "space":
 			if t.supportsMultiSelect() {
 				if row := t.SelectedRow(); row != nil {
@@ -426,20 +456,61 @@ func (t ResourceTable) HandleClickAt(innerY int, leftClick bool) (ResourceTable,
 func (t *ResourceTable) applyFilter() {
 	if t.filterInput == "" {
 		t.filtered = t.rows
-		return
-	}
-	low := strings.ToLower(t.filterInput)
-	// Allocate a new slice to avoid corrupting t.rows when t.filtered shares
-	// its backing array (set via t.filtered = t.rows when no filter is active).
-	filtered := make([]k8sres.ResourceRow, 0, len(t.rows))
-	for _, r := range t.rows {
-		if strings.Contains(strings.ToLower(r.Name), low) {
-			filtered = append(filtered, r)
+	} else {
+		low := strings.ToLower(t.filterInput)
+		// Allocate a new slice to avoid corrupting t.rows when t.filtered shares
+		// its backing array (set via t.filtered = t.rows when no filter is active).
+		filtered := make([]k8sres.ResourceRow, 0, len(t.rows))
+		for _, r := range t.rows {
+			if strings.Contains(strings.ToLower(r.Name), low) {
+				filtered = append(filtered, r)
+			}
 		}
+		t.filtered = filtered
 	}
-	t.filtered = filtered
 	if t.cursor >= len(t.filtered) {
 		t.cursor = max(0, len(t.filtered)-1)
+	}
+	// A filter change may have removed every row whose message extended past
+	// the current scroll. Reclamp so we never display a fully-blank MESSAGE col.
+	t.clampMsgScroll()
+}
+
+// eventMsgScrollStep is the rune step applied per shift+←/→ press in the
+// Event view's MESSAGE column.
+const eventMsgScrollStep = 10
+
+// maxEventMessageRunes returns the longest filtered event MESSAGE in runes.
+// Returns 0 for non-Event kinds or when there are no filtered rows.
+func (t ResourceTable) maxEventMessageRunes() int {
+	if t.kind != "Event" {
+		return 0
+	}
+	maxN := 0
+	for _, r := range t.filtered {
+		if len(r.Values) > 6 {
+			if n := utf8.RuneCountInString(r.Values[6]); n > maxN {
+				maxN = n
+			}
+		}
+	}
+	return maxN
+}
+
+// clampMsgScroll caps msgScroll to (max-1) so at least one rune of the
+// longest visible message stays on screen, and floors at 0.
+func (t *ResourceTable) clampMsgScroll() {
+	if t.msgScroll <= 0 {
+		t.msgScroll = 0
+		return
+	}
+	maxN := t.maxEventMessageRunes()
+	if maxN == 0 {
+		t.msgScroll = 0
+		return
+	}
+	if t.msgScroll >= maxN {
+		t.msgScroll = maxN - 1
 	}
 }
 
@@ -477,6 +548,9 @@ func (t ResourceTable) View() string {
 	// Header
 	colWidths := computeColWidths(desc.Columns, innerW)
 	header := buildHeader(desc, colWidths)
+	if t.kind == "Event" && t.msgScroll > 0 && len(desc.Columns) > 0 {
+		header = buildEventHeaderWithScroll(desc, colWidths, t.msgScroll)
+	}
 
 	// Rows
 	visibleRows := t.visibleRowCount()
@@ -487,12 +561,21 @@ func (t ResourceTable) View() string {
 		dragLo, dragHi = t.drag.Range()
 	}
 
+	msgColIdx := -1
+	if t.kind == "Event" && len(desc.Columns) > 0 {
+		msgColIdx = len(desc.Columns) - 1
+	}
+
 	var rowLines []string
 	for i := start; i < len(t.filtered) && i < start+visibleRows; i++ {
 		row := t.filtered[i]
 		sel := t.selected[row.Name]
 		inDrag := dragLo >= 0 && i >= dragLo && i <= dragHi
 		isCursor := i == t.cursor || inDrag
+
+		if msgColIdx >= 0 && t.msgScroll > 0 && msgColIdx < len(row.Values) {
+			row = applyMsgScroll(row, msgColIdx, t.msgScroll)
+		}
 
 		line := buildRow(row, desc, innerW, colWidths, sel, isCursor)
 		rowLines = append(rowLines, line)
@@ -551,6 +634,43 @@ func computeColWidths(cols []k8sres.Column, width int) []int {
 		}
 	}
 	return widths
+}
+
+// applyMsgScroll returns a copy of row with Values[colIdx] shifted left by
+// scroll runes and prefixed with `‹` to indicate the truncated-left state.
+// Rune-aware so multi-byte content (paths, names with non-ASCII chars from
+// regional clusters) doesn't get sliced mid-codepoint.
+func applyMsgScroll(row k8sres.ResourceRow, colIdx, scroll int) k8sres.ResourceRow {
+	if scroll <= 0 || colIdx < 0 || colIdx >= len(row.Values) {
+		return row
+	}
+	runes := []rune(row.Values[colIdx])
+	offset := scroll
+	if offset > len(runes) {
+		offset = len(runes)
+	}
+	shifted := "‹" + string(runes[offset:])
+	newValues := make([]string, len(row.Values))
+	copy(newValues, row.Values)
+	newValues[colIdx] = shifted
+	row.Values = newValues
+	return row
+}
+
+// buildEventHeaderWithScroll annotates the MESSAGE header with the active rune
+// offset so users can see how far they've scrolled.
+func buildEventHeaderWithScroll(desc k8sres.ResourceDescriptor, colWidths []int, scroll int) string {
+	cols := desc.Columns
+	parts := make([]string, len(cols))
+	last := len(cols) - 1
+	for i, c := range cols {
+		text := c.Header
+		if i == last {
+			text = fmt.Sprintf("%s +%d", c.Header, scroll)
+		}
+		parts[i] = padOrTrunc(text, colWidths[i])
+	}
+	return styles.TableHeader.Render(strings.Join(parts, " "))
 }
 
 func buildHeader(desc k8sres.ResourceDescriptor, colWidths []int) string {
@@ -673,6 +793,7 @@ func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 	if t.cursor >= len(t.filtered) {
 		t.cursor = max(0, len(t.filtered)-1)
 	}
+	t.clampMsgScroll()
 	return t
 }
 

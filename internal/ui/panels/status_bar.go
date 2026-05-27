@@ -1,7 +1,6 @@
 package panels
 
 import (
-	"fmt"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -29,7 +28,6 @@ var defaultHelp = []HelpItem{
 	{Key: "l", Desc: "logs"},
 	{Key: "t", Desc: "topology"},
 	{Key: "m", Desc: "metrics"},
-	{Key: ":", Desc: "cmd"},
 	{Key: "q", Desc: "quit"},
 }
 
@@ -66,7 +64,7 @@ func (s StatusBar) View() string {
 
 	help := s.help
 	if s.activeKind == "Pod" {
-		hint := HelpItem{Key: "space", Desc: "multi·log"}
+		hint := HelpItem{Key: "space", Desc: "multi-log"}
 		extended := make([]HelpItem, 0, len(help)+1)
 		extended = append(extended, help[0])
 		extended = append(extended, hint)
@@ -74,14 +72,7 @@ func (s StatusBar) View() string {
 		help = extended
 	}
 
-	parts := make([]string, 0, len(help))
-	for _, h := range help {
-		parts = append(parts, fmt.Sprintf("%s %s",
-			styles.HelpKey.Render(h.Key),
-			styles.HelpDesc.Render(h.Desc),
-		))
-	}
-	line := " " + strings.Join(parts, styles.HelpDesc.Render("  ·  "))
+	line := " " + RenderHelpInline(help)
 	return styles.StatusBar.Width(s.width).Render(line)
 }
 

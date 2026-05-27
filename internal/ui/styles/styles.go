@@ -105,8 +105,9 @@ var (
 			Padding(1, 2)
 
 	// Help bar (bottom)
-	HelpKey  = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
-	HelpDesc = lipgloss.NewStyle().Foreground(colorMuted)
+	HelpKey     = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+	HelpDesc    = lipgloss.NewStyle().Foreground(colorMuted)
+	HelpBracket = lipgloss.NewStyle().Foreground(colorMuted)
 
 	// Log viewer
 	LogPrefixColors = []color.Color{
