@@ -50,8 +50,8 @@ type Model struct {
 	header          panels.Header
 	nav             panels.NavPanel
 	table           panels.ResourceTable
-	yamlView        panels.YAMLViewer
-	yamlEdit        panels.YAMLEditor
+	yamlViewCtrl    modes.YAMLViewController
+	yamlEditCtrl    modes.YAMLEditController
 	logsCtrl        modes.LogsController
 	topologyCtrl    modes.TopologyController
 	metricsCtrl     modes.MetricsController
@@ -146,8 +146,8 @@ func New(readOnly bool) Model {
 		header:          panels.NewHeader(80).SetReadOnly(readOnly),
 		nav:             panels.NewNavPanel(20, 22),
 		table:           panels.NewResourceTable(60, 22),
-		yamlView:        panels.NewYAMLViewer(60, 22),
-		yamlEdit:        panels.NewYAMLEditor(60, 22),
+		yamlViewCtrl:    modes.NewYAMLViewController(panels.NewYAMLViewer(60, 22)),
+		yamlEditCtrl:    modes.NewYAMLEditController(panels.NewYAMLEditor(60, 22)),
 		logsCtrl:        modes.NewLogsController(panels.NewLogViewer(60, 22)),
 		topologyCtrl:    modes.NewTopologyController(panels.NewTopologyPanel(60, 22)),
 		metricsCtrl:     modes.NewMetricsController(panels.NewMetricsPanel(60, 22)),
@@ -312,10 +312,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, panels.LogAutoScrollTickCmd()
 
 	case panels.YAMLAutoScrollTickMsg:
-		if m.mode != ModeYAML || !m.yamlView.IsDragging() {
+		if m.mode != ModeYAML || !m.yamlViewCtrl.IsDragging() {
 			return m, nil
 		}
-		m.yamlView = m.yamlView.AutoScrollStep()
+		m.yamlViewCtrl = m.yamlViewCtrl.AutoScrollStep()
 		return m, panels.YAMLAutoScrollTickCmd()
 
 	case panels.TableAutoScrollTickMsg:
@@ -353,14 +353,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusBar = m.statusBar.SetMessage("yaml: " + msg.Err.Error())
 			return m, nil
 		}
-		var cmd tea.Cmd
-		m.yamlView, cmd = m.yamlView.Update(msg)
+		next, cmd := m.yamlViewCtrl.Update(msg)
+		m.yamlViewCtrl = next.(modes.YAMLViewController)
 		m.mode = ModeYAML
 		m.focus = FocusContent
 		return m, cmd
 
 	case panels.YAMLAppliedMsg:
-		m.rollbackYAML = m.yamlEdit.Original()
+		m.rollbackYAML = m.yamlEditCtrl.Original()
 		m.rollbackKind = msg.Kind
 		m.rollbackName = msg.Name
 		m.rollbackNS = msg.Namespace
@@ -500,8 +500,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logsCtrl = next.(modes.LogsController)
 			return m, cmd
 		case ModeEditor:
-			var cmd tea.Cmd
-			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
+			next, cmd := m.yamlEditCtrl.Update(msg)
+			m.yamlEditCtrl = next.(modes.YAMLEditController)
 			return m, cmd
 		case ModeTable:
 			if m.focus == FocusNav && m.nav.FilterActive() {
@@ -620,7 +620,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					localX := mouse.X - ox
 					localY := mouse.Y - oy
 					var started bool
-					m.yamlView, started = m.yamlView.HandleMouseDown(localX, localY)
+					m.yamlViewCtrl, started = m.yamlViewCtrl.HandleMouseDown(localX, localY)
 					if started {
 						return m, panels.YAMLAutoScrollTickCmd()
 					}
@@ -688,13 +688,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ModeYAML:
 				if motion, ok := msg.(tea.MouseMotionMsg); ok {
 					mp := motion.Mouse()
-					m.yamlView = m.yamlView.HandleMouseDrag(mp.X-ox, mp.Y-oy)
+					m.yamlViewCtrl = m.yamlViewCtrl.HandleMouseDrag(mp.X-ox, mp.Y-oy)
 					return m, nil
 				}
 				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
 					mp := release.Mouse()
 					var status string
-					m.yamlView, status = m.yamlView.HandleMouseUp(mp.X-ox, mp.Y-oy)
+					m.yamlViewCtrl, status = m.yamlViewCtrl.HandleMouseUp(mp.X-ox, mp.Y-oy)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -735,12 +735,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logsCtrl = next.(modes.LogsController)
 			return m, cmd
 		case ModeYAML:
-			var cmd tea.Cmd
-			m.yamlView, cmd = m.yamlView.Update(msg)
+			next, cmd := m.yamlViewCtrl.Update(msg)
+			m.yamlViewCtrl = next.(modes.YAMLViewController)
 			return m, cmd
 		case ModeEditor:
-			var cmd tea.Cmd
-			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
+			next, cmd := m.yamlEditCtrl.Update(msg)
+			m.yamlEditCtrl = next.(modes.YAMLEditController)
 			return m, cmd
 		case ModeTopology:
 			next, cmd := m.topologyCtrl.Update(msg)
@@ -775,9 +775,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "F":
 		switch m.mode {
 		case ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics:
-			// In editor Insert mode F is literal text, not a toggle.
-			if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
-				break
+			// Let the editor controller consume F as literal text when in
+			// Insert mode. consumed=false falls through to fullscreen toggle.
+			if m.mode == ModeEditor {
+				next, cmd, consumed := m.yamlEditCtrl.HandleKey(msg)
+				m.yamlEditCtrl = next.(modes.YAMLEditController)
+				if consumed {
+					return m, cmd
+				}
 			}
 			m = m.toggleFullScreen()
 			m = m.resizePanels()
@@ -785,9 +790,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 	case "q", "ctrl+c":
 		if m.mode == ModeEditor {
-			var cmd tea.Cmd
-			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
-			return m, cmd
+			next, cmd, consumed := m.yamlEditCtrl.HandleKey(msg)
+			m.yamlEditCtrl = next.(modes.YAMLEditController)
+			if consumed {
+				return m, cmd
+			}
 		}
 		if m.mode == ModeLogs {
 			next, cmd, consumed := m.logsCtrl.HandleKey(msg)
@@ -806,10 +813,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "esc":
 		// In the YAML editor's Insert mode, ESC switches to Normal — don't exit to table.
 		// (Handled before fullScreen so insert→normal transition fires before fullScreen exits.)
-		if m.mode == ModeEditor && m.yamlEdit.IsInsertMode() {
-			var cmd tea.Cmd
-			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
-			return m, cmd
+		if m.mode == ModeEditor {
+			next, cmd, consumed := m.yamlEditCtrl.HandleKey(msg)
+			m.yamlEditCtrl = next.(modes.YAMLEditController)
+			if consumed {
+				return m, cmd
+			}
 		}
 		// If table has filter or h-scroll state, let the table handle ESC to peel it.
 		if m.mode == ModeTable && (m.table.HasFilter() || m.table.HasHScroll()) {
@@ -907,12 +916,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	if m.mode == ModeYAML {
+		next, cmd, consumed := m.yamlViewCtrl.HandleKey(msg)
+		m.yamlViewCtrl = next.(modes.YAMLViewController)
+		if consumed {
+			return m, cmd
+		}
+		// Refused keys: "e" (open editor) and "ctrl+z" (rollback) — both need
+		// root-owned state (readOnly + rollback stash).
 		return m.handleYAMLViewKeys(msg)
 	}
 
 	if m.mode == ModeEditor {
-		var cmd tea.Cmd
-		m.yamlEdit, cmd = m.yamlEdit.Update(msg)
+		next, cmd, _ := m.yamlEditCtrl.HandleKey(msg)
+		m.yamlEditCtrl = next.(modes.YAMLEditController)
 		return m, cmd
 	}
 
@@ -1497,6 +1513,9 @@ func (m Model) actionAttach() (Model, tea.Cmd) {
 	return m, k8sops.AttachCmd(cs, cfg, row.Namespace, row.Name)
 }
 
+// handleYAMLViewKeys is reached only for keys the YAMLViewController refused
+// ("e" and "ctrl+z"). These actions read state that lives on the root
+// (m.readOnly + the rollback stash), so the controller defers to the model.
 func (m Model) handleYAMLViewKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "e":
@@ -1504,26 +1523,24 @@ func (m Model) handleYAMLViewKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.statusBar = m.statusBar.SetMessage("read-only mode")
 			return m, nil
 		}
-		kind, name, ns := m.yamlView.ResourceInfo()
-		m.yamlEdit = m.yamlEdit.LoadYAML(kind, name, ns, m.yamlView.RawYAML())
+		kind, name, ns := m.yamlViewCtrl.ResourceInfo()
+		m.yamlEditCtrl = m.yamlEditCtrl.LoadYAML(kind, name, ns, m.yamlViewCtrl.RawYAML())
 		m.mode = ModeEditor
 		return m, nil
 	case "ctrl+z":
 		if m.readOnly || m.rollbackYAML == "" {
 			return m, nil
 		}
-		kind, name, ns := m.yamlView.ResourceInfo()
+		kind, name, ns := m.yamlViewCtrl.ResourceInfo()
 		if m.rollbackKind != kind || m.rollbackName != name || m.rollbackNS != ns {
 			return m, nil
 		}
-		m.yamlEdit = m.yamlEdit.LoadYAML(kind, name, ns, m.rollbackYAML)
+		m.yamlEditCtrl = m.yamlEditCtrl.LoadYAML(kind, name, ns, m.rollbackYAML)
 		m.rollbackYAML = ""
 		m.mode = ModeEditor
 		return m, nil
 	}
-	var cmd tea.Cmd
-	m.yamlView, cmd = m.yamlView.Update(msg)
-	return m, cmd
+	return m, nil
 }
 
 // deleteTarget holds identifying info for one resource to be deleted.
@@ -1837,9 +1854,9 @@ func (m Model) baseView() string {
 func (m Model) contentView() string {
 	switch m.mode {
 	case ModeYAML:
-		return m.yamlView.View()
+		return m.yamlViewCtrl.View()
 	case ModeEditor:
-		return m.yamlEdit.View()
+		return m.yamlEditCtrl.View()
 	case ModeLogs:
 		return m.logsCtrl.View()
 	case ModeTopology:
@@ -1882,8 +1899,8 @@ func (m Model) resizePanels() Model {
 	if m.fullScreen {
 		cw, ch = termW, termH
 	}
-	m.yamlView = m.yamlView.SetSize(cw, ch)
-	m.yamlEdit = m.yamlEdit.SetSize(cw, ch)
+	m.yamlViewCtrl = m.yamlViewCtrl.SetSize(cw, ch).(modes.YAMLViewController)
+	m.yamlEditCtrl = m.yamlEditCtrl.SetSize(cw, ch).(modes.YAMLEditController)
 	m.logsCtrl = m.logsCtrl.SetSize(cw, ch).(modes.LogsController)
 	m.topologyCtrl = m.topologyCtrl.SetSize(cw, ch).(modes.TopologyController)
 	m.metricsCtrl = m.metricsCtrl.SetSize(cw, ch).(modes.MetricsController)
