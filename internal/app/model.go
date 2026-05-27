@@ -49,7 +49,7 @@ type Model struct {
 	layout          layout.Layout
 	header          panels.Header
 	nav             panels.NavPanel
-	table           panels.ResourceTable
+	tableCtrl       modes.TableController
 	yamlViewCtrl    modes.YAMLViewController
 	yamlEditCtrl    modes.YAMLEditController
 	logsCtrl        modes.LogsController
@@ -145,7 +145,7 @@ func New(readOnly bool) Model {
 		layout:          layout.New(80, 24),
 		header:          panels.NewHeader(80).SetReadOnly(readOnly),
 		nav:             panels.NewNavPanel(20, 22),
-		table:           panels.NewResourceTable(60, 22),
+		tableCtrl:       modes.NewTableController(panels.NewResourceTable(60, 22)),
 		yamlViewCtrl:    modes.NewYAMLViewController(panels.NewYAMLViewer(60, 22)),
 		yamlEditCtrl:    modes.NewYAMLEditController(panels.NewYAMLEditor(60, 22)),
 		logsCtrl:        modes.NewLogsController(panels.NewLogViewer(60, 22)),
@@ -205,7 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncing = true
 		m.header = m.header.SetCluster(msg.ctx).SetNamespace(msg.ns).SetVersion(msg.version).SetReadOnly(m.readOnly)
 		m.nav = m.nav.SetFocused(true)
-		m.table = m.table.SetKind(m.nav.ActiveKind()).SetSyncing(true)
+		m.tableCtrl = m.tableCtrl.SetKind(m.nav.ActiveKind()).SetSyncing(true)
 		m.setStatusBarKind(m.nav.ActiveKind())
 		return m, tea.Batch(
 			k8sops.WatchCmd(m.msgCh),
@@ -221,7 +221,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// table's syncing badge based on whether the *currently active* kind is
 		// itself synced — Pod is always true here, but if the user resumed on a
 		// non-Pod kind whose informer is still loading, the badge stays on.
-		m.table = m.table.SetSyncing(m.kindSyncing(m.nav.ActiveKind()))
+		m.tableCtrl = m.tableCtrl.SetSyncing(m.kindSyncing(m.nav.ActiveKind()))
 		return m, tea.Batch(k8sops.WatchCmd(m.msgCh), m.buildTableCmd())
 
 	case k8sops.KindSyncedMsg:
@@ -229,7 +229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// only if the user is currently looking at that kind — otherwise the
 		// next ResourceUpdatedMsg from the coalesce loop will pick it up.
 		if m.mode == ModeTable && m.nav.ActiveKind() == msg.Kind {
-			m.table = m.table.SetSyncing(false)
+			m.tableCtrl = m.tableCtrl.SetSyncing(false)
 			return m, tea.Batch(k8sops.WatchCmd(m.msgCh), m.buildTableCmd())
 		}
 		return m, k8sops.WatchCmd(m.msgCh)
@@ -285,7 +285,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshMsg:
 		rows := m.listRows(m.nav.ActiveKind())
-		m.table = m.table.WithRows(rows)
+		m.tableCtrl = m.tableCtrl.WithRows(rows)
 		// Show access-denied when navigating to a forbidden resource; restore
 		// the last operation status when navigating to an accessible one.
 		if m.watcher != nil && m.watcher.IsAccessDenied(m.nav.ActiveKind()) {
@@ -319,10 +319,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, panels.YAMLAutoScrollTickCmd()
 
 	case panels.TableAutoScrollTickMsg:
-		if m.mode != ModeTable || !m.table.IsDragging() {
+		if m.mode != ModeTable || !m.tableCtrl.IsDragging() {
 			return m, nil
 		}
-		m.table = m.table.AutoScrollStep()
+		m.tableCtrl = m.tableCtrl.AutoScrollStep()
 		return m, panels.TableAutoScrollTickCmd()
 
 	case k8sops.MetricsUpdatedMsg:
@@ -336,7 +336,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Patch only the metrics-related Values + Status on existing rows;
 			// no sort, no filter recompute. New pods that appear between ticks
 			// will arrive via the regular ResourceUpdatedMsg path.
-			m.table = m.table.PatchValuesByName(m.listRows("Pod"))
+			m.tableCtrl = m.tableCtrl.PatchValuesByName(m.listRows("Pod"))
 		}
 		return m, k8sops.MetricsTickCmd()
 
@@ -509,9 +509,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.nav, cmd = m.nav.Update(msg)
 				return m, cmd
 			}
-			if m.table.FilterActive() {
-				var cmd tea.Cmd
-				m.table, cmd = m.table.Update(msg)
+			if m.tableCtrl.FilterActive() {
+				next, cmd := m.tableCtrl.Update(msg)
+				m.tableCtrl = next.(modes.TableController)
 				return m, cmd
 			}
 		}
@@ -563,7 +563,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if m.focus != FocusNav {
 							m.focus = FocusNav
 							m.nav = m.nav.SetFocused(true)
-							m.table = m.table.SetFocused(false).ClearSelection()
+							m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
 						}
 						if switchedMode {
 							return m, m.buildTableCmd()
@@ -572,9 +572,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.focus = FocusContent
 					m.nav = m.nav.SetFocused(false)
-					m.table = m.table.SetFocused(true)
+					m.tableCtrl = m.tableCtrl.SetFocused(true)
 					if newKind != prevKind {
-						m.table = m.setKindAndSync(newKind)
+						m.tableCtrl = m.setKindAndSync(newKind)
 						m.setStatusBarKind(newKind)
 						return m, m.buildTableCmd()
 					}
@@ -590,20 +590,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.focus != FocusContent {
 						m.focus = FocusContent
 						m.nav = m.nav.SetFocused(false)
-						m.table = m.table.SetFocused(true)
+						m.tableCtrl = m.tableCtrl.SetFocused(true)
 					}
 					switch click.Button {
 					case tea.MouseLeft:
 						innerX := mouse.X - navW
 						var started bool
-						m.table, started = m.table.HandleMouseDown(innerX, innerY)
+						m.tableCtrl, started = m.tableCtrl.HandleMouseDown(innerX, innerY)
 						if started {
 							return m, panels.TableAutoScrollTickCmd()
 						}
 						return m, nil
 					case tea.MouseRight:
 						var hit bool
-						m.table, hit = m.table.HandleClickAt(innerY, false)
+						m.tableCtrl, hit = m.tableCtrl.HandleClickAt(innerY, false)
 						if hit {
 							m = m.openContextMenu()
 						}
@@ -705,7 +705,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					mp := motion.Mouse()
 					innerY := mp.Y - 2
 					innerX := mp.X - navW
-					m.table = m.table.HandleMouseDrag(innerX, innerY)
+					m.tableCtrl = m.tableCtrl.HandleMouseDrag(innerX, innerY)
 					return m, nil
 				}
 				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
@@ -713,7 +713,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					innerY := mp.Y - 2
 					innerX := mp.X - navW
 					var status string
-					m.table, status = m.table.HandleMouseUp(innerX, innerY)
+					m.tableCtrl, status = m.tableCtrl.HandleMouseUp(innerX, innerY)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -725,7 +725,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ModeTable:
 			var cmd tea.Cmd
 			if m.focus == FocusContent {
-				m.table, cmd = m.table.Update(msg)
+				m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 			} else {
 				m.nav, cmd = m.nav.Update(msg)
 			}
@@ -763,7 +763,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.nav, cmd = m.nav.Update(msg)
 		if m.nav.ActiveKind() != prev {
-			m.table = m.setKindAndSync(m.nav.ActiveKind())
+			m.tableCtrl = m.setKindAndSync(m.nav.ActiveKind())
 			m.setStatusBarKind(m.nav.ActiveKind())
 			return m, tea.Batch(cmd, m.buildTableCmd())
 		}
@@ -803,9 +803,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 				return m, cmd
 			}
 		}
-		if m.table.FilterActive() {
+		if m.tableCtrl.FilterActive() {
 			var cmd tea.Cmd
-			m.table, cmd = m.table.Update(msg)
+			m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 			return m, cmd
 		}
 		m.stopAll()
@@ -821,9 +821,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			}
 		}
 		// If table has filter or h-scroll state, let the table handle ESC to peel it.
-		if m.mode == ModeTable && (m.table.HasFilter() || m.table.HasHScroll()) {
+		if m.mode == ModeTable && (m.tableCtrl.HasFilter() || m.tableCtrl.HasHScroll()) {
 			var cmd tea.Cmd
-			m.table, cmd = m.table.Update(msg)
+			m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 			return m, cmd
 		}
 		// Peel log viewer state (filter input, search, podFilter, split layout)
@@ -857,7 +857,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if m.focus == FocusContent {
 			m.focus = FocusNav
 			m.nav = m.nav.SetFocused(true)
-			m.table = m.table.SetFocused(false).ClearSelection()
+			m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
 			return m, nil
 		}
 	case "ctrl+n":
@@ -962,23 +962,23 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.focus = FocusContent
 		} else {
 			m.focus = FocusNav
-			m.table = m.table.ClearSelection()
+			m.tableCtrl = m.tableCtrl.ClearSelection()
 		}
 		m.nav = m.nav.SetFocused(m.focus == FocusNav)
-		m.table = m.table.SetFocused(m.focus == FocusContent)
+		m.tableCtrl = m.tableCtrl.SetFocused(m.focus == FocusContent)
 		return m, nil
 	case "enter", "right":
 		if m.focus == FocusNav {
 			m.focus = FocusContent
 			m.nav = m.nav.SetFocused(false)
-			m.table = m.table.SetFocused(true)
+			m.tableCtrl = m.tableCtrl.SetFocused(true)
 			return m, nil
 		}
 	case "left":
 		if m.focus == FocusContent {
 			m.focus = FocusNav
 			m.nav = m.nav.SetFocused(true)
-			m.table = m.table.SetFocused(false).ClearSelection()
+			m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
 			return m, nil
 		}
 	}
@@ -988,21 +988,21 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		prev := m.nav.ActiveKind()
 		m.nav, cmd = m.nav.Update(msg)
 		if m.nav.ActiveKind() != prev {
-			m.table = m.setKindAndSync(m.nav.ActiveKind())
+			m.tableCtrl = m.setKindAndSync(m.nav.ActiveKind())
 			m.setStatusBarKind(m.nav.ActiveKind())
 			return m, tea.Batch(cmd, m.buildTableCmd())
 		}
 	} else {
-		m.table, cmd = m.table.Update(msg)
+		m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 	}
 	return m, cmd
 }
 
 func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// When filter input is open, all keys go to the table's filter handler.
-	if m.table.FilterActive() {
+	if m.tableCtrl.FilterActive() {
 		var cmd tea.Cmd
-		m.table, cmd = m.table.Update(msg)
+		m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 		return m, cmd
 	}
 	switch msg.String() {
@@ -1017,12 +1017,12 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		m.focus = FocusContent
 		m.nav = m.nav.SetFocused(false)
-		m.table = m.table.SetFocused(true)
+		m.tableCtrl = m.tableCtrl.SetFocused(true)
 		return m, nil
 	case "left":
 		m.focus = FocusNav
 		m.nav = m.nav.SetFocused(true)
-		m.table = m.table.SetFocused(false).ClearSelection()
+		m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
 		return m, nil
 	case "y":
 		return m.actionViewYAML()
@@ -1050,7 +1050,7 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 	// Pass remaining keys to table
 	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
+	m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 	return m, cmd
 }
 
@@ -1089,14 +1089,14 @@ func (m Model) dispatchTableAction(action string) (Model, tea.Cmd) {
 // selected. With a multi-select active, it builds a multi-resource menu (logs,
 // bulk delete, clear). Otherwise it builds the single-resource menu.
 func (m Model) openContextMenu() Model {
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		return m
 	}
 	kind := m.nav.ActiveKind()
 	var items []widgets.MenuItem
 	var title string
-	if n := m.table.SelectionCount(); n > 1 {
+	if n := m.tableCtrl.SelectionCount(); n > 1 {
 		items = buildMultiContextMenuItems(kind, n, m.readOnly)
 		title = fmt.Sprintf("%d %s selected", n, pluralizeKind(kind))
 	} else {
@@ -1197,12 +1197,12 @@ func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
 // --- Per-action helpers (extracted from handleTableKeys; behavior-preserving) ---
 
 func (m Model) actionClearSelection() (Model, tea.Cmd) {
-	m.table = m.table.ClearSelection()
+	m.tableCtrl = m.tableCtrl.ClearSelection()
 	return m, nil
 }
 
 func (m Model) actionViewYAML() (Model, tea.Cmd) {
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		return m, nil
 	}
@@ -1231,7 +1231,7 @@ func (m Model) actionEditYAML() (Model, tea.Cmd) {
 
 func (m Model) actionLogs() (Model, tea.Cmd) {
 	kind := m.nav.ActiveKind()
-	selectedNames := m.table.SelectedPods()
+	selectedNames := m.tableCtrl.SelectedPods()
 	var groups []k8sops.LogGroup
 	if m.watcher != nil {
 		for _, name := range selectedNames {
@@ -1264,7 +1264,7 @@ func (m Model) actionLogs() (Model, tea.Cmd) {
 }
 
 func (m Model) actionTopology() (Model, tea.Cmd) {
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row != nil && m.watcher != nil {
 		tree := m.buildTopology(m.nav.ActiveKind(), row.Name)
 		m.topologyCtrl = m.topologyCtrl.SetTree(m.nav.ActiveKind(), row.Name, tree)
@@ -1275,7 +1275,7 @@ func (m Model) actionTopology() (Model, tea.Cmd) {
 }
 
 func (m Model) actionMetrics() (Model, tea.Cmd) {
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		return m, nil
 	}
@@ -1302,7 +1302,7 @@ func (m Model) actionDelete() (Model, tea.Cmd) {
 		return m, nil
 	}
 	kind := m.nav.ActiveKind()
-	rows := m.table.SelectedRows()
+	rows := m.tableCtrl.SelectedRows()
 	if len(rows) == 0 {
 		return m, nil
 	}
@@ -1331,7 +1331,7 @@ func (m Model) actionScale() (Model, tea.Cmd) {
 	if !rd.SupportsScale {
 		return m, nil
 	}
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		return m, nil
 	}
@@ -1348,7 +1348,7 @@ func (m Model) actionSuspendHelm() (Model, tea.Cmd) {
 	if m.nav.ActiveKind() != "HelmRelease" {
 		return m, nil
 	}
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		return m, nil
 	}
@@ -1365,7 +1365,7 @@ func (m Model) actionResumeHelm() (Model, tea.Cmd) {
 	if m.nav.ActiveKind() != "HelmRelease" {
 		return m, nil
 	}
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		return m, nil
 	}
@@ -1380,7 +1380,7 @@ func (m Model) actionResumeHelm() (Model, tea.Cmd) {
 // a local socket; no cluster state changes), so it is intentionally NOT gated
 // on m.readOnly — k9s behaves the same.
 func (m Model) actionPortForward() (Model, tea.Cmd) {
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		m.statusBar = m.statusBar.SetMessage("no pod selected")
 		return m, nil
@@ -1476,7 +1476,7 @@ func (m Model) actionAttach() (Model, tea.Cmd) {
 		m.statusBar = m.statusBar.SetMessage("read-only mode")
 		return m, nil
 	}
-	row := m.table.SelectedRow()
+	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		m.statusBar = m.statusBar.SetMessage("no pod selected")
 		return m, nil
@@ -1579,7 +1579,7 @@ func (m Model) executeConfirmedOp(result widgets.ConfirmResult) (Model, tea.Cmd)
 	}
 	// Multi-target ops (currently only delete) loop the action with each target.
 	if len(m.pendingOp.targets) > 0 {
-		m.table = m.table.ClearSelection()
+		m.tableCtrl = m.tableCtrl.ClearSelection()
 		var cmds []tea.Cmd
 		for _, t := range m.pendingOp.targets {
 			d := deps
@@ -1603,7 +1603,7 @@ func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
 	m.namespace = ns
 	m.header = m.header.SetNamespace(ns)
 	m = m.resetToTable()
-	m.table = m.table.ClearSelection()
+	m.tableCtrl = m.tableCtrl.ClearSelection()
 
 	if m.appConfig != nil {
 		m.appConfig.SetLastNamespace(m.clusterMgr.ActiveContext(), ns)
@@ -1620,7 +1620,7 @@ func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
 	wf.Start()
 	m.watcher = wf
 	m.syncing = true
-	m.table = m.table.SetSyncing(true)
+	m.tableCtrl = m.tableCtrl.SetSyncing(true)
 	return m, tea.Batch(
 		k8sops.WatchCmd(m.msgCh),
 		m.buildTableCmd(),
@@ -1667,7 +1667,7 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 	wf.Start()
 	m.watcher = wf
 	m.syncing = true
-	m.table = m.table.SetSyncing(true)
+	m.tableCtrl = m.tableCtrl.SetSyncing(true)
 	return m, tea.Batch(
 		k8sops.WatchCmd(m.msgCh),
 		m.buildTableCmd(),
@@ -1698,8 +1698,8 @@ func (m Model) kindSyncing(kind string) bool {
 
 // setKindAndSync swaps the resource table's active kind and updates its
 // syncing badge to match whether that informer has data ready yet.
-func (m Model) setKindAndSync(kind string) panels.ResourceTable {
-	return m.table.SetKind(kind).SetSyncing(m.kindSyncing(kind))
+func (m Model) setKindAndSync(kind string) modes.TableController {
+	return m.tableCtrl.SetKind(kind).SetSyncing(m.kindSyncing(kind))
 }
 
 func (m *Model) setStatusBarKind(kind string) {
@@ -1864,7 +1864,7 @@ func (m Model) contentView() string {
 	case ModeMetrics:
 		return m.metricsCtrl.View()
 	default:
-		return m.table.View()
+		return m.tableCtrl.View()
 	}
 }
 
@@ -1890,7 +1890,7 @@ func (m Model) resizePanels() Model {
 	m.header = m.header.SetWidth(m.layout.Header().Width)
 	m.statusBar = m.statusBar.SetWidth(m.layout.Status().Width)
 	m.nav = m.nav.SetSize(navDim.Width, navDim.Height)
-	m.table = m.table.SetSize(contentDim.Width, contentDim.Height)
+	m.tableCtrl = m.tableCtrl.SetSize(contentDim.Width, contentDim.Height).(modes.TableController)
 
 	// In fullscreen the active content panel uses the entire terminal; the
 	// non-fullscreen panels are kept at normal size so their state stays
