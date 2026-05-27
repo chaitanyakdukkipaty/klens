@@ -2,6 +2,7 @@ package panels
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -37,9 +38,63 @@ type navItem struct {
 	display string
 }
 
+// navOrder is the canonical display order for the resource navigator.
+// Workloads first, then networking/config/secrets/storage, then RBAC, then
+// cluster-scoped resources, with Event / HelmRelease last. Kinds not listed
+// here are appended in Registry order (alphabetical, since init() registers
+// by filename).
+var navOrder = []string{
+	"Pod",
+	"Deployment",
+	"StatefulSet",
+	"DaemonSet",
+	"ReplicaSet",
+	"Job",
+	"CronJob",
+	"Service",
+	"Endpoints",
+	"Ingress",
+	"ConfigMap",
+	"Secret",
+	"ServiceAccount",
+	"PersistentVolumeClaim",
+	"HorizontalPodAutoscaler",
+	"NetworkPolicy",
+	"Role",
+	"RoleBinding",
+	"Node",
+	"PersistentVolume",
+	"Namespace",
+	"ClusterRole",
+	"ClusterRoleBinding",
+	"StorageClass",
+	"Event",
+	"HelmRelease",
+}
+
 func NewNavPanel(w, h int) NavPanel {
-	items := make([]navItem, 0, len(k8sres.Registry))
-	for _, r := range k8sres.Registry {
+	rank := make(map[string]int, len(navOrder))
+	for i, k := range navOrder {
+		rank[k] = i
+	}
+	ordered := make([]k8sres.ResourceDescriptor, 0, len(k8sres.Registry))
+	ordered = append(ordered, k8sres.Registry...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		ri, oi := rank[ordered[i].Kind]
+		rj, oj := rank[ordered[j].Kind]
+		switch {
+		case oi && oj:
+			return ri < rj
+		case oi:
+			return true
+		case oj:
+			return false
+		default:
+			return false // preserve Registry order for unknowns
+		}
+	})
+	items := make([]navItem, 0, len(ordered))
+	for _, r := range ordered {
 		items = append(items, navItem{kind: r.Kind, display: r.Kind})
 	}
 	p := NavPanel{width: w, height: h, items: items}

@@ -6,14 +6,13 @@ import (
 
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/k8s/kinds"
-	"github.com/chaitanyak/klens/internal/ui/panels"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -21,10 +20,31 @@ import (
 // minimally-populated zero object and a kind name to look up the descriptor.
 type rowAlignmentCase struct {
 	kind  string
-	build func() []k8s.ResourceRow
+	build func(t *testing.T) []k8s.ResourceRow
 }
 
 func int32Ptr(v int32) *int32 { return &v }
+
+// viaKindsList drives a migrated kind through Kind.List against a FakeLister
+// seeded with `objs`. Consolidates the boilerplate every post-migration test
+// case otherwise duplicates.
+func viaKindsList(t *testing.T, kind, ns string, objs ...runtime.Object) []k8s.ResourceRow {
+	t.Helper()
+	cs := fake.NewSimpleClientset(objs...)
+	k, ok := kinds.Lookup(kind)
+	if !ok {
+		t.Fatalf("kinds.Lookup(%q): not registered", kind)
+	}
+	rows, err := k.List(kinds.Context{
+		Ctx:       context.Background(),
+		Namespace: ns,
+		Lister:    k8s.NewFakeLister(cs),
+	})
+	if err != nil {
+		t.Fatalf("kinds %s.List: %v", kind, err)
+	}
+	return rows
+}
 
 // TestRowsAlignWithColumns — for every kind that has a row builder, rows
 // produced from a minimally-populated zero object have exactly len(Columns)
@@ -38,133 +58,103 @@ func TestRowsAlignWithColumns(t *testing.T) {
 	cases := []rowAlignmentCase{
 		{
 			kind: "Pod",
-			build: func() []k8s.ResourceRow {
-				// Pod row rendering migrated to internal/k8s/kinds/pod.go.
-				// Drive it through Kind.List against a FakeLister so the
-				// alignment invariant still gets tested via the new path.
-				cs := fake.NewSimpleClientset(
-					&corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}},
-				)
-				k, ok := kinds.Lookup("Pod")
-				if !ok {
-					t.Fatalf("kinds.Lookup(Pod) returned false")
-				}
-				rows, err := k.List(kinds.Context{
-					Ctx:       context.Background(),
-					Namespace: "ns",
-					Lister:    k8s.NewFakeLister(cs),
-				})
-				if err != nil {
-					t.Fatalf("kinds Pod.List: %v", err)
-				}
-				return rows
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Pod", "ns",
+					&corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}})
 			},
 		},
 		{
 			kind: "Deployment",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildDeploymentRows([]*appsv1.Deployment{{
-					ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Replicas: int32Ptr(1)},
-				}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Deployment", "ns",
+					&appsv1.Deployment{ObjectMeta: meta, Spec: appsv1.DeploymentSpec{Replicas: int32Ptr(1)}})
 			},
 		},
 		{
 			kind: "StatefulSet",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildStatefulSetRows([]*appsv1.StatefulSet{{
-					ObjectMeta: meta, Spec: appsv1.StatefulSetSpec{Replicas: int32Ptr(1)},
-				}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "StatefulSet", "ns",
+					&appsv1.StatefulSet{ObjectMeta: meta, Spec: appsv1.StatefulSetSpec{Replicas: int32Ptr(1)}})
 			},
 		},
 		{
 			kind: "DaemonSet",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildDaemonSetRows([]*appsv1.DaemonSet{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "DaemonSet", "ns", &appsv1.DaemonSet{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "ReplicaSet",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildReplicaSetRows([]*appsv1.ReplicaSet{{
-					ObjectMeta: meta, Spec: appsv1.ReplicaSetSpec{Replicas: int32Ptr(1)},
-				}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "ReplicaSet", "ns",
+					&appsv1.ReplicaSet{ObjectMeta: meta, Spec: appsv1.ReplicaSetSpec{Replicas: int32Ptr(1)}})
 			},
 		},
 		{
 			kind: "Job",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildJobRows([]*batchv1.Job{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Job", "ns", &batchv1.Job{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "CronJob",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildCronJobRows([]*batchv1.CronJob{{
-					ObjectMeta: meta, Spec: batchv1.CronJobSpec{Schedule: "* * * * *"},
-				}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "CronJob", "ns",
+					&batchv1.CronJob{ObjectMeta: meta, Spec: batchv1.CronJobSpec{Schedule: "* * * * *"}})
 			},
 		},
 		{
 			kind: "Service",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildServiceRows([]*corev1.Service{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Service", "ns", &corev1.Service{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "Ingress",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildIngressRows([]*networkingv1.Ingress{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Ingress", "ns", &networkingv1.Ingress{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "ConfigMap",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildConfigMapRows([]*corev1.ConfigMap{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "ConfigMap", "ns", &corev1.ConfigMap{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "Secret",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildSecretRows([]*corev1.Secret{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Secret", "ns", &corev1.Secret{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "Node",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildNodeRows([]*corev1.Node{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Node", "", &corev1.Node{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "PersistentVolumeClaim",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildPVCRows([]*corev1.PersistentVolumeClaim{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "PersistentVolumeClaim", "ns", &corev1.PersistentVolumeClaim{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "PersistentVolume",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildPVRows([]*corev1.PersistentVolume{{ObjectMeta: meta}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "PersistentVolume", "", &corev1.PersistentVolume{ObjectMeta: meta})
 			},
 		},
 		{
 			kind: "Event",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildEventRows([]*corev1.Event{{
-					ObjectMeta:     meta,
-					InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "x"},
-				}})
+			build: func(t *testing.T) []k8s.ResourceRow {
+				return viaKindsList(t, "Event", "ns",
+					&corev1.Event{ObjectMeta: meta, InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "x"}})
 			},
 		},
-		{
-			kind: "HelmRelease",
-			build: func() []k8s.ResourceRow {
-				return panels.BuildHelmReleaseRows([]*unstructured.Unstructured{{
-					Object: map[string]interface{}{
-						"metadata": map[string]interface{}{"name": "x", "namespace": "ns"},
-					},
-				}})
-			},
-		},
+		// HelmRelease's alignment is covered in internal/k8s/kinds/helm_release_test.go
+		// — fake.NewSimpleClientset doesn't serve the dynamic GVR, so we
+		// exercise the row-building inline from the kinds package instead.
 	}
 
 	for _, c := range cases {
@@ -174,7 +164,7 @@ func TestRowsAlignWithColumns(t *testing.T) {
 			if !ok {
 				t.Fatalf("kind %q not in Registry", c.kind)
 			}
-			rows := c.build()
+			rows := c.build(t)
 			if len(rows) == 0 {
 				t.Fatalf("kind %s: no rows produced", c.kind)
 			}

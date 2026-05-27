@@ -74,6 +74,7 @@ func bridgeListRows(k Kind) k8s.ListRowsFunc {
 			Lister:    k8s.NewCachedLister(wf),
 			Metrics:   rctx.Metrics,
 			PFActive:  rctx.PortForwardActive,
+			HelmGVR:   wf.HelmReleaseGVR(),
 		}
 		rows, err := k.List(c)
 		if err != nil {
@@ -87,6 +88,12 @@ func bridgeListRows(k Kind) k8s.ListRowsFunc {
 // signature drops the context argument; we recreate it as Background.
 func bridgeFetch(k Kind) k8s.FetchFunc {
 	return func(cs kubernetes.Interface, name, ns string) (any, error) {
+		// HelmGVR can't be threaded here without a WatcherFactory handle;
+		// the legacy FetchFunc signature doesn't carry one. HelmRelease's
+		// YAML view is currently routed through model.go::ActiveKind ==
+		// "HelmRelease" → FetchHelmReleaseYAMLCmd (using the cached
+		// unstructured), so this fallback isn't hot. Step 6 of plan 01
+		// replaces the legacy signature entirely.
 		c := Context{Ctx: context.Background(), Clientset: cs, Namespace: ns}
 		return k.Fetch(c.Ctx, c, ns, name)
 	}
@@ -99,6 +106,7 @@ func bridgeTopology(t Topologer) k8s.BuildTopologyFunc {
 			Ctx:       context.Background(),
 			Namespace: ns,
 			Lister:    k8s.NewCachedLister(wf),
+			HelmGVR:   wf.HelmReleaseGVR(),
 		}
 		tree, err := t.Topology(c, ns, name)
 		if err != nil {
