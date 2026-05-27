@@ -24,11 +24,9 @@ github.com/chaitanyak/klens
 
 ```bash
 go build ./...                        # check compilation
-go run ./cmd/klens/               # run TUI (requires kubeconfig)
-go run ./cmd/klens/ --readonly    # run TUI in read-only mode
-go run ./cmd/klens/ get pods      # CLI: list pods
-go run ./cmd/klens/ logs pod/name # CLI: fetch logs
-go run ./cmd/klens/ setup         # CLI: install Claude Code skills
+go run ./cmd/klens/                   # run TUI (requires kubeconfig)
+go run ./cmd/klens/ --readonly        # run TUI in read-only mode
+go run ./cmd/klens/ --version         # print version
 go test ./...                         # run tests
 ```
 
@@ -36,21 +34,14 @@ go test ./...                         # run tests
 
 ```
 cmd/klens/
-  main.go           → dispatches CLI subcommands (get/logs/setup/help) before TUI launch;
-                      auto-wraps in tmux when not already in a session;
-                      tea.NewProgram(app.New(readOnly), WithAltScreen, WithMouseCellMotion)
-  get_cmd.go        → `klens get` subcommand; queries pods/deployments/events/nodes/etc.
-  logs_cmd.go       → `klens logs` subcommand; streams pod or deployment logs (NDJSON or text)
-  setup_cmd.go      → `klens setup` subcommand; copies embedded skill .md files to ~/.claude/commands/
-  util.go           → shared CLI helpers (reorderArgs)
+  main.go           → parses --readonly/--version/--help; auto-wraps in tmux when not already
+                      in a session; tea.NewProgram(app.New(readOnly)).Run()
 
 internal/app/model.go         → root Bubbletea model; routes all msgs; delegates to child panels
 internal/cluster/manager.go   → multi-cluster kubeconfig; lazy clientsets per context
 internal/k8s/
   informers.go                → SharedIndexInformer factory; sends ResourceUpdatedMsg to app
   resources.go                → ResourceDescriptor registry (26 types + aliases)
-  query.go                    → read-only query functions used by CLI subcommands (QueryPods, QueryEvents, etc.)
-  output.go                   → table-printing and JSON helpers for CLI output (PrintPodsTable, MarshalPretty, etc.)
   logs.go                     → multi-pod log fan-in via goroutine channels; LogGroup type; Start/StartGrouped; LogLine carries Group field for tab routing
   metrics.go                  → metrics-server REST polling; MetricsUpdatedMsg
   topology.go                 → ownerReference traversal; TreeNode builder
@@ -60,9 +51,6 @@ internal/k8s/
   portforward.go              → SPDY port-forward sessions + PortForwardManager (active sessions registry)
 internal/config/config.go     → persisted user preferences (namespace lists, last active namespace per cluster,
                                 read_only flag); stored at ~/.config/klens/config.json
-internal/skills/
-  skills.go                   → embed.FS that packages commands/*.md into the binary
-  commands/                   → Claude Code slash command skill files (installed by `klens setup`)
 internal/ui/
   layout/layout.go            → panel sizing from terminal dimensions
   panels/                     → header, status_bar, nav_panel, resource_table, yaml_viewer, yaml_editor,
@@ -86,7 +74,6 @@ internal/ui/
 - **JSON colorization**: `tryColorizeJSON` in `log_viewer.go` Chroma-highlights lines that are valid JSON (dracula theme, terminal256 formatter); colorCache is a parallel slice to `lines` so re-colorizing on `J` toggle only re-renders lines, not restreams data.
 - **Scrollable columns**: `k8s.Column.Scrollable` is a per-column opt-in (parallel to `Flex`). At most one column per resource sets it; `ResourceTable` reads it through `scrollableColIdx()` and exposes `←/→`, horizontal-wheel ticks, and an `esc`-peel layer on `hScroll`. Adding the flag to any new resource's column is the only step required to enable horizontal scrolling.
 - **Resource table scrollbar**: `ResourceTable.View()` reserves the rightmost inner column for a `renderScrollbar` thumb driven by `scrollStart()` over `len(t.filtered)` — works for both key navigation and mouse-wheel cursor moves. The title also appends a `i/N · P%` muted label via `cursorPositionLabel()`.
-- **CLI subcommand dispatch**: `main.go` checks `os.Args[1]` before the tmux auto-wrap block so `klens get`/`logs`/`setup` are never wrapped in a tmux session.
 - **klog suppression**: klog is silenced at startup via `klog.SetOutput(io.Discard)` — suppress before any client-go initialization to avoid noisy stderr.
 
 ## Keyboard Shortcuts
@@ -135,33 +122,13 @@ internal/ui/
 | `J` | toggle JSON pretty-print + Chroma colorization |
 | `esc` | peel state: cancel input → clear search → clear pod filter → clear filter → exit logs |
 
-## Claude Code Skills
-
-AI-assisted cluster operations are provided as Claude Code slash commands. They are embedded in the klens binary and installed with `klens setup`.
-
-```bash
-klens setup             # install skills to ~/.claude/commands/ (global)
-klens setup --project   # install to ./.claude/commands/ (this project only)
-klens setup --force     # overwrite existing skill files
-```
-
-| Skill | File | Purpose |
-|---|---|---|
-| `/k8s-diagnose [namespace]` | `commands/k8s-diagnose.md` | Diagnose pod failures, node pressure, scheduling issues; severity-grouped output with kubectl suggestions |
-| `/k8s-health [namespace] [window]` | `commands/k8s-health.md` | PASS/WARN/FAIL stability report with uptime %, restart count, OOM kills, Warning event density |
-| `/klens [anything]` | `commands/klens.md` | General-purpose assistant: describes all `klens get` and `klens logs` operations; the user can ask anything about their cluster |
-
-No Anthropic SDK, `ANTHROPIC_API_KEY`, or in-app AI state machine required. Skills run entirely in the Claude Code agent loop; klens is the data layer only.
-
 ## Adding a New Resource Type
 
 1. Add a `ResourceDescriptor` entry to `internal/k8s/resources.go` `Registry` slice
 2. Add a `List*` method to `internal/k8s/informers.go` `WatcherFactory`
-3. Add query / print functions to `internal/k8s/query.go` and `internal/k8s/output.go` (for CLI use)
-4. Add a `Build*Rows` function to `internal/ui/panels/resource_table.go`
-5. Add a `case "Kind":` to `app.Model.listRows()` in `internal/app/model.go`
-6. Add a `FetchObject` case in `internal/ui/panels/yaml_viewer.go` `fetchObject()`
-7. Wire the resource into `cmd/klens/get_cmd.go` if it should be accessible via `klens get`
+3. Add a `Build*Rows` function to `internal/ui/panels/resource_table.go`
+4. Add a `case "Kind":` to `app.Model.listRows()` in `internal/app/model.go`
+5. Add a `FetchObject` case in `internal/ui/panels/yaml_viewer.go` `fetchObject()`
 
 ## Adding Topology to a Resource
 

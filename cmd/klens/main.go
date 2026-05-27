@@ -13,42 +13,46 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// version is set at build time via -ldflags="-X main.version=...".
+var version = "dev"
+
+const usage = `usage: klens [flags]
+
+klens is an interactive Kubernetes TUI. With no flags it launches the UI.
+
+flags:
+  --readonly   run in read-only mode (overrides config read_only setting)
+  --version    print version and exit
+  --help, -h   show this help and exit
+`
+
 func main() {
-	// Suppress klog before anything else — applies to both CLI and TUI paths.
+	// Suppress klog before anything else.
 	klogFlags := flag.NewFlagSet("klog", flag.ContinueOnError)
 	klog.InitFlags(klogFlags)
 	_ = klogFlags.Set("logtostderr", "false")
 	klog.SetOutput(io.Discard)
 
-	// Dispatch CLI subcommands before the tmux block so batch calls are never
-	// wrapped in a tmux session.
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "get":
-			os.Exit(RunGet(os.Args[2:]))
-		case "logs":
-			os.Exit(RunLogs(os.Args[2:]))
-		case "setup":
-			os.Exit(RunSetup(os.Args[2:]))
-		case "--help", "-h", "help":
-			fmt.Fprintln(os.Stderr, "usage: klens [subcommand] [flags]")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "subcommands:")
-			fmt.Fprintln(os.Stderr, "  get <resource> [name] [flags]  list or describe resources (-o json for LLM use)")
-			fmt.Fprintln(os.Stderr, "  logs <pod|deploy/name> [flags] fetch or stream logs (-f for follow mode)")
-			fmt.Fprintln(os.Stderr, "  setup [flags]                  install Claude Code slash command skills")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "with no subcommand: launches the interactive TUI")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "TUI flags:")
-			fmt.Fprintln(os.Stderr, "  --readonly   run in read-only mode")
-			os.Exit(0)
-		}
-	}
-
-	var readOnly bool
+	var (
+		readOnly    bool
+		showVersion bool
+		showHelp    bool
+	)
 	flag.BoolVar(&readOnly, "readonly", false, "run in read-only mode (overrides config read_only setting)")
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
+	flag.BoolVar(&showHelp, "help", false, "show help and exit")
+	flag.BoolVar(&showHelp, "h", false, "show help and exit")
+	flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	flag.Parse()
+
+	if showHelp {
+		fmt.Fprint(os.Stdout, usage)
+		return
+	}
+	if showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	// Auto-wrap in tmux when not already inside a session. syscall.Exec
 	// replaces the current process so there is no parent to clean up.
