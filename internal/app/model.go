@@ -12,21 +12,17 @@ import (
 	"github.com/chaitanyak/klens/internal/cluster"
 	appcfg "github.com/chaitanyak/klens/internal/config"
 	k8sops "github.com/chaitanyak/klens/internal/k8s"
-	// Blank import: triggers the kinds package init that registers migrated
-	// kinds (Namespace, Pod, …) into k8s.Registry via the shim. Without this
-	// the static Registry would be missing entries that were removed in
-	// favor of the per-kind module.
-	_ "github.com/chaitanyak/klens/internal/k8s/kinds"
+	"github.com/chaitanyak/klens/internal/k8s/kinds"
 	"github.com/chaitanyak/klens/internal/ui/layout"
 	"github.com/chaitanyak/klens/internal/ui/modes"
 	"github.com/chaitanyak/klens/internal/ui/panels"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 	"github.com/chaitanyak/klens/internal/ui/widgets"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	unstructuredpkg "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/kubernetes"
 )
 
 // ContentMode controls what is displayed in the content panel.
@@ -364,6 +360,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focus = FocusContent
 		return m, cmd
 
+	case panels.ApplyYAMLRequest:
+		if m.clusterMgr == nil {
+			return m, nil
+		}
+		cs, err := m.clusterMgr.ActiveClientset()
+		if err != nil || cs == nil {
+			m.statusBar = m.statusBar.SetMessage("apply: no client")
+			return m, nil
+		}
+		k, ok := kinds.Lookup(msg.Kind)
+		if !ok {
+			return m, nil
+		}
+		return m, kinds.ApplyCmd(k, m.depsFor(cs), msg.Namespace, msg.Name, msg.YAMLContent)
+
 	case panels.YAMLAppliedMsg:
 		m.rollbackYAML = m.yamlEditCtrl.Original()
 		m.rollbackKind = msg.Kind
@@ -427,17 +438,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusBar = m.statusBar.SetMessage("no client: " + err.Error())
 			return m, nil
 		}
-		action := k8sops.LookupAction(msg.Kind, "scale")
-		if action == nil {
+		k, ok := kinds.Lookup(msg.Kind)
+		if !ok {
+			return m, nil
+		}
+		cmd := kinds.ScaleCmd(k, m.depsFor(cs), msg.Namespace, msg.Name, msg.Replicas)
+		if cmd == nil {
 			m.statusBar = m.statusBar.SetMessage("scale not supported for " + msg.Kind)
 			return m, nil
 		}
-		return m, action(k8sops.ActionDeps{
-			Clientset: cs,
-			Name:      msg.Name,
-			Namespace: msg.Namespace,
-			Replicas:  msg.Replicas,
-		})
+		return m, cmd
 
 	case widgets.PortForwardRequest:
 		if !msg.Confirmed {
@@ -1134,21 +1144,26 @@ func pluralizeKind(kind string) string {
 // than one row is selected. Single-resource actions (View YAML, Topology, Attach,
 // Scale, etc.) are intentionally excluded.
 func buildMultiContextMenuItems(kind string, count int, readOnly bool) []widgets.MenuItem {
-	rd, _ := k8sops.Resolve(kind)
+	k, ok := kinds.Lookup(kind)
+	if !ok {
+		return nil
+	}
 	var items []widgets.MenuItem
-	if rd.SupportsLogs {
+	if _, ok := any(k).(kinds.Logger); ok {
 		items = append(items, widgets.MenuItem{
 			Label:  fmt.Sprintf("View Logs (%d, combined)", count),
 			Action: "l",
 			Hint:   "l",
 		})
 	}
-	if !readOnly && (rd.SupportsDeletion || kind == "HelmRelease") {
-		items = append(items, widgets.MenuItem{
-			Label:  fmt.Sprintf("Delete %d…", count),
-			Action: "d",
-			Hint:   "d",
-		})
+	if !readOnly {
+		if _, ok := any(k).(kinds.Deleter); ok {
+			items = append(items, widgets.MenuItem{
+				Label:  fmt.Sprintf("Delete %d…", count),
+				Action: "d",
+				Hint:   "d",
+			})
+		}
 	}
 	items = append(items, widgets.MenuItem{
 		Label:  "Clear selection",
@@ -1161,40 +1176,42 @@ func buildMultiContextMenuItems(kind string, count int, readOnly bool) []widgets
 // buildContextMenuItems returns the list of menu entries valid for the given kind
 // and the current read-only state. Mirrors the gating logic in setStatusBarKind.
 func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
-	rd, _ := k8sops.Resolve(kind)
-	var items []widgets.MenuItem
-	if rd.SupportsYAML {
-		items = append(items, widgets.MenuItem{Label: "View YAML", Action: "y", Hint: "y"})
-		if !readOnly {
-			items = append(items, widgets.MenuItem{Label: "Edit YAML", Action: "e", Hint: "e"})
-		}
+	k, ok := kinds.Lookup(kind)
+	if !ok {
+		return nil
 	}
-	if rd.SupportsLogs {
+	var items []widgets.MenuItem
+	// Every Kind implements Fetch, so YAML view is always available.
+	items = append(items, widgets.MenuItem{Label: "View YAML", Action: "y", Hint: "y"})
+	if !readOnly {
+		items = append(items, widgets.MenuItem{Label: "Edit YAML", Action: "e", Hint: "e"})
+	}
+	if _, ok := any(k).(kinds.Logger); ok {
 		items = append(items, widgets.MenuItem{Label: "View Logs", Action: "l", Hint: "l"})
 	}
-	if rd.SupportsTopology {
+	if _, ok := any(k).(kinds.Topologer); ok {
 		items = append(items, widgets.MenuItem{Label: "View Topology", Action: "t", Hint: "t"})
 	}
-	if rd.SupportsMetrics {
+	if _, ok := any(k).(kinds.MetricsSupporter); ok {
 		items = append(items, widgets.MenuItem{Label: "View Metrics", Action: "m", Hint: "m"})
 	}
-	if rd.SupportsPortForward {
+	if _, ok := any(k).(kinds.PortForwarder); ok {
 		items = append(items, widgets.MenuItem{Label: "Port Forward…", Action: "f", Hint: "f"})
 	}
 	if !readOnly {
-		if rd.SupportsAttach {
+		if _, ok := any(k).(kinds.Attacher); ok {
 			items = append(items, widgets.MenuItem{Label: "Attach (exec)", Action: "a", Hint: "a"})
 		}
-		if rd.SupportsScale {
+		if _, ok := any(k).(kinds.Scaler); ok {
 			items = append(items, widgets.MenuItem{Label: "Scale", Action: "scale", Hint: "s"})
 		}
-		if kind == "HelmRelease" {
+		if _, ok := any(k).(kinds.Suspender); ok {
 			items = append(items,
 				widgets.MenuItem{Label: "Suspend", Action: "suspend", Hint: "s"},
 				widgets.MenuItem{Label: "Resume", Action: "resume", Hint: "r"},
 			)
 		}
-		if rd.SupportsDeletion || kind == "HelmRelease" {
+		if _, ok := any(k).(kinds.Deleter); ok {
 			items = append(items, widgets.MenuItem{Label: "Delete…", Action: "d", Hint: "d"})
 		}
 	}
@@ -1334,15 +1351,18 @@ func (m Model) actionScale() (Model, tea.Cmd) {
 		m.statusBar = m.statusBar.SetMessage("read-only mode")
 		return m, nil
 	}
-	rd, _ := k8sops.Resolve(m.nav.ActiveKind())
-	if !rd.SupportsScale {
+	k, ok := kinds.Lookup(m.nav.ActiveKind())
+	if !ok {
+		return m, nil
+	}
+	if _, ok := any(k).(kinds.Scaler); !ok {
 		return m, nil
 	}
 	row := m.tableCtrl.SelectedRow()
 	if row == nil {
 		return m, nil
 	}
-	current := currentReplicas(row)
+	current := currentReplicas(m.nav.ActiveKind(), row)
 	m.scaleDialog = m.scaleDialog.Show(m.nav.ActiveKind(), row.Name, row.Namespace, current)
 	return m, nil
 }
@@ -1392,8 +1412,11 @@ func (m Model) actionPortForward() (Model, tea.Cmd) {
 		m.statusBar = m.statusBar.SetMessage("no pod selected")
 		return m, nil
 	}
-	rd, _ := k8sops.Resolve(m.nav.ActiveKind())
-	if !rd.SupportsPortForward {
+	k, ok := kinds.Lookup(m.nav.ActiveKind())
+	if !ok {
+		return m, nil
+	}
+	if _, ok := any(k).(kinds.PortForwarder); !ok {
 		m.statusBar = m.statusBar.SetMessage("port-forward not supported for " + m.nav.ActiveKind())
 		return m, nil
 	}
@@ -1571,32 +1594,48 @@ func (m Model) executeConfirmedOp(result widgets.ConfirmResult) (Model, tea.Cmd)
 		m.statusBar = m.statusBar.SetMessage("no client: " + err.Error())
 		return m, nil
 	}
-	action := k8sops.LookupAction(m.pendingOp.kind, m.pendingOp.op)
-	if action == nil {
+	k, ok := kinds.Lookup(m.pendingOp.kind)
+	if !ok {
 		return m, nil
 	}
-	deps := k8sops.ActionDeps{
-		Clientset: cs,
-		Name:      m.pendingOp.name,
-		Namespace: m.pendingOp.namespace,
-	}
-	if m.watcher != nil {
-		deps.Dynamic = m.watcher.DynamicClient()
-		deps.HelmGVR = m.watcher.HelmReleaseGVR()
+	deps := m.depsFor(cs)
+	build := func(ns, name string) tea.Cmd {
+		switch m.pendingOp.op {
+		case "delete":
+			return kinds.DeleteCmd(k, deps, ns, name)
+		case "suspend":
+			return kinds.SuspendCmd(k, deps, ns, name, true)
+		case "resume":
+			return kinds.SuspendCmd(k, deps, ns, name, false)
+		}
+		return nil
 	}
 	// Multi-target ops (currently only delete) loop the action with each target.
 	if len(m.pendingOp.targets) > 0 {
 		m.tableCtrl = m.tableCtrl.ClearSelection()
 		var cmds []tea.Cmd
 		for _, t := range m.pendingOp.targets {
-			d := deps
-			d.Name = t.name
-			d.Namespace = t.namespace
-			cmds = append(cmds, action(d))
+			if c := build(t.namespace, t.name); c != nil {
+				cmds = append(cmds, c)
+			}
 		}
 		return m, tea.Batch(cmds...)
 	}
-	return m, action(deps)
+	cmd := build(m.pendingOp.namespace, m.pendingOp.name)
+	if cmd == nil {
+		return m, nil
+	}
+	return m, cmd
+}
+
+// depsFor bundles the cluster handles every kinds dispatch helper needs.
+func (m Model) depsFor(cs kubernetes.Interface) kinds.Deps {
+	deps := kinds.Deps{Clientset: cs}
+	if m.watcher != nil {
+		deps.Dynamic = m.watcher.DynamicClient()
+		deps.HelmGVR = m.watcher.HelmReleaseGVR()
+	}
+	return deps
 }
 
 func (m Model) switchNamespace(ns string) (Model, tea.Cmd) {
@@ -1711,48 +1750,51 @@ func (m Model) setKindAndSync(kind string) modes.TableController {
 
 func (m *Model) setStatusBarKind(kind string) {
 	m.statusBar = m.statusBar.SetActiveKind(kind)
-	rd, _ := k8sops.Resolve(kind)
 	help := []panels.HelpItem{
 		{Key: "↑↓/jk", Desc: "navigate"},
 		{Key: "enter", Desc: "focus"},
 		{Key: "/", Desc: "filter"},
 	}
-	if rd.SupportsYAML {
-		help = append(help, panels.HelpItem{Key: "y", Desc: "yaml"})
-		if !m.readOnly {
-			help = append(help, panels.HelpItem{Key: "e", Desc: "edit"})
-		}
+	k, ok := kinds.Lookup(kind)
+	if !ok {
+		m.statusBar = m.statusBar.SetHelp(help)
+		return
 	}
-	if rd.SupportsLogs {
+	// Every Kind implements Fetch — YAML view is always available.
+	help = append(help, panels.HelpItem{Key: "y", Desc: "yaml"})
+	if !m.readOnly {
+		help = append(help, panels.HelpItem{Key: "e", Desc: "edit"})
+	}
+	if _, ok := any(k).(kinds.Logger); ok {
 		help = append(help, panels.HelpItem{Key: "l", Desc: "logs"})
 	}
-	if rd.SupportsTopology {
+	if _, ok := any(k).(kinds.Topologer); ok {
 		help = append(help, panels.HelpItem{Key: "t", Desc: "topology"})
 	}
-	if rd.SupportsMetrics {
+	if _, ok := any(k).(kinds.MetricsSupporter); ok {
 		help = append(help, panels.HelpItem{Key: "m", Desc: "metrics"})
 	}
-	if rd.SupportsPortForward {
+	if _, ok := any(k).(kinds.PortForwarder); ok {
 		help = append(help, panels.HelpItem{Key: "shift+f", Desc: "port-forward"})
 	}
 	if !m.readOnly {
-		if rd.SupportsAttach {
+		if _, ok := any(k).(kinds.Attacher); ok {
 			help = append(help, panels.HelpItem{Key: "a", Desc: "attach"})
 		}
-		if rd.SupportsScale {
+		if _, ok := any(k).(kinds.Scaler); ok {
 			help = append(help, panels.HelpItem{Key: "s", Desc: "scale"})
 		}
-		if kind == "HelmRelease" {
+		if _, ok := any(k).(kinds.Suspender); ok {
 			help = append(help,
 				panels.HelpItem{Key: "s", Desc: "suspend"},
 				panels.HelpItem{Key: "r", Desc: "resume"},
 			)
 		}
-		if rd.SupportsDeletion || kind == "HelmRelease" {
+		if _, ok := any(k).(kinds.Deleter); ok {
 			help = append(help, panels.HelpItem{Key: "d", Desc: "delete"})
 		}
 	}
-	for _, c := range rd.Columns {
+	for _, c := range k.Columns() {
 		if c.Scrollable {
 			help = append(help, panels.HelpItem{Key: "←/→", Desc: "scroll col"})
 			break
@@ -1765,23 +1807,19 @@ func (m *Model) setStatusBarKind(kind string) {
 	m.statusBar = m.statusBar.SetHelp(help)
 }
 
-// currentReplicas extracts the replica count from the raw object in a ResourceRow.
-func currentReplicas(row *k8sops.ResourceRow) int32 {
-	switch raw := row.Raw.(type) {
-	case *appsv1.Deployment:
-		if raw.Spec.Replicas != nil {
-			return *raw.Spec.Replicas
-		}
-	case *appsv1.StatefulSet:
-		if raw.Spec.Replicas != nil {
-			return *raw.Spec.Replicas
-		}
-	case *appsv1.ReplicaSet:
-		if raw.Spec.Replicas != nil {
-			return *raw.Spec.Replicas
-		}
+// currentReplicas extracts the replica count from a ResourceRow's raw object
+// via the Scaler.CurrentReplicas method on the matching kind. Defaults to 1
+// when no kind (or no Scaler) is found.
+func currentReplicas(kind string, row *k8sops.ResourceRow) int32 {
+	k, ok := kinds.Lookup(kind)
+	if !ok {
+		return 1
 	}
-	return 1
+	s, ok := any(k).(kinds.Scaler)
+	if !ok {
+		return 1
+	}
+	return s.CurrentReplicas(row.Raw)
 }
 
 // View renders the full TUI.

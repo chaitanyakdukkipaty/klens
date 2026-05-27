@@ -66,8 +66,8 @@ func TestPodFetchAndDelete(t *testing.T) {
 }
 
 // TestPodApply patches the pod via merge-patch JSON and confirms the change
-// landed. Exercises the Applier capability the shim wires as the "apply"
-// Action under k8s.LookupAction("Pod", "apply").
+// landed. Exercises the Applier capability that the model now dispatches
+// via type assertion → kinds.ApplyCmd.
 func TestPodApply(t *testing.T) {
 	cs := fake.NewSimpleClientset(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "p1", Namespace: "ns", Labels: map[string]string{"a": "1"}},
@@ -126,41 +126,38 @@ func TestPodLogTargets(t *testing.T) {
 	}
 }
 
-// TestPodShimRegisteredDescriptor — the keystone check that lets unmigrated
-// callers (model.go::setStatusBarKind, status bar help bar) treat Pod the
-// same way they treat statically-registered kinds.
-func TestPodShimRegisteredDescriptor(t *testing.T) {
-	if _, ok := Default.Resolve("Pod"); !ok {
+// TestPodCapabilities — every key Pod participates in (yaml view, logs,
+// attach, delete, port-forward, metrics, apply) is now a capability
+// interface that pod{} must implement. Scaler / Topologer must not be
+// satisfied: pods don't scale and don't render a tree. Catches regressions
+// in pod's interface satisfaction (a missed method would silently disable
+// the UI hint).
+func TestPodCapabilities(t *testing.T) {
+	k, ok := Default.Resolve("Pod")
+	if !ok {
 		t.Fatalf("kinds.Default has no Pod registered")
 	}
-	rd, ok := k8s.Resolve("Pod")
-	if !ok {
-		t.Fatalf("k8s.Registry has no Pod — shim did not register")
+	must(t, "Logger", func() bool { _, ok := any(k).(Logger); return ok })
+	must(t, "Attacher", func() bool { _, ok := any(k).(Attacher); return ok })
+	must(t, "Deleter", func() bool { _, ok := any(k).(Deleter); return ok })
+	must(t, "PortForwarder", func() bool { _, ok := any(k).(PortForwarder); return ok })
+	must(t, "MetricsSupporter", func() bool { _, ok := any(k).(MetricsSupporter); return ok })
+	must(t, "Applier", func() bool { _, ok := any(k).(Applier); return ok })
+	mustNot(t, "Scaler", func() bool { _, ok := any(k).(Scaler); return ok })
+	mustNot(t, "Topologer", func() bool { _, ok := any(k).(Topologer); return ok })
+}
+
+func must(t *testing.T, name string, f func() bool) {
+	t.Helper()
+	if !f() {
+		t.Errorf("expected Pod to implement %s", name)
 	}
-	wantBools := map[string]bool{
-		"SupportsYAML":        rd.SupportsYAML,
-		"SupportsLogs":        rd.SupportsLogs,
-		"SupportsAttach":      rd.SupportsAttach,
-		"SupportsDeletion":    rd.SupportsDeletion,
-		"SupportsPortForward": rd.SupportsPortForward,
-		"SupportsMetrics":     rd.SupportsMetrics,
-	}
-	for name, got := range wantBools {
-		if !got {
-			t.Errorf("expected %s=true on Pod, got false", name)
-		}
-	}
-	if rd.SupportsScale || rd.SupportsTopology {
-		t.Errorf("expected SupportsScale=false && SupportsTopology=false; got %+v", rd)
-	}
-	for _, op := range []string{"delete", "apply"} {
-		if rd.Actions[op] == nil {
-			t.Errorf("Action %q not wired", op)
-		}
-	}
-	// Scale is intentionally not wired for Pod.
-	if rd.Actions["scale"] != nil {
-		t.Errorf("scale action wired on Pod (should not be)")
+}
+
+func mustNot(t *testing.T, name string, f func() bool) {
+	t.Helper()
+	if f() {
+		t.Errorf("expected Pod to NOT implement %s", name)
 	}
 }
 

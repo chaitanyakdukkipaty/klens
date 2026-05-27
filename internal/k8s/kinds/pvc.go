@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// persistentVolumeClaim implements Deleter (no Applier in the legacy
-// RegisterAction set).
+// persistentVolumeClaim implements Deleter (no Applier — PVCs don't
+// support in-place merge-patch via klens today).
 type persistentVolumeClaim struct{}
 
 func (persistentVolumeClaim) Meta() Meta {

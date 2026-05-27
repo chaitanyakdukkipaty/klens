@@ -15,11 +15,10 @@ import (
 )
 
 // pod exercises every capability interface end-to-end: Logger, Attacher,
-// Deleter, PortForwarder, Applier. It does NOT implement Scaler (pods don't
-// scale) or Topologer (no per-Pod tree). The shim's Supports* derivation
-// reads "Pod implements Applier" → SupportsYAML=true (via Fetch in any
-// case), Deleter → SupportsDeletion=true, Logger → SupportsLogs=true,
-// PortForwarder → SupportsPortForward=true, Attacher → SupportsAttach=true.
+// Deleter, PortForwarder, Applier, MetricsSupporter. It does NOT implement
+// Scaler (pods don't scale) or Topologer (no per-Pod tree). Every action
+// site type-asserts against these capability interfaces directly — there
+// is no Supports* indirection.
 type pod struct{}
 
 func (pod) Meta() Meta {
@@ -89,14 +88,15 @@ func (pod) LogTargets(_ Context, ns, name string) ([]LogTarget, error) {
 }
 
 // MetricsKey returns the "ns/name" key into MetricsUpdatedMsg.Pods. Marks
-// Pod as openable in the metrics panel (SupportsMetrics=true via shim).
+// Pod as openable in the metrics panel (interface satisfaction is checked
+// in setStatusBarKind via `_, ok := kind.(MetricsSupporter)`).
 func (pod) MetricsKey(ns, name string) string { return ns + "/" + name }
 
-// Attach is a placeholder until step 6 wires the *rest.Config through
-// Context. The legacy model.actionAttach path drives the live session
-// today; this method exists so Pod satisfies Attacher (the shim derives
-// SupportsAttach from interface satisfaction). When step 6 lands,
-// model.go calls Attach instead of k8s.AttachCmd directly.
+// Attach is a placeholder until plan 01 step 6 wires the *rest.Config
+// through Context. The legacy model.actionAttach path drives the live
+// session today; this method exists so Pod satisfies Attacher (and so
+// the "a" UI hint shows up). When step 6 lands, model.go calls Attach
+// instead of k8s.AttachCmd directly.
 func (pod) Attach(c Context, ns, name string) tea.Cmd {
 	return func() tea.Msg {
 		return k8s.AttachFinishedMsg{Pod: name, Err: fmt.Errorf("pod.Attach: not wired (use model.actionAttach until step 6)")}

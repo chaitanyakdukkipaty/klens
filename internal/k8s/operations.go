@@ -23,11 +23,11 @@ type OperationResultMsg struct {
 	Err       error
 }
 
-// Per-kind delete and scale dispatch live as Actions on the
-// ResourceDescriptor (see RegisterAction in resources.go and the
-// registration site in internal/ui/panels/kinds.go). Callers look up
-// k8s.LookupAction(kind, "delete") or LookupAction(kind, "scale") rather
-// than going through a kind-keyed switch here.
+// Per-kind delete, scale, suspend/resume, and apply dispatch live as
+// capability interfaces in internal/k8s/kinds (Deleter, Scaler, Suspender,
+// Applier). Call sites type-assert on the Kind value returned by
+// kinds.Lookup; this file owns only the cross-kind cluster operations
+// (rollout restart / undo, drain / cordon).
 
 // RolloutRestartCmd restarts a deployment by patching the pod template annotation.
 func RolloutRestartCmd(cs kubernetes.Interface, kind, name, namespace string) tea.Cmd {
@@ -176,9 +176,6 @@ func RolloutUndoCmd(cs kubernetes.Interface, kind, name, namespace string) tea.C
 		return OperationResultMsg{Operation: "rollout-undo", Resource: name, Success: true}
 	}
 }
-
-// HelmRelease suspend/resume are registered as Actions on the descriptor
-// (see registerActions in internal/ui/panels/kinds.go).
 
 // ensure appsv1 is used
 var _ = appsv1.Deployment{}

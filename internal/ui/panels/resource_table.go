@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	k8sres "github.com/chaitanyak/klens/internal/k8s"
+	"github.com/chaitanyak/klens/internal/k8s/kinds"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 
 	corev1 "k8s.io/api/core/v1"
@@ -149,11 +150,17 @@ func (t ResourceTable) SelectionCount() int {
 }
 
 func (t ResourceTable) supportsMultiSelect() bool {
-	rd, ok := k8sres.Resolve(t.kind)
+	k, ok := kinds.Lookup(t.kind)
 	if !ok {
 		return false
 	}
-	return rd.SupportsLogs || rd.SupportsDeletion || t.kind == "HelmRelease"
+	if _, ok := any(k).(kinds.Logger); ok {
+		return true
+	}
+	if _, ok := any(k).(kinds.Deleter); ok {
+		return true
+	}
+	return false
 }
 
 func (t ResourceTable) FilterActive() bool { return t.filterOn }

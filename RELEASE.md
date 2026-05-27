@@ -77,6 +77,7 @@ git push origin v0.X.Y
 
 | Version | Date | Summary |
 |---|---|---|
+| v1.0.0 | 2026-05-28 | Per-kind architecture: every resource lives in one file under `internal/k8s/kinds/` implementing `Kind` + capability interfaces (`Deleter`, `Scaler`, `Logger`, `Applier`, `Suspender`, …); action dispatch (`kinds.DeleteCmd`/`ScaleCmd`/`ApplyCmd`/`SuspendCmd`) replaces the legacy `Actions` map and `Supports*` booleans; row rendering uses per-column `Render` closures; GVR-keyed `InformerRegistry`; `Lister` seam (`CachedLister` / `FakeLister`) lets tests run against a fake clientset |
 | v0.8.4 | 2026-05-27 | Generalize horizontal scroll (`k8s.Column.Scrollable`); resource table vertical scrollbar + `i/N · P%` cursor position label; help bar fills width and handles compound keys (`ctrl+c/q`, `ctrl+r`) |
 | v0.6.0 | 2026-05-07 | In-app drag-to-copy in log viewer (works in tabs and split layouts); mouse capture toggle (`M`); async per-kind informer sync with 100ms event coalescing; faster pod metrics refresh; JSON flat as default in log viewer |
 | v0.5.0 | 2026-05-07 | Migrate to Bubble Tea v2 (charm.land); right-click context menu; full-screen toggle (`F`); inline help panel; expanded scrollbar/log viewer/model refactor |

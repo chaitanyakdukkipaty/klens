@@ -13,8 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// replicaSet implements Scaler + Deleter + Logger (no Apply: matches the
-// pre-migration RegisterAction set, which had no "apply" wired for RS).
+// replicaSet implements Scaler + Deleter + Logger. Apply is intentionally
+// not implemented — RS pods are owned by their parent Deployment, so
+// merge-patch through klens would race the controller.
 type replicaSet struct{}
 
 func (replicaSet) Meta() Meta {

@@ -1,13 +1,20 @@
 // Package kinds owns per-Kubernetes-kind behavior. Each kind is one file: it
 // implements the Kind interface plus zero or more capability interfaces
-// (Logger, Attacher, Scaler, Deleter, PortForwarder, Topologer). Capability
-// presence is "does this type satisfy the interface" — not a Supports*
-// boolean. Adding a kind is a single file, not five coordinated edits.
+// (Logger, Attacher, Scaler, Deleter, PortForwarder, Topologer, Applier,
+// Suspender, MetricsSupporter). Capability presence is "does this type
+// satisfy the interface" — there is no Supports* boolean. Adding a kind is
+// a single file, not five coordinated edits.
+//
+// The dispatch helpers in dispatch.go (DeleteCmd, ScaleCmd, ApplyCmd,
+// SuspendCmd) turn a (Kind, capability) tuple into a tea.Cmd that emits
+// the messages model.go already handles. Action call sites in the model
+// look like `kinds.DeleteCmd(k, deps, ns, name)` — a one-liner per action.
 //
 // During the per-kind migration (plan 01) the legacy k8s.Registry coexists
-// with this package via a shim in shim.go that builds an equivalent
-// k8s.ResourceDescriptor for every Kind registered here. Step 6 deletes the
-// shim and the legacy registry; model.go switches to kinds.Lookup directly.
+// with this package via the shim in shim.go that builds a metadata-only
+// k8s.ResourceDescriptor for every Kind registered here. Step 6 of that
+// plan deletes the shim and the legacy registry; model.go's remaining
+// listRows / buildTopology paths then switch to kinds.Lookup directly.
 package kinds
 
 import (
@@ -99,9 +106,8 @@ type Topologer interface {
 }
 
 // Applier patches a kind with raw merge-patch JSON. Every kind that supports
-// YAML edit must implement this; the shim derives SupportsYAML from the
-// presence of Fetch (every Kind implements Fetch) but the apply path uses
-// this interface to dispatch.
+// YAML edit must implement this; the apply path dispatches through this
+// interface (via kinds.ApplyCmd).
 type Applier interface {
 	Kind
 	Apply(c Context, ns, name string, mergePatchJSON []byte) error
@@ -109,10 +115,18 @@ type Applier interface {
 
 // MetricsSupporter marks a kind as openable in the metrics panel. The
 // method is intentionally informational rather than dispatch-shaped — the
-// metrics panel reads c.Metrics directly; the interface exists so the
-// shim can derive SupportsMetrics from interface satisfaction the same
-// way Supports{Logs,Scale,…} are derived.
+// metrics panel reads c.Metrics directly; UI hint code asks "does this
+// Kind satisfy MetricsSupporter?" to decide whether to surface the "m"
+// keybinding.
 type MetricsSupporter interface {
 	Kind
 	MetricsKey(ns, name string) string
+}
+
+// Suspender toggles spec.suspend on a kind (today: HelmRelease only). The
+// boolean parameter avoids a second symmetric "Resumer" interface — the
+// suspend/resume distinction is one bit, not two methods.
+type Suspender interface {
+	Kind
+	Suspend(c Context, ns, name string, suspend bool) error
 }

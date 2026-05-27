@@ -10,11 +10,9 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	k8sres "github.com/chaitanyak/klens/internal/k8s"
+	"github.com/chaitanyak/klens/internal/k8s/kinds"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 	"github.com/chaitanyak/klens/internal/ui/widgets"
-	"k8s.io/client-go/kubernetes"
-	sigsyaml "sigs.k8s.io/yaml"
 )
 
 type editorState int
@@ -26,15 +24,13 @@ const (
 	editorApplying                        // applying changes to cluster
 )
 
-// YAMLAppliedMsg is sent after a successful YAML apply.
-type YAMLAppliedMsg struct {
-	Kind      string
-	Name      string
-	Namespace string
-}
-
-// YAMLApplyErrMsg is sent when applying YAML fails.
-type YAMLApplyErrMsg struct{ Err error }
+// YAMLAppliedMsg / YAMLApplyErrMsg are aliases for the dispatch-emitted
+// messages in package kinds, kept here so existing references in the editor
+// (and historical test imports) keep compiling without a panels import cycle.
+type (
+	YAMLAppliedMsg  = kinds.YAMLAppliedMsg
+	YAMLApplyErrMsg = kinds.YAMLApplyErrMsg
+)
 
 // YAMLEditor is a full YAML editor with vim modal editing and diff-preview before apply.
 type YAMLEditor struct {
@@ -395,45 +391,25 @@ func (e YAMLEditor) View() string {
 	return border.Width(max(1, e.width)).Height(max(1, e.height)).Render(body)
 }
 
+// applyCmd is what the editor fires when the user confirms the diff preview
+// (state == editorDiffConfirm, key "y"). The editor only exposes the kind,
+// name, namespace, and modified YAML — the actual API call needs a live
+// clientset that lives on the root model, so this just packages the payload
+// into an ApplyYAMLRequestMsg the root translates into a dispatch via the
+// kinds.ApplyCmd helper.
 func (e YAMLEditor) applyCmd() tea.Cmd {
-	kind := e.kind
-	name := e.name
-	namespace := e.namespace
-	modified := e.textarea.Value()
-	return func() tea.Msg {
-		if err := applyYAML(kind, name, namespace, modified); err != nil {
-			return YAMLApplyErrMsg{err}
-		}
-		return YAMLAppliedMsg{Kind: kind, Name: name, Namespace: namespace}
-	}
+	req := ApplyYAMLRequest{Kind: e.kind, Name: e.name, Namespace: e.namespace, YAMLContent: e.textarea.Value()}
+	return func() tea.Msg { return req }
 }
 
-func applyYAML(kind, name, namespace, yamlContent string) error {
-	// Convert YAML to JSON for patch
-	jsonBytes, err := sigsyaml.YAMLToJSON([]byte(yamlContent))
-	if err != nil {
-		return fmt.Errorf("invalid YAML: %w", err)
-	}
-	_ = jsonBytes
-	return nil // clientset injected via closure in real usage — see integration in app/model.go
-}
-
-// ApplyYAMLCmd is the real apply command that uses a live clientset. It looks
-// up the per-kind "apply" Action on the descriptor — the kind-keyed switch
-// that used to live here is now closures registered in panels/kinds.go.
-func ApplyYAMLCmd(cs kubernetes.Interface, kind, name, namespace, yamlContent string) tea.Cmd {
-	action := k8sres.LookupAction(kind, "apply")
-	if action == nil {
-		return func() tea.Msg {
-			return YAMLApplyErrMsg{fmt.Errorf("patch not supported for kind %s via klens yet", kind)}
-		}
-	}
-	return action(k8sres.ActionDeps{
-		Clientset:   cs,
-		Name:        name,
-		Namespace:   namespace,
-		YAMLContent: yamlContent,
-	})
+// ApplyYAMLRequest asks the root to execute the apply against the live
+// clientset. Decoupling the request from the executor keeps the editor free
+// of cluster handles.
+type ApplyYAMLRequest struct {
+	Kind        string
+	Name        string
+	Namespace   string
+	YAMLContent string
 }
 
 // helpers

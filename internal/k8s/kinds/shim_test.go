@@ -9,127 +9,116 @@ import (
 )
 
 // fakeNoCaps is the truth-table reference for "Kind with no capabilities."
-// Mirrors how a freshly-added kind (no actions, no logs, no topology) looks
-// before any capability is implemented.
+// Mirrors how a freshly-added kind looks before any capability is implemented.
 type fakeNoCaps struct{}
 
-func (fakeNoCaps) Meta() Meta { return Meta{Kind: "TruthTableA", Plural: "truthtablesa"} }
+func (fakeNoCaps) Meta() Meta                                                     { return Meta{Kind: "TruthTableA", Plural: "truthtablesa"} }
 func (fakeNoCaps) Columns() []k8s.Column                                          { return nil }
 func (fakeNoCaps) List(Context) ([]Row, error)                                    { return nil, nil }
 func (fakeNoCaps) Fetch(context.Context, Context, string, string) (Object, error) { return nil, nil }
 
 // fakeFullCaps is the truth-table reference for "Kind with every capability."
 // Mirrors Pod's eventual shape — Logger, Attacher, Scaler, Deleter,
-// PortForwarder, Topologer, Applier.
+// PortForwarder, Topologer, Applier, Suspender.
 type fakeFullCaps struct{ fakeNoCaps }
 
-func (fakeFullCaps) Meta() Meta { return Meta{Kind: "TruthTableB", Plural: "truthtablesb"} }
+func (fakeFullCaps) Meta() Meta                                                       { return Meta{Kind: "TruthTableB", Plural: "truthtablesb"} }
 func (fakeFullCaps) LogTargets(Context, string, string) ([]LogTarget, error)          { return nil, nil }
-func (fakeFullCaps) Attach(Context, string, string) tea.Cmd                          { return nil }
+func (fakeFullCaps) Attach(Context, string, string) tea.Cmd                           { return nil }
 func (fakeFullCaps) Scale(Context, string, string, int32) error                       { return nil }
 func (fakeFullCaps) CurrentReplicas(Object) int32                                     { return 0 }
 func (fakeFullCaps) Delete(Context, string, string) error                             { return nil }
 func (fakeFullCaps) ContainerPorts(Context, string, string) ([]ContainerPort, error)  { return nil, nil }
 func (fakeFullCaps) Topology(Context, string, string) (*k8s.TreeNode, error)          { return nil, nil }
 func (fakeFullCaps) Apply(Context, string, string, []byte) error                      { return nil }
+func (fakeFullCaps) Suspend(Context, string, string, bool) error                      { return nil }
 
-// TestImplementsTruthTable asserts the shim's interface-satisfaction
-// detection matches a hand-written truth table. This is the keystone check
-// the plan calls out (risk: "implements[T] helper is wrong … UI hints
-// silently disappear for migrated kinds").
-func TestImplementsTruthTable(t *testing.T) {
+// TestCapabilityAssertions asserts that direct type assertions on Kind
+// values surface every capability for a full-cap type and none for a
+// no-cap type. This is the same guard the old shim helper provided, kept
+// because plan 08's risk section called out silent capability disappearance.
+func TestCapabilityAssertions(t *testing.T) {
 	cases := []struct {
-		name           string
-		k              Kind
-		wantLogs       bool
-		wantAttach     bool
-		wantScale      bool
-		wantDelete     bool
-		wantPF         bool
-		wantTopology   bool
-		wantApply      bool
+		name string
+		k    Kind
+		caps map[string]bool
 	}{
-		{name: "no capabilities", k: fakeNoCaps{}},
 		{
-			name:         "every capability",
-			k:            fakeFullCaps{},
-			wantLogs:     true,
-			wantAttach:   true,
-			wantScale:    true,
-			wantDelete:   true,
-			wantPF:       true,
-			wantTopology: true,
-			wantApply:    true,
+			name: "no capabilities",
+			k:    fakeNoCaps{},
+			caps: map[string]bool{},
+		},
+		{
+			name: "every capability",
+			k:    fakeFullCaps{},
+			caps: map[string]bool{
+				"Logger":           true,
+				"Attacher":         true,
+				"Scaler":           true,
+				"Deleter":          true,
+				"PortForwarder":    true,
+				"Topologer":        true,
+				"Applier":          true,
+				"Suspender":        true,
+			},
 		},
 	}
 
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
-			if got := implements[Logger](c.k); got != c.wantLogs {
-				t.Errorf("Logger: got %v want %v", got, c.wantLogs)
+			_, isLogger := any(c.k).(Logger)
+			_, isAttacher := any(c.k).(Attacher)
+			_, isScaler := any(c.k).(Scaler)
+			_, isDeleter := any(c.k).(Deleter)
+			_, isPF := any(c.k).(PortForwarder)
+			_, isTopo := any(c.k).(Topologer)
+			_, isApplier := any(c.k).(Applier)
+			_, isSuspender := any(c.k).(Suspender)
+			got := map[string]bool{
+				"Logger":        isLogger,
+				"Attacher":      isAttacher,
+				"Scaler":        isScaler,
+				"Deleter":       isDeleter,
+				"PortForwarder": isPF,
+				"Topologer":     isTopo,
+				"Applier":       isApplier,
+				"Suspender":     isSuspender,
 			}
-			if got := implements[Attacher](c.k); got != c.wantAttach {
-				t.Errorf("Attacher: got %v want %v", got, c.wantAttach)
+			for k := range c.caps {
+				if !got[k] {
+					t.Errorf("expected %s capability to be satisfied", k)
+				}
 			}
-			if got := implements[Scaler](c.k); got != c.wantScale {
-				t.Errorf("Scaler: got %v want %v", got, c.wantScale)
-			}
-			if got := implements[Deleter](c.k); got != c.wantDelete {
-				t.Errorf("Deleter: got %v want %v", got, c.wantDelete)
-			}
-			if got := implements[PortForwarder](c.k); got != c.wantPF {
-				t.Errorf("PortForwarder: got %v want %v", got, c.wantPF)
-			}
-			if got := implements[Topologer](c.k); got != c.wantTopology {
-				t.Errorf("Topologer: got %v want %v", got, c.wantTopology)
-			}
-			if got := implements[Applier](c.k); got != c.wantApply {
-				t.Errorf("Applier: got %v want %v", got, c.wantApply)
+			for k, v := range got {
+				if v && !c.caps[k] {
+					t.Errorf("unexpected %s capability satisfied", k)
+				}
 			}
 		})
 	}
 }
 
-// TestLegacyDescriptorFromBools confirms that legacyDescriptorFrom maps
-// every capability interface to the matching Supports* boolean on the
-// generated ResourceDescriptor. Catches a missed mapping in shim.go that
-// would silently disable a UI hint or a help-bar entry.
-func TestLegacyDescriptorFromBools(t *testing.T) {
-	t.Run("no capabilities", func(t *testing.T) {
-		rd := legacyDescriptorFrom(fakeNoCaps{})
-		if rd.SupportsYAML != true {
-			t.Errorf("SupportsYAML should be true (Fetch is always present)")
-		}
-		if rd.SupportsLogs || rd.SupportsAttach || rd.SupportsScale ||
-			rd.SupportsDeletion || rd.SupportsPortForward || rd.SupportsTopology {
-			t.Errorf("expected no capability bools set, got %+v", rd)
-		}
-	})
-	t.Run("every capability", func(t *testing.T) {
-		rd := legacyDescriptorFrom(fakeFullCaps{})
-		want := []struct {
-			name string
-			got  bool
-		}{
-			{"SupportsYAML", rd.SupportsYAML},
-			{"SupportsLogs", rd.SupportsLogs},
-			{"SupportsAttach", rd.SupportsAttach},
-			{"SupportsScale", rd.SupportsScale},
-			{"SupportsDeletion", rd.SupportsDeletion},
-			{"SupportsPortForward", rd.SupportsPortForward},
-			{"SupportsTopology", rd.SupportsTopology},
-		}
-		for _, w := range want {
-			if !w.got {
-				t.Errorf("%s should be true on full-capability kind", w.name)
-			}
-		}
-		// And the action map: full-cap kind should have delete, scale, apply.
-		for _, op := range []string{"delete", "scale", "apply"} {
-			if rd.Actions[op] == nil {
-				t.Errorf("expected Actions[%q] to be wired", op)
-			}
-		}
-	})
+// TestLegacyDescriptorMetadata confirms the surviving shim still copies
+// Kind, Plural, Aliases, and Columns from the Kind onto the legacy
+// ResourceDescriptor so model.go::listRows + setStatusBarKind keep
+// resolving kinds by name.
+func TestLegacyDescriptorMetadata(t *testing.T) {
+	rd := legacyDescriptorFrom(fakeNoCaps{})
+	if rd.Kind != "TruthTableA" || rd.Plural != "truthtablesa" {
+		t.Errorf("descriptor: kind=%q plural=%q", rd.Kind, rd.Plural)
+	}
+	if rd.ListRows == nil {
+		t.Errorf("expected ListRows wired")
+	}
+	if rd.Fetch == nil {
+		t.Errorf("expected Fetch wired")
+	}
+	if rd.BuildTopology != nil {
+		t.Errorf("BuildTopology should be nil for no-caps kind")
+	}
+	rdFull := legacyDescriptorFrom(fakeFullCaps{})
+	if rdFull.BuildTopology == nil {
+		t.Errorf("BuildTopology should be wired for Topologer")
+	}
 }

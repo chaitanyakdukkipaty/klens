@@ -2,12 +2,15 @@ package kinds
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	k8s "github.com/chaitanyak/klens/internal/k8s"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // helmRelease is the one kind whose GVR is discovered against the live
@@ -211,6 +214,19 @@ func (h helmRelease) Fetch(_ context.Context, c Context, ns, name string) (Objec
 		}
 	}
 	return nil, fmt.Errorf("helmrelease %s/%s not in cache", ns, name)
+}
+
+// Suspend toggles spec.suspend on the HelmRelease via merge-patch through
+// the dynamic client. Used by both the suspend ("s") and resume ("r")
+// action paths in model.go — the boolean is the only thing that differs.
+func (h helmRelease) Suspend(c Context, ns, name string, suspend bool) error {
+	if c.Dynamic == nil {
+		return fmt.Errorf("helmRelease.Suspend: no Dynamic client")
+	}
+	body, _ := json.Marshal(map[string]any{"spec": map[string]any{"suspend": suspend}})
+	_, err := c.Dynamic.Resource(h.gvrFor(c)).Namespace(ns).Patch(
+		c.Ctx, name, types.MergePatchType, body, metav1.PatchOptions{})
+	return err
 }
 
 func init() { register(helmRelease{}) }

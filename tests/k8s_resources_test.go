@@ -84,19 +84,15 @@ func TestSetHandlersOnUnknownKind(t *testing.T) {
 	}
 }
 
-// TestCapabilitiesImplyHandlers — the Supports* flags are the contract for
-// what the UI offers. If a kind advertises SupportsTopology=true but no
-// BuildTopology handler is registered, pressing `t` silently does nothing.
-//
-// HelmRelease is exempted from SupportsYAML→Fetch because its YAML comes from
-// the cached unstructured object (FetchHelmReleaseYAMLCmd), not a Get call.
-func TestCapabilitiesImplyHandlers(t *testing.T) {
+// TestEveryDescriptorHasFetch — every registered kind exposes a Fetch
+// handler so the YAML viewer's "y" key can resolve the object. HelmRelease
+// is exempt because its YAML comes from the cached unstructured
+// (FetchHelmReleaseYAMLCmd), not a Get call. Topology presence is now an
+// interface check in the kinds package and is covered by per-kind tests.
+func TestEveryDescriptorHasFetch(t *testing.T) {
 	for _, rd := range k8s.Registry {
-		if rd.SupportsTopology && rd.BuildTopology == nil {
-			t.Errorf("kind %s: SupportsTopology=true but no BuildTopology handler registered", rd.Kind)
-		}
-		if rd.SupportsYAML && rd.Fetch == nil && rd.Kind != "HelmRelease" {
-			t.Errorf("kind %s: SupportsYAML=true but no Fetch handler registered", rd.Kind)
+		if rd.Fetch == nil && rd.Kind != "HelmRelease" {
+			t.Errorf("kind %s: no Fetch handler registered", rd.Kind)
 		}
 	}
 }

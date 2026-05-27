@@ -11,9 +11,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// node is cluster-scoped. SupportsMetrics is wired via MetricsSupporter so
-// the help bar shows the "m" hint and the metrics panel can open. List
-// renders status / roles / kubelet version from the informer cache.
+// node is cluster-scoped. It implements MetricsSupporter so the help bar
+// shows the "m" hint and the metrics panel can open. List renders status /
+// roles / kubelet version from the informer cache.
 type node struct{}
 
 func (node) Meta() Meta {

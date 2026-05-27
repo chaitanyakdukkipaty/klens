@@ -5,33 +5,11 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
-
-// ActionDeps carries everything an Action might need to execute. Callers
-// populate the fields they have; closures pull what they need.
-//
-// Clientset is the kubernetes.Interface (not the concrete *Clientset) so
-// tests can pass a fake clientset.
-type ActionDeps struct {
-	Clientset   kubernetes.Interface
-	Dynamic     dynamic.Interface
-	HelmGVR     schema.GroupVersionResource
-	Name        string
-	Namespace   string
-	Replicas    int32  // for scale operations
-	YAMLContent string // for apply operations — raw YAML payload to merge-patch
-}
-
-// Action returns a Bubbletea command that executes the operation. The op
-// name (the key under ResourceDescriptor.Actions) describes intent;
-// implementations are kind-specific.
-type Action func(ActionDeps) tea.Cmd
 
 // RowContext carries cross-cutting state needed by row extractors.
 // It is passed verbatim from caller (model) to descriptor.ListRows.
@@ -53,43 +31,38 @@ type ListRowsFunc func(wf *WatcherFactory, namespace string, ctx RowContext) []R
 // tests can swap in fake.NewSimpleClientset.
 type FetchFunc func(cs kubernetes.Interface, name, namespace string) (any, error)
 
+// (legacy package-level Action/RegisterAction/LookupAction surface was removed
+// alongside ResourceDescriptor.Actions and Supports*. Dispatch now lives in
+// internal/k8s/kinds — every action site does `_, ok := kind.(Capability)`.)
+
 // BuildTopologyFunc returns a topology tree rooted at the named resource.
 type BuildTopologyFunc func(wf *WatcherFactory, namespace, name string) *TreeNode
 
 // ResourceDescriptor describes a Kubernetes resource type.
 //
-// The metadata fields (Kind, Plural, Columns, Supports*) are static and live
-// in the Registry. The behavior closures (ListRows, Fetch, BuildTopology) are
+// The metadata fields (Kind, Plural, Columns) are static and live in the
+// Registry. The behavior closures (ListRows, Fetch, BuildTopology) are
 // attached via SetHandlers from a registration site so that per-kind code can
 // live in one place even when it depends on the UI layer (lipgloss-rendered
 // percentages, etc.) that the k8s package itself doesn't import.
+//
+// Capability presence (logs, scale, delete, …) is no longer expressed on the
+// descriptor — every action site checks via `kind.(kinds.Capability)` type
+// assertion. The descriptor's only remaining job is the legacy listing /
+// fetch / topology dispatch that the shim still bridges.
 type ResourceDescriptor struct {
-	Kind             string
-	Plural           string
-	APIGroup         string
-	APIVersion       string
-	Namespaced       bool
-	Aliases          []string
-	Columns          []Column
-	SupportsYAML        bool
-	SupportsLogs        bool
-	SupportsTopology    bool
-	SupportsMetrics     bool
-	SupportsAttach      bool
-	SupportsScale       bool
-	SupportsDeletion    bool
-	SupportsPortForward bool
+	Kind       string
+	Plural     string
+	APIGroup   string
+	APIVersion string
+	Namespaced bool
+	Aliases    []string
+	Columns    []Column
 
 	// Behavior — populated via SetHandlers, optional per kind.
 	ListRows      ListRowsFunc
 	Fetch         FetchFunc
 	BuildTopology BuildTopologyFunc
-
-	// Actions are op-name-keyed closures: "delete", "scale", "suspend",
-	// "resume", etc. The executeConfirmedOp path looks up the op on the
-	// descriptor and runs it — no kind-keyed switch in operations.go or in
-	// the model. Populated via RegisterAction.
-	Actions map[string]Action
 }
 
 // Column defines a table column for a resource type.
@@ -209,10 +182,11 @@ func RegisterDescriptor(rd ResourceDescriptor) bool {
 
 // SetHandlers attaches behavior closures to the descriptor for `kind`. Returns
 // false if the kind is not registered. Pass nil for any handler that does not
-// apply (e.g. BuildTopology for kinds without SupportsTopology).
+// apply (e.g. BuildTopology for kinds without a Topologer implementation).
 //
-// This registration pattern lets per-kind glue live in one file (typically
-// internal/ui/panels/kinds.go) while keeping the metadata Registry pure data.
+// This registration pattern lets per-kind glue live in one file while keeping
+// the metadata Registry pure data. The kinds package's shim is the only
+// remaining caller.
 func SetHandlers(kind string, list ListRowsFunc, fetch FetchFunc, topology BuildTopologyFunc) bool {
 	i, ok := aliasMap[strings.ToLower(kind)]
 	if !ok {
@@ -228,34 +202,6 @@ func SetHandlers(kind string, list ListRowsFunc, fetch FetchFunc, topology Build
 		Registry[i].BuildTopology = topology
 	}
 	return true
-}
-
-// RegisterAction attaches an Action under `op` to the descriptor for `kind`.
-// Returns false if the kind is not registered.
-//
-// Multiple calls for the same (kind, op) pair overwrite. Op names are
-// arbitrary strings agreed between the caller (typically the model) and the
-// registration site — common ones are "delete", "scale", "suspend", "resume".
-func RegisterAction(kind, op string, action Action) bool {
-	i, ok := aliasMap[strings.ToLower(kind)]
-	if !ok {
-		return false
-	}
-	if Registry[i].Actions == nil {
-		Registry[i].Actions = make(map[string]Action)
-	}
-	Registry[i].Actions[op] = action
-	return true
-}
-
-// LookupAction returns the action registered for (kind, op), or nil if either
-// the kind isn't registered or no action exists for that op.
-func LookupAction(kind, op string) Action {
-	rd, ok := Resolve(kind)
-	if !ok {
-		return nil
-	}
-	return rd.Actions[op]
 }
 
 // AgeString converts a creation timestamp to a human-readable age string.

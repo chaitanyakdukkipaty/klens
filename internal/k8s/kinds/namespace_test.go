@@ -79,12 +79,20 @@ func TestNamespaceDelete(t *testing.T) {
 
 // TestNamespaceShimRegisteredDescriptor validates the keystone: the
 // kinds.Default registry has namespace, AND k8s.Registry holds a
-// shim-generated descriptor with the correct Supports* bools. This is the
-// integration point that lets unmigrated callers (model.go::setStatusBarKind,
-// nav_panel, etc.) treat the migrated kind identically to a static entry.
+// shim-generated descriptor with the correct metadata + ListRows / Fetch
+// wiring. Capability presence is no longer expressed as Supports* booleans;
+// it's checked at every action site via type assertion against the Kind
+// returned by kinds.Lookup.
 func TestNamespaceShimRegisteredDescriptor(t *testing.T) {
-	if _, ok := Default.Resolve("Namespace"); !ok {
+	k, ok := Default.Resolve("Namespace")
+	if !ok {
 		t.Fatalf("kinds.Default has no Namespace registered")
+	}
+	if _, ok := any(k).(Deleter); !ok {
+		t.Errorf("Namespace should implement Deleter")
+	}
+	if _, ok := any(k).(Scaler); ok {
+		t.Errorf("Namespace should not implement Scaler")
 	}
 	rd, ok := k8s.Resolve("Namespace")
 	if !ok {
@@ -93,19 +101,10 @@ func TestNamespaceShimRegisteredDescriptor(t *testing.T) {
 	if rd.Kind != "Namespace" || rd.Plural != "namespaces" {
 		t.Errorf("shim descriptor: kind=%q plural=%q", rd.Kind, rd.Plural)
 	}
-	if !rd.SupportsYAML || !rd.SupportsDeletion {
-		t.Errorf("expected SupportsYAML && SupportsDeletion; got %+v", rd)
-	}
-	if rd.SupportsLogs || rd.SupportsAttach || rd.SupportsScale || rd.SupportsPortForward || rd.SupportsTopology {
-		t.Errorf("expected only YAML+Deletion; got %+v", rd)
-	}
 	if rd.ListRows == nil {
 		t.Errorf("ListRows handler not wired")
 	}
 	if rd.Fetch == nil {
 		t.Errorf("Fetch handler not wired")
-	}
-	if rd.Actions["delete"] == nil {
-		t.Errorf("delete action not wired")
 	}
 }

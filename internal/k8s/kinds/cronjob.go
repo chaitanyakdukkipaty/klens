@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// cronJob implements only Deleter — the legacy descriptor had SupportsYAML,
-// SupportsDeletion, no scale/logs/apply.
+// cronJob implements only Deleter. YAML view comes from the always-on
+// Fetch; no scale/logs/apply.
 type cronJob struct{}
 
 func (cronJob) Meta() Meta {
