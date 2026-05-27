@@ -310,7 +310,7 @@ func (v YAMLViewer) View() string {
 }
 
 // FetchYAMLCmd returns a tea.Cmd that fetches the raw YAML for a resource.
-func FetchYAMLCmd(cs *kubernetes.Clientset, kind, name, namespace string) tea.Cmd {
+func FetchYAMLCmd(cs kubernetes.Interface, kind, name, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		obj, err := fetchObject(cs, kind, name, namespace)
 		if err != nil {
@@ -353,7 +353,7 @@ func FetchHelmReleaseYAMLCmd(u *unstructured.Unstructured) tea.Cmd {
 	}
 }
 
-func fetchObject(cs *kubernetes.Clientset, kind, name, namespace string) (interface{}, error) {
+func fetchObject(cs kubernetes.Interface, kind, name, namespace string) (interface{}, error) {
 	rd, ok := k8sres.Resolve(kind)
 	if !ok || rd.Fetch == nil {
 		return nil, fmt.Errorf("unsupported kind: %s", kind)

@@ -47,7 +47,10 @@ type RowContext struct {
 type ListRowsFunc func(wf *WatcherFactory, namespace string, ctx RowContext) []ResourceRow
 
 // FetchFunc retrieves a live object by name (used by the YAML viewer).
-type FetchFunc func(cs *kubernetes.Clientset, name, namespace string) (any, error)
+//
+// The clientset is the kubernetes.Interface (not the concrete *Clientset) so
+// tests can swap in fake.NewSimpleClientset.
+type FetchFunc func(cs kubernetes.Interface, name, namespace string) (any, error)
 
 // BuildTopologyFunc returns a topology tree rooted at the named resource.
 type BuildTopologyFunc func(wf *WatcherFactory, namespace, name string) *TreeNode

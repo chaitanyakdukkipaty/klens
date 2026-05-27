@@ -36,7 +36,7 @@ func init() {
 				return BuildPodRows(wf.ListPods(ns), ctx.Metrics, ctx.PortForwardActive)
 			})
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return get(func(c context.Context) (any, error) {
 				return cs.CoreV1().Pods(ns).Get(c, name, metav1.GetOptions{})
 			})
@@ -48,7 +48,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildDeploymentRows(wf.ListDeployments(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().Deployments(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(wf *k8sres.WatcherFactory, ns, name string) *k8sres.TreeNode {
@@ -65,7 +65,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildStatefulSetRows(wf.ListStatefulSets(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().StatefulSets(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -75,7 +75,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildDaemonSetRows(wf.ListDaemonSets(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().DaemonSets(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -85,7 +85,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildReplicaSetRows(wf.ListReplicaSets(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().ReplicaSets(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -95,7 +95,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildJobRows(wf.ListJobs(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.BatchV1().Jobs(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -105,7 +105,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildCronJobRows(wf.ListCronJobs(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.BatchV1().CronJobs(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -115,7 +115,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildServiceRows(wf.ListServices(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().Services(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(wf *k8sres.WatcherFactory, ns, name string) *k8sres.TreeNode {
@@ -132,7 +132,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildIngressRows(wf.ListIngresses(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.NetworkingV1().Ingresses(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(wf *k8sres.WatcherFactory, ns, name string) *k8sres.TreeNode {
@@ -149,7 +149,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildConfigMapRows(wf.ListConfigMaps(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().ConfigMaps(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -159,7 +159,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildSecretRows(wf.ListSecrets(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().Secrets(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -167,7 +167,7 @@ func init() {
 
 	k8sres.SetHandlers("ServiceAccount",
 		nil, // no live row-listing today
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().ServiceAccounts(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -177,7 +177,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, _ string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildNodeRows(wf.ListNodes())
 		},
-		func(cs *kubernetes.Clientset, name, _ string) (any, error) {
+		func(cs kubernetes.Interface, name, _ string) (any, error) {
 			return cs.CoreV1().Nodes().Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -187,7 +187,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildPVCRows(wf.ListPVCs(ns))
 		},
-		func(cs *kubernetes.Clientset, name, ns string) (any, error) {
+		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().PersistentVolumeClaims(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -197,7 +197,7 @@ func init() {
 		func(wf *k8sres.WatcherFactory, _ string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildPVRows(wf.ListPersistentVolumes())
 		},
-		func(cs *kubernetes.Clientset, name, _ string) (any, error) {
+		func(cs kubernetes.Interface, name, _ string) (any, error) {
 			return cs.CoreV1().PersistentVolumes().Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,
@@ -205,7 +205,7 @@ func init() {
 
 	k8sres.SetHandlers("Namespace",
 		nil,
-		func(cs *kubernetes.Clientset, name, _ string) (any, error) {
+		func(cs kubernetes.Interface, name, _ string) (any, error) {
 			return cs.CoreV1().Namespaces().Get(context.Background(), name, metav1.GetOptions{})
 		},
 		nil,

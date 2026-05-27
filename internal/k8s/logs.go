@@ -36,14 +36,14 @@ type LogLineMsg struct {
 
 // LogStreamer manages concurrent log streams from multiple pods.
 type LogStreamer struct {
-	cs        *kubernetes.Clientset
+	cs        kubernetes.Interface
 	namespace string
 	lineCh    chan LogLine
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
 
-func NewLogStreamer(cs *kubernetes.Clientset, namespace string) *LogStreamer {
+func NewLogStreamer(cs kubernetes.Interface, namespace string) *LogStreamer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &LogStreamer{
 		cs:        cs,

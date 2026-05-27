@@ -30,7 +30,7 @@ type OperationResultMsg struct {
 // than going through a kind-keyed switch here.
 
 // RolloutRestartCmd restarts a deployment by patching the pod template annotation.
-func RolloutRestartCmd(cs *kubernetes.Clientset, kind, name, namespace string) tea.Cmd {
+func RolloutRestartCmd(cs kubernetes.Interface, kind, name, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -66,7 +66,7 @@ func RolloutRestartCmd(cs *kubernetes.Clientset, kind, name, namespace string) t
 }
 
 // CordonCmd cordons or uncordons a node.
-func CordonCmd(cs *kubernetes.Clientset, nodeName string, cordon bool) tea.Cmd {
+func CordonCmd(cs kubernetes.Interface, nodeName string, cordon bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		patch := map[string]interface{}{
@@ -88,7 +88,7 @@ func CordonCmd(cs *kubernetes.Clientset, nodeName string, cordon bool) tea.Cmd {
 }
 
 // DrainCmd evicts all pods from a node and then cordons it.
-func DrainCmd(cs *kubernetes.Clientset, nodeName string) tea.Cmd {
+func DrainCmd(cs kubernetes.Interface, nodeName string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -146,7 +146,7 @@ func isMirrorPod(pod *corev1.Pod) bool {
 }
 
 // RolloutUndoCmd rolls back a deployment to the previous revision.
-func RolloutUndoCmd(cs *kubernetes.Clientset, kind, name, namespace string) tea.Cmd {
+func RolloutUndoCmd(cs kubernetes.Interface, kind, name, namespace string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		// Patch the deployment to revision 0 triggers rollback to previous

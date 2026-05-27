@@ -37,7 +37,7 @@ type TmuxWindowOpenedMsg struct {
 
 // PodExecCommand implements tea.ExecCommand for a non-tmux interactive session.
 type PodExecCommand struct {
-	cs        *kubernetes.Clientset
+	cs        kubernetes.Interface
 	cfg       *rest.Config
 	namespace string
 	pod       string
@@ -79,7 +79,7 @@ func (c *PodExecCommand) Run() error {
 }
 
 // AttachCmd suspends the TUI and runs an interactive shell in the pod (non-tmux fallback).
-func AttachCmd(cs *kubernetes.Clientset, cfg *rest.Config, namespace, pod string) tea.Cmd {
+func AttachCmd(cs kubernetes.Interface, cfg *rest.Config, namespace, pod string) tea.Cmd {
 	c := &PodExecCommand{cs: cs, cfg: cfg, namespace: namespace, pod: pod}
 	return tea.Exec(c, func(err error) tea.Msg {
 		return AttachFinishedMsg{Pod: pod, Err: err}
@@ -133,7 +133,7 @@ func TmuxAttachWindowCmd(kubeContext, namespace, pod, container string) tea.Cmd 
 
 // detectContainer returns the first container name in the pod spec, or ""
 // if the pod can't be fetched (the API server will then use its default).
-func detectContainer(cs *kubernetes.Clientset, namespace, podName string) string {
+func detectContainer(cs kubernetes.Interface, namespace, podName string) string {
 	pod, err := cs.CoreV1().Pods(namespace).Get(
 		context.Background(), podName, metav1.GetOptions{})
 	if err != nil || len(pod.Spec.Containers) == 0 {

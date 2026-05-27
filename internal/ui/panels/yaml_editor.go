@@ -401,7 +401,7 @@ func applyYAML(kind, name, namespace, yamlContent string) error {
 // ApplyYAMLCmd is the real apply command that uses a live clientset. It looks
 // up the per-kind "apply" Action on the descriptor — the kind-keyed switch
 // that used to live here is now closures registered in panels/kinds.go.
-func ApplyYAMLCmd(cs *kubernetes.Clientset, kind, name, namespace, yamlContent string) tea.Cmd {
+func ApplyYAMLCmd(cs kubernetes.Interface, kind, name, namespace, yamlContent string) tea.Cmd {
 	action := k8sres.LookupAction(kind, "apply")
 	if action == nil {
 		return func() tea.Msg {

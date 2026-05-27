@@ -67,7 +67,7 @@ type PortForwardClosedMsg struct {
 // close on rare occasions; surface the resulting "address in use" error to the
 // caller rather than retrying silently.
 func StartPortForwardCmd(
-	cs *kubernetes.Clientset,
+	cs kubernetes.Interface,
 	cfg *rest.Config,
 	msgCh chan tea.Msg,
 	kind, resourceName, namespace, podName string,

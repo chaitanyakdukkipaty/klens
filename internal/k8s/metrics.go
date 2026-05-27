@@ -67,7 +67,7 @@ type nodeMetricsResponse struct {
 }
 
 // FetchMetricsCmd queries metrics-server and returns a MetricsUpdatedMsg.
-func FetchMetricsCmd(cs *kubernetes.Clientset, namespace string, prev MetricsUpdatedMsg) tea.Cmd {
+func FetchMetricsCmd(cs kubernetes.Interface, namespace string, prev MetricsUpdatedMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -80,7 +80,7 @@ func FetchMetricsCmd(cs *kubernetes.Clientset, namespace string, prev MetricsUpd
 		if namespace == "" || namespace == "all" {
 			path = "/apis/metrics.k8s.io/v1beta1/pods"
 		}
-		raw, err := cs.RESTClient().Get().AbsPath(path).DoRaw(ctx)
+		raw, err := cs.CoreV1().RESTClient().Get().AbsPath(path).DoRaw(ctx)
 		if err == nil {
 			var resp podMetricsResponse
 			if json.Unmarshal(raw, &resp) == nil {
@@ -115,7 +115,7 @@ func FetchMetricsCmd(cs *kubernetes.Clientset, namespace string, prev MetricsUpd
 		}
 
 		// Fetch node metrics
-		rawN, errN := cs.RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/nodes").DoRaw(ctx)
+		rawN, errN := cs.CoreV1().RESTClient().Get().AbsPath("/apis/metrics.k8s.io/v1beta1/nodes").DoRaw(ctx)
 		if errN == nil {
 			var resp nodeMetricsResponse
 			if json.Unmarshal(rawN, &resp) == nil {

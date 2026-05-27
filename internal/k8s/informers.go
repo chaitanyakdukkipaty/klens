@@ -110,7 +110,11 @@ type WatcherFactory struct {
 }
 
 // NewWatcherFactory creates a factory attached to the given clientset and rest config.
-func NewWatcherFactory(cs *kubernetes.Clientset, cfg *rest.Config, namespace string, msgCh chan tea.Msg) *WatcherFactory {
+//
+// The clientset is the kubernetes.Interface (not *Clientset) so tests can pass
+// a fake clientset; informers.NewSharedInformerFactory already takes the
+// interface, so the only real change is at the call site.
+func NewWatcherFactory(cs kubernetes.Interface, cfg *rest.Config, namespace string, msgCh chan tea.Msg) *WatcherFactory {
 	resync := 30 * time.Second
 	var factory informers.SharedInformerFactory
 	if namespace == "" || namespace == "all" || namespace == "default" {

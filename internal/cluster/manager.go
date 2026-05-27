@@ -80,7 +80,11 @@ func (m *Manager) SwitchContext(name string) error {
 }
 
 // ActiveClientset returns (or lazily creates) a clientset for the active context.
-func (m *Manager) ActiveClientset() (*kubernetes.Clientset, error) {
+//
+// The returned value is the kubernetes.Interface — callers cannot tell whether
+// it is a real *kubernetes.Clientset or a fake.NewSimpleClientset, which is the
+// whole point of the seam (see docs/architecture/07-client-seam.md).
+func (m *Manager) ActiveClientset() (kubernetes.Interface, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.clientsetFor(m.active)
@@ -103,7 +107,7 @@ func (m *Manager) ActiveRestConfig() (*rest.Config, error) {
 }
 
 // ClientsetFor returns a clientset for the named context.
-func (m *Manager) ClientsetFor(ctx string) (*kubernetes.Clientset, error) {
+func (m *Manager) ClientsetFor(ctx string) (kubernetes.Interface, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.clientsetFor(ctx)
