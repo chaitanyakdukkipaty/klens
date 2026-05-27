@@ -8,6 +8,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // job implements Deleter + Logger.
@@ -25,45 +26,48 @@ func (job) Meta() Meta {
 
 func (job) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "COMPLETIONS", Width: 14},
-		{Header: "DURATION", Width: 12},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: jobName},
+		{Header: "COMPLETIONS", Width: 14, Render: jobCompletions},
+		{Header: "DURATION", Width: 12, Render: jobDuration},
+		{Header: "AGE", Width: 10, Render: jobAge},
 	}
 }
 
-func (j job) List(c Context) ([]Row, error) {
-	jobs, err := listTyped[*batchv1.Job](c, j.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
+func (j job) List(c Context) ([]k8s.ResourceRow, error) { return listVia(j, c) }
+
+func (job) RowStatus(o runtime.Object) string {
+	jb := o.(*batchv1.Job)
+	switch {
+	case jb.Status.Succeeded > 0:
+		return "Succeeded"
+	case jb.Status.Failed > 0:
+		return "Failed"
+	default:
+		return "Running"
 	}
-	rows := make([]Row, 0, len(jobs))
-	for _, jb := range jobs {
-		completions := "0"
-		if jb.Spec.Completions != nil {
-			completions = fmt.Sprintf("%d/%d", jb.Status.Succeeded, *jb.Spec.Completions)
-		}
-		duration := ""
-		if jb.Status.CompletionTime != nil && !jb.Status.StartTime.IsZero() {
-			d := jb.Status.CompletionTime.Sub(jb.Status.StartTime.Time)
-			duration = fmt.Sprintf("%.0fs", d.Seconds())
-		}
-		status := "Running"
-		switch {
-		case jb.Status.Succeeded > 0:
-			status = "Succeeded"
-		case jb.Status.Failed > 0:
-			status = "Failed"
-		}
-		rows = append(rows, Row{
-			Name:      jb.Name,
-			Namespace: jb.Namespace,
-			Status:    status,
-			Values:    []string{jb.Name, completions, duration, k8s.AgeString(jb.CreationTimestamp)},
-			Raw:       jb,
-		})
+}
+
+func jobName(o runtime.Object, _ k8s.RowContext) string { return o.(*batchv1.Job).Name }
+
+func jobCompletions(o runtime.Object, _ k8s.RowContext) string {
+	jb := o.(*batchv1.Job)
+	if jb.Spec.Completions != nil {
+		return fmt.Sprintf("%d/%d", jb.Status.Succeeded, *jb.Spec.Completions)
 	}
-	return rows, nil
+	return "0"
+}
+
+func jobDuration(o runtime.Object, _ k8s.RowContext) string {
+	jb := o.(*batchv1.Job)
+	if jb.Status.CompletionTime != nil && !jb.Status.StartTime.IsZero() {
+		d := jb.Status.CompletionTime.Sub(jb.Status.StartTime.Time)
+		return fmt.Sprintf("%.0fs", d.Seconds())
+	}
+	return ""
+}
+
+func jobAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*batchv1.Job).CreationTimestamp)
 }
 
 func (job) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

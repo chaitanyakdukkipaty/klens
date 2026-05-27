@@ -7,6 +7,7 @@ import (
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // persistentVolumeClaim implements Deleter (no Applier in the legacy
@@ -25,35 +26,44 @@ func (persistentVolumeClaim) Meta() Meta {
 
 func (persistentVolumeClaim) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "STATUS", Width: 12},
-		{Header: "VOLUME", Width: 30},
-		{Header: "CAPACITY", Width: 12},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: pvcName},
+		{Header: "STATUS", Width: 12, Render: pvcStatus},
+		{Header: "VOLUME", Width: 30, Render: pvcVolume},
+		{Header: "CAPACITY", Width: 12, Render: pvcCapacity},
+		{Header: "AGE", Width: 10, Render: pvcAge},
 	}
 }
 
-func (pvc persistentVolumeClaim) List(c Context) ([]Row, error) {
-	pvcs, err := listTyped[*corev1.PersistentVolumeClaim](c, pvc.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
+func (pvc persistentVolumeClaim) List(c Context) ([]k8s.ResourceRow, error) {
+	return listVia(pvc, c)
+}
+
+func (persistentVolumeClaim) RowStatus(o runtime.Object) string {
+	return string(o.(*corev1.PersistentVolumeClaim).Status.Phase)
+}
+
+func pvcName(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*corev1.PersistentVolumeClaim).Name
+}
+
+func pvcStatus(o runtime.Object, _ k8s.RowContext) string {
+	return string(o.(*corev1.PersistentVolumeClaim).Status.Phase)
+}
+
+func pvcVolume(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*corev1.PersistentVolumeClaim).Spec.VolumeName
+}
+
+func pvcCapacity(o runtime.Object, _ k8s.RowContext) string {
+	p := o.(*corev1.PersistentVolumeClaim)
+	if storage, ok := p.Status.Capacity[corev1.ResourceStorage]; ok {
+		return storage.String()
 	}
-	rows := make([]Row, 0, len(pvcs))
-	for _, p := range pvcs {
-		cap := ""
-		if storage, ok := p.Status.Capacity[corev1.ResourceStorage]; ok {
-			cap = storage.String()
-		}
-		phase := string(p.Status.Phase)
-		rows = append(rows, Row{
-			Name:      p.Name,
-			Namespace: p.Namespace,
-			Status:    phase,
-			Values:    []string{p.Name, phase, p.Spec.VolumeName, cap, k8s.AgeString(p.CreationTimestamp)},
-			Raw:       p,
-		})
-	}
-	return rows, nil
+	return ""
+}
+
+func pvcAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*corev1.PersistentVolumeClaim).CreationTimestamp)
 }
 
 func (persistentVolumeClaim) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -27,31 +28,29 @@ func (statefulSet) Meta() Meta {
 
 func (statefulSet) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "READY", Width: 10},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: statefulSetName},
+		{Header: "READY", Width: 10, Render: statefulSetReady},
+		{Header: "AGE", Width: 10, Render: statefulSetAge},
 	}
 }
 
-func (s statefulSet) List(c Context) ([]Row, error) {
-	sets, err := listTyped[*appsv1.StatefulSet](c, s.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
+func (s statefulSet) List(c Context) ([]k8s.ResourceRow, error) { return listVia(s, c) }
+
+func statefulSetName(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*appsv1.StatefulSet).Name
+}
+
+func statefulSetReady(o runtime.Object, _ k8s.RowContext) string {
+	s := o.(*appsv1.StatefulSet)
+	desired := int32(0)
+	if s.Spec.Replicas != nil {
+		desired = *s.Spec.Replicas
 	}
-	rows := make([]Row, 0, len(sets))
-	for _, st := range sets {
-		desired := int32(0)
-		if st.Spec.Replicas != nil {
-			desired = *st.Spec.Replicas
-		}
-		rows = append(rows, Row{
-			Name:      st.Name,
-			Namespace: st.Namespace,
-			Values:    []string{st.Name, fmt.Sprintf("%d/%d", st.Status.ReadyReplicas, desired), k8s.AgeString(st.CreationTimestamp)},
-			Raw:       st,
-		})
-	}
-	return rows, nil
+	return fmt.Sprintf("%d/%d", s.Status.ReadyReplicas, desired)
+}
+
+func statefulSetAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*appsv1.StatefulSet).CreationTimestamp)
 }
 
 func (statefulSet) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

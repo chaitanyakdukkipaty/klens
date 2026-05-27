@@ -10,6 +10,7 @@ import (
 	"github.com/chaitanyak/klens/internal/ui/styles"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -33,39 +34,26 @@ func (pod) Meta() Meta {
 
 func (pod) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "PF", Width: 3},
-		{Header: "READY", Width: 6},
-		{Header: "STATUS", Width: 15},
-		{Header: "RESTARTS", Width: 9},
-		{Header: "AGE", Width: 6},
-		{Header: "CPU", Width: 6},
-		{Header: "%CPU/R", Width: 7},
-		{Header: "%CPU/L", Width: 7},
-		{Header: "MEM", Width: 7},
-		{Header: "%MEM/R", Width: 7},
-		{Header: "%MEM/L", Width: 7},
+		{Header: "NAME", Width: 40, Flex: true, Render: podName},
+		{Header: "PF", Width: 3, Render: podPF},
+		{Header: "READY", Width: 6, Render: podReady},
+		{Header: "STATUS", Width: 15, Render: podStatusCell},
+		{Header: "RESTARTS", Width: 9, Render: podRestarts},
+		{Header: "AGE", Width: 6, Render: podAge},
+		{Header: "CPU", Width: 6, Render: podCPU},
+		{Header: "%CPU/R", Width: 7, Render: podCPUPctRequest},
+		{Header: "%CPU/L", Width: 7, Render: podCPUPctLimit},
+		{Header: "MEM", Width: 7, Render: podMEM},
+		{Header: "%MEM/R", Width: 7, Render: podMEMPctRequest},
+		{Header: "%MEM/L", Width: 7, Render: podMEMPctLimit},
 	}
 }
 
-func (p pod) List(c Context) ([]Row, error) {
-	if c.Lister == nil {
-		return nil, fmt.Errorf("pod.List: no Lister")
-	}
-	objs, err := c.Lister.List(c.Ctx, p.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
-	}
-	rows := make([]Row, 0, len(objs))
-	for _, o := range objs {
-		pp, ok := o.(*corev1.Pod)
-		if !ok {
-			continue
-		}
-		rows = append(rows, podRow(pp, c.Metrics, c.PFActive))
-	}
-	return rows, nil
-}
+func (p pod) List(c Context) ([]k8s.ResourceRow, error) { return listVia(p, c) }
+
+// RowStatus drives the colored STATUS column — must equal podStatusCell's
+// output so the table's color key matches the rendered cell.
+func (pod) RowStatus(o runtime.Object) string { return podStatusCell(o, k8s.RowContext{}) }
 
 func (pod) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {
 	if c.Clientset == nil {
@@ -194,55 +182,123 @@ func podPctColored(num, denom int64) string {
 	}
 }
 
-// podRow renders a single Pod into a Row. Mirrors the legacy
-// panels.BuildPodRows logic so the table looks identical; the difference
-// is ownership — the rendering now lives next to the Kind that produces
-// it instead of in a generic resource_table file.
-func podRow(p *corev1.Pod, metricsData k8s.MetricsUpdatedMsg, pfActive func(ns, name string) bool) Row {
-	ready := 0
-	total := len(p.Spec.Containers)
-	restarts := 0
-	status := string(p.Status.Phase)
-	waitingFound := false
+// podReadyCounts returns (ready, total, restarts) over the pod's container
+// statuses. Shared by the READY and RESTARTS column renderers.
+func podReadyCounts(p *corev1.Pod) (ready, total, restarts int) {
+	total = len(p.Spec.Containers)
 	for _, cs := range p.Status.ContainerStatuses {
 		if cs.Ready {
 			ready++
 		}
 		restarts += int(cs.RestartCount)
-		if !waitingFound && cs.State.Waiting != nil {
-			status = cs.State.Waiting.Reason
-			waitingFound = true
+	}
+	return
+}
+
+// podStatus computes the STATUS column text: Phase by default, the first
+// waiting reason if any container is waiting, "Terminating" if the pod is
+// being deleted.
+func podStatus(p *corev1.Pod) string {
+	if p.DeletionTimestamp != nil {
+		return "Terminating"
+	}
+	status := string(p.Status.Phase)
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.State.Waiting != nil {
+			return cs.State.Waiting.Reason
 		}
 	}
-	if p.DeletionTimestamp != nil {
-		status = "Terminating"
-	}
-	age := k8s.AgeString(p.CreationTimestamp)
+	return status
+}
 
-	cpuStr, cpuRStr, cpuLStr := "n/a", "~", "~"
-	memStr, memRStr, memLStr := "n/a", "~", "~"
-	if rm := metricsData.Pods[p.Namespace+"/"+p.Name]; rm != nil {
-		cpuM := int64(rm.CPULatest)
-		memMi := int64(rm.MEMLatest) / (1024 * 1024)
-		cpuStr = fmt.Sprintf("%d", cpuM)
-		memStr = fmt.Sprintf("%d", memMi)
-		cpuReqM, cpuLimM, memReqB, memLimB := podResourceTotals(p)
-		cpuRStr = podPctColored(cpuM, cpuReqM)
-		cpuLStr = podPctColored(cpuM, cpuLimM)
-		memRStr = podPctColored(int64(rm.MEMLatest), memReqB)
-		memLStr = podPctColored(int64(rm.MEMLatest), memLimB)
-	}
+func podName(o runtime.Object, _ k8s.RowContext) string { return o.(*corev1.Pod).Name }
 
-	return Row{
-		Name:      p.Name,
-		Namespace: p.Namespace,
-		Status:    status,
-		Values: []string{
-			p.Name, podPFMarker(pfActive, p.Namespace, p.Name), fmt.Sprintf("%d/%d", ready, total), status, fmt.Sprintf("%d", restarts), age,
-			cpuStr, cpuRStr, cpuLStr, memStr, memRStr, memLStr,
-		},
-		Raw: p,
+func podPF(o runtime.Object, c k8s.RowContext) string {
+	p := o.(*corev1.Pod)
+	return podPFMarker(c.PortForwardActive, p.Namespace, p.Name)
+}
+
+func podReady(o runtime.Object, _ k8s.RowContext) string {
+	ready, total, _ := podReadyCounts(o.(*corev1.Pod))
+	return fmt.Sprintf("%d/%d", ready, total)
+}
+
+func podStatusCell(o runtime.Object, _ k8s.RowContext) string {
+	return podStatus(o.(*corev1.Pod))
+}
+
+func podRestarts(o runtime.Object, _ k8s.RowContext) string {
+	_, _, restarts := podReadyCounts(o.(*corev1.Pod))
+	return fmt.Sprintf("%d", restarts)
+}
+
+func podAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*corev1.Pod).CreationTimestamp)
+}
+
+// podMetricsRow returns the metrics-server snapshot for the pod, or nil
+// when metrics aren't available (no server, no sample yet).
+func podMetricsRow(p *corev1.Pod, c k8s.RowContext) *k8s.ResourceMetrics {
+	if c.Metrics.Pods == nil {
+		return nil
 	}
+	return c.Metrics.Pods[p.Namespace+"/"+p.Name]
+}
+
+func podCPU(o runtime.Object, c k8s.RowContext) string {
+	rm := podMetricsRow(o.(*corev1.Pod), c)
+	if rm == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%d", int64(rm.CPULatest))
+}
+
+func podMEM(o runtime.Object, c k8s.RowContext) string {
+	rm := podMetricsRow(o.(*corev1.Pod), c)
+	if rm == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%d", int64(rm.MEMLatest)/(1024*1024))
+}
+
+func podCPUPctRequest(o runtime.Object, c k8s.RowContext) string {
+	p := o.(*corev1.Pod)
+	rm := podMetricsRow(p, c)
+	if rm == nil {
+		return "~"
+	}
+	cpuReqM, _, _, _ := podResourceTotals(p)
+	return podPctColored(int64(rm.CPULatest), cpuReqM)
+}
+
+func podCPUPctLimit(o runtime.Object, c k8s.RowContext) string {
+	p := o.(*corev1.Pod)
+	rm := podMetricsRow(p, c)
+	if rm == nil {
+		return "~"
+	}
+	_, cpuLimM, _, _ := podResourceTotals(p)
+	return podPctColored(int64(rm.CPULatest), cpuLimM)
+}
+
+func podMEMPctRequest(o runtime.Object, c k8s.RowContext) string {
+	p := o.(*corev1.Pod)
+	rm := podMetricsRow(p, c)
+	if rm == nil {
+		return "~"
+	}
+	_, _, memReqB, _ := podResourceTotals(p)
+	return podPctColored(int64(rm.MEMLatest), memReqB)
+}
+
+func podMEMPctLimit(o runtime.Object, c k8s.RowContext) string {
+	p := o.(*corev1.Pod)
+	rm := podMetricsRow(p, c)
+	if rm == nil {
+		return "~"
+	}
+	_, _, _, memLimB := podResourceTotals(p)
+	return podPctColored(int64(rm.MEMLatest), memLimB)
 }
 
 func init() { register(pod{}) }

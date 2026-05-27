@@ -124,11 +124,28 @@ internal/ui/
 
 ## Adding a New Resource Type
 
-1. Add a `ResourceDescriptor` entry to `internal/k8s/resources.go` `Registry` slice
-2. Add a `List*` method to `internal/k8s/informers.go` `WatcherFactory`
-3. Add a `Build*Rows` function to `internal/ui/panels/resource_table.go`
-4. Add a `case "Kind":` to `app.Model.listRows()` in `internal/app/model.go`
-5. Add a `FetchObject` case in `internal/ui/panels/yaml_viewer.go` `fetchObject()`
+Create `internal/k8s/kinds/<kind>.go`. Implement `Meta()`, `Columns()` (with a
+`Render func(runtime.Object, k8s.RowContext) string` per column), and
+`Fetch()`. `List(c)` collapses to a one-liner — `return listVia(k, c)` — for
+every kind whose read path is the standard Lister; an explicit List body is
+only required for kinds with dynamic GVR discovery (HelmRelease) or anything
+that bypasses `Lister`. Implement any capability interfaces the kind supports
+(`Deleter`, `Scaler`, `Logger`, `Applier`, `Topologer`, `PortForwarder`,
+`Attacher`, `MetricsSupporter`). Implement the optional `RowStatuser` /
+`RowSortByTimer` / `RowNamer` interfaces when the row's color key, sort order,
+or display name should diverge from the object's metadata. Register in the
+package `init()` via `register(k)`; the shim in `kinds/shim.go` builds the
+legacy `k8s.ResourceDescriptor` from the Kind and its capability satisfaction.
+
+### Adding a Column
+
+Append one `{Header, Width, Flex, Render}` to the kind's `Columns()` slice.
+`Render` takes `(runtime.Object, k8s.RowContext)` and returns the cell string;
+type-assert to the kind's typed Go shape inside. `RowContext.Metrics` and
+`RowContext.PortForwardActive` are the only cross-cutting state available to
+cells — add a field to `k8s.RowContext` only when a concrete column needs it.
+Nothing else changes; `listVia` fills `Row.Values` positionally from each
+Render closure.
 
 ## Adding Topology to a Resource
 

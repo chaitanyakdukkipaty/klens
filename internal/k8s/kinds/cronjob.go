@@ -7,6 +7,7 @@ import (
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // cronJob implements only Deleter — the legacy descriptor had SupportsYAML,
@@ -25,32 +26,31 @@ func (cronJob) Meta() Meta {
 
 func (cronJob) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "SCHEDULE", Width: 20},
-		{Header: "LAST SCHEDULE", Width: 16},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: cronJobName},
+		{Header: "SCHEDULE", Width: 20, Render: cronJobSchedule},
+		{Header: "LAST SCHEDULE", Width: 16, Render: cronJobLastSchedule},
+		{Header: "AGE", Width: 10, Render: cronJobAge},
 	}
 }
 
-func (j cronJob) List(c Context) ([]Row, error) {
-	cjs, err := listTyped[*batchv1.CronJob](c, j.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
+func (j cronJob) List(c Context) ([]k8s.ResourceRow, error) { return listVia(j, c) }
+
+func cronJobName(o runtime.Object, _ k8s.RowContext) string { return o.(*batchv1.CronJob).Name }
+
+func cronJobSchedule(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*batchv1.CronJob).Spec.Schedule
+}
+
+func cronJobLastSchedule(o runtime.Object, _ k8s.RowContext) string {
+	cj := o.(*batchv1.CronJob)
+	if cj.Status.LastScheduleTime != nil {
+		return k8s.AgeString(*cj.Status.LastScheduleTime)
 	}
-	rows := make([]Row, 0, len(cjs))
-	for _, cj := range cjs {
-		lastSchedule := "Never"
-		if cj.Status.LastScheduleTime != nil {
-			lastSchedule = k8s.AgeString(*cj.Status.LastScheduleTime)
-		}
-		rows = append(rows, Row{
-			Name:      cj.Name,
-			Namespace: cj.Namespace,
-			Values:    []string{cj.Name, cj.Spec.Schedule, lastSchedule, k8s.AgeString(cj.CreationTimestamp)},
-			Raw:       cj,
-		})
-	}
-	return rows, nil
+	return "Never"
+}
+
+func cronJobAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*batchv1.CronJob).CreationTimestamp)
 }
 
 func (cronJob) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

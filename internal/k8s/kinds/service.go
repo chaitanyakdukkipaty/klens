@@ -3,10 +3,12 @@ package kinds
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -25,36 +27,37 @@ func (service) Meta() Meta {
 
 func (service) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "TYPE", Width: 14},
-		{Header: "CLUSTER-IP", Width: 18},
-		{Header: "PORT(S)", Width: 20},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: serviceName},
+		{Header: "TYPE", Width: 14, Render: serviceType},
+		{Header: "CLUSTER-IP", Width: 18, Render: serviceClusterIP},
+		{Header: "PORT(S)", Width: 20, Render: servicePorts},
+		{Header: "AGE", Width: 10, Render: serviceAge},
 	}
 }
 
-func (s service) List(c Context) ([]Row, error) {
-	svcs, err := listTyped[*corev1.Service](c, s.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
+func (s service) List(c Context) ([]k8s.ResourceRow, error) { return listVia(s, c) }
+
+func serviceName(o runtime.Object, _ k8s.RowContext) string { return o.(*corev1.Service).Name }
+
+func serviceType(o runtime.Object, _ k8s.RowContext) string {
+	return string(o.(*corev1.Service).Spec.Type)
+}
+
+func serviceClusterIP(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*corev1.Service).Spec.ClusterIP
+}
+
+func servicePorts(o runtime.Object, _ k8s.RowContext) string {
+	sv := o.(*corev1.Service)
+	parts := make([]string, 0, len(sv.Spec.Ports))
+	for _, p := range sv.Spec.Ports {
+		parts = append(parts, fmt.Sprintf("%d/%s", p.Port, p.Protocol))
 	}
-	rows := make([]Row, 0, len(svcs))
-	for _, sv := range svcs {
-		ports := ""
-		for i, p := range sv.Spec.Ports {
-			if i > 0 {
-				ports += ","
-			}
-			ports += fmt.Sprintf("%d/%s", p.Port, p.Protocol)
-		}
-		rows = append(rows, Row{
-			Name:      sv.Name,
-			Namespace: sv.Namespace,
-			Values:    []string{sv.Name, string(sv.Spec.Type), sv.Spec.ClusterIP, ports, k8s.AgeString(sv.CreationTimestamp)},
-			Raw:       sv,
-		})
-	}
-	return rows, nil
+	return strings.Join(parts, ",")
+}
+
+func serviceAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*corev1.Service).CreationTimestamp)
 }
 
 func (service) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

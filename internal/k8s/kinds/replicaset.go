@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -28,39 +29,37 @@ func (replicaSet) Meta() Meta {
 
 func (replicaSet) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "DESIRED", Width: 10},
-		{Header: "CURRENT", Width: 10},
-		{Header: "READY", Width: 8},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: replicaSetName},
+		{Header: "DESIRED", Width: 10, Render: replicaSetDesired},
+		{Header: "CURRENT", Width: 10, Render: replicaSetCurrent},
+		{Header: "READY", Width: 8, Render: replicaSetReady},
+		{Header: "AGE", Width: 10, Render: replicaSetAge},
 	}
 }
 
-func (r replicaSet) List(c Context) ([]Row, error) {
-	sets, err := listTyped[*appsv1.ReplicaSet](c, r.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
+func (r replicaSet) List(c Context) ([]k8s.ResourceRow, error) { return listVia(r, c) }
+
+func replicaSetName(o runtime.Object, _ k8s.RowContext) string { return o.(*appsv1.ReplicaSet).Name }
+
+func replicaSetDesired(o runtime.Object, _ k8s.RowContext) string {
+	s := o.(*appsv1.ReplicaSet)
+	desired := int32(0)
+	if s.Spec.Replicas != nil {
+		desired = *s.Spec.Replicas
 	}
-	rows := make([]Row, 0, len(sets))
-	for _, s := range sets {
-		desired := int32(0)
-		if s.Spec.Replicas != nil {
-			desired = *s.Spec.Replicas
-		}
-		rows = append(rows, Row{
-			Name:      s.Name,
-			Namespace: s.Namespace,
-			Values: []string{
-				s.Name,
-				fmt.Sprintf("%d", desired),
-				fmt.Sprintf("%d", s.Status.Replicas),
-				fmt.Sprintf("%d", s.Status.ReadyReplicas),
-				k8s.AgeString(s.CreationTimestamp),
-			},
-			Raw: s,
-		})
-	}
-	return rows, nil
+	return fmt.Sprintf("%d", desired)
+}
+
+func replicaSetCurrent(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", o.(*appsv1.ReplicaSet).Status.Replicas)
+}
+
+func replicaSetReady(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", o.(*appsv1.ReplicaSet).Status.ReadyReplicas)
+}
+
+func replicaSetAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*appsv1.ReplicaSet).CreationTimestamp)
 }
 
 func (replicaSet) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

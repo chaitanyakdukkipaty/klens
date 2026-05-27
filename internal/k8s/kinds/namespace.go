@@ -7,6 +7,7 @@ import (
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // namespace is the first migrated kind — cluster-scoped, only YAML view and
@@ -26,38 +27,32 @@ func (namespace) Meta() Meta {
 
 func (namespace) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "STATUS", Width: 14},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: namespaceName},
+		{Header: "STATUS", Width: 14, Render: namespaceStatus},
+		{Header: "AGE", Width: 10, Render: namespaceAge},
 	}
 }
 
-func (n namespace) List(c Context) ([]Row, error) {
-	if c.Lister == nil {
-		return nil, fmt.Errorf("namespace.List: no Lister")
+func (n namespace) List(c Context) ([]k8s.ResourceRow, error) { return listVia(n, c) }
+
+// RowStatus drives the colored STATUS column. Mirrors the cell text returned
+// by namespaceStatus so the row's color key matches the rendered cell.
+func (namespace) RowStatus(o runtime.Object) string { return namespaceStatus(o, k8s.RowContext{}) }
+
+func namespaceName(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*corev1.Namespace).Name
+}
+
+func namespaceStatus(o runtime.Object, _ k8s.RowContext) string {
+	ns := o.(*corev1.Namespace)
+	if ns.DeletionTimestamp != nil {
+		return "Terminating"
 	}
-	objs, err := c.Lister.List(c.Ctx, n.Meta().GVR, "")
-	if err != nil {
-		return nil, err
-	}
-	rows := make([]Row, 0, len(objs))
-	for _, o := range objs {
-		ns, ok := o.(*corev1.Namespace)
-		if !ok {
-			continue
-		}
-		status := string(ns.Status.Phase)
-		if ns.DeletionTimestamp != nil {
-			status = "Terminating"
-		}
-		rows = append(rows, Row{
-			Name:   ns.Name,
-			Status: status,
-			Values: []string{ns.Name, status, k8s.AgeString(ns.CreationTimestamp)},
-			Raw:    ns,
-		})
-	}
-	return rows, nil
+	return string(ns.Status.Phase)
+}
+
+func namespaceAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*corev1.Namespace).CreationTimestamp)
 }
 
 func (namespace) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

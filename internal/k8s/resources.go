@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -98,11 +99,18 @@ type ResourceDescriptor struct {
 // this column (←/→ keys and horizontal wheel ticks shift its rune offset).
 // At most one column per resource should be marked Scrollable; the first one
 // wins if multiple are set.
+//
+// Render is the per-cell function: given the typed object and a RowContext,
+// return the cell string. When set, the kind's List body collapses to a
+// generic renderer that fills Row.Values via Render across every column. When
+// nil, the kind hand-builds Row.Values inside List (legacy path, removed in
+// plan 06 step 7).
 type Column struct {
 	Header     string
 	Width      int
 	Flex       bool
 	Scrollable bool
+	Render     func(obj runtime.Object, ctx RowContext) string
 }
 
 // ResourceRow is a single row in the resource table.

@@ -7,6 +7,7 @@ import (
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -25,27 +26,22 @@ func (configMap) Meta() Meta {
 
 func (configMap) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "DATA", Width: 8},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: configMapName},
+		{Header: "DATA", Width: 8, Render: configMapData},
+		{Header: "AGE", Width: 10, Render: configMapAge},
 	}
 }
 
-func (cm configMap) List(c Context) ([]Row, error) {
-	cms, err := listTyped[*corev1.ConfigMap](c, cm.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
-	}
-	rows := make([]Row, 0, len(cms))
-	for _, m := range cms {
-		rows = append(rows, Row{
-			Name:      m.Name,
-			Namespace: m.Namespace,
-			Values:    []string{m.Name, fmt.Sprintf("%d", len(m.Data)), k8s.AgeString(m.CreationTimestamp)},
-			Raw:       m,
-		})
-	}
-	return rows, nil
+func (cm configMap) List(c Context) ([]k8s.ResourceRow, error) { return listVia(cm, c) }
+
+func configMapName(o runtime.Object, _ k8s.RowContext) string { return o.(*corev1.ConfigMap).Name }
+
+func configMapData(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", len(o.(*corev1.ConfigMap).Data))
+}
+
+func configMapAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*corev1.ConfigMap).CreationTimestamp)
 }
 
 func (configMap) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

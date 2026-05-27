@@ -8,6 +8,7 @@ import (
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // node is cluster-scoped. SupportsMetrics is wired via MetricsSupporter so
@@ -27,45 +28,46 @@ func (node) Meta() Meta {
 
 func (node) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "STATUS", Width: 14},
-		{Header: "ROLES", Width: 20},
-		{Header: "VERSION", Width: 16},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: nodeName},
+		{Header: "STATUS", Width: 14, Render: nodeStatusCell},
+		{Header: "ROLES", Width: 20, Render: nodeRolesCell},
+		{Header: "VERSION", Width: 16, Render: nodeVersion},
+		{Header: "AGE", Width: 10, Render: nodeAge},
 	}
 }
 
-func (n node) List(c Context) ([]Row, error) {
-	if c.Lister == nil {
-		return nil, fmt.Errorf("node.List: no Lister")
+func (n node) List(c Context) ([]k8s.ResourceRow, error) { return listVia(n, c) }
+
+func (node) RowStatus(o runtime.Object) string { return nodeStatusCell(o, k8s.RowContext{}) }
+
+func nodeName(o runtime.Object, _ k8s.RowContext) string { return o.(*corev1.Node).Name }
+
+func nodeStatus(nd *corev1.Node) string {
+	if nd.Spec.Unschedulable {
+		return "SchedulingDisabled"
 	}
-	objs, err := c.Lister.List(c.Ctx, n.Meta().GVR, "")
-	if err != nil {
-		return nil, err
+	for _, cd := range nd.Status.Conditions {
+		if cd.Type == corev1.NodeReady && cd.Status == corev1.ConditionTrue {
+			return "Ready"
+		}
 	}
-	rows := make([]Row, 0, len(objs))
-	for _, o := range objs {
-		nd, ok := o.(*corev1.Node)
-		if !ok {
-			continue
-		}
-		status := "NotReady"
-		for _, cd := range nd.Status.Conditions {
-			if cd.Type == corev1.NodeReady && cd.Status == corev1.ConditionTrue {
-				status = "Ready"
-			}
-		}
-		if nd.Spec.Unschedulable {
-			status = "SchedulingDisabled"
-		}
-		rows = append(rows, Row{
-			Name:   nd.Name,
-			Status: status,
-			Values: []string{nd.Name, status, nodeRoles(nd), nd.Status.NodeInfo.KubeletVersion, k8s.AgeString(nd.CreationTimestamp)},
-			Raw:    nd,
-		})
-	}
-	return rows, nil
+	return "NotReady"
+}
+
+func nodeStatusCell(o runtime.Object, _ k8s.RowContext) string {
+	return nodeStatus(o.(*corev1.Node))
+}
+
+func nodeRolesCell(o runtime.Object, _ k8s.RowContext) string {
+	return nodeRoles(o.(*corev1.Node))
+}
+
+func nodeVersion(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*corev1.Node).Status.NodeInfo.KubeletVersion
+}
+
+func nodeAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*corev1.Node).CreationTimestamp)
 }
 
 func (node) Fetch(ctx context.Context, c Context, _, name string) (Object, error) {

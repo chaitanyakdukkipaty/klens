@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -28,44 +29,49 @@ func (deployment) Meta() Meta {
 
 func (deployment) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "READY", Width: 10},
-		{Header: "UP-TO-DATE", Width: 12},
-		{Header: "AVAILABLE", Width: 12},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: deploymentName},
+		{Header: "READY", Width: 10, Render: deploymentReady},
+		{Header: "UP-TO-DATE", Width: 12, Render: deploymentUpToDate},
+		{Header: "AVAILABLE", Width: 12, Render: deploymentAvailable},
+		{Header: "AGE", Width: 10, Render: deploymentAge},
 	}
 }
 
-func (d deployment) List(c Context) ([]Row, error) {
-	deps, err := listTyped[*appsv1.Deployment](c, d.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
+func (d deployment) List(c Context) ([]k8s.ResourceRow, error) { return listVia(d, c) }
+
+func (deployment) RowStatus(o runtime.Object) string {
+	d := o.(*appsv1.Deployment)
+	desired := int32(0)
+	if d.Spec.Replicas != nil {
+		desired = *d.Spec.Replicas
 	}
-	rows := make([]Row, 0, len(deps))
-	for _, dp := range deps {
-		desired := int32(0)
-		if dp.Spec.Replicas != nil {
-			desired = *dp.Spec.Replicas
-		}
-		status := "Pending"
-		if dp.Status.AvailableReplicas == desired {
-			status = "Running"
-		}
-		rows = append(rows, Row{
-			Name:      dp.Name,
-			Namespace: dp.Namespace,
-			Status:    status,
-			Values: []string{
-				dp.Name,
-				fmt.Sprintf("%d/%d", dp.Status.ReadyReplicas, desired),
-				fmt.Sprintf("%d", dp.Status.UpdatedReplicas),
-				fmt.Sprintf("%d", dp.Status.AvailableReplicas),
-				k8s.AgeString(dp.CreationTimestamp),
-			},
-			Raw: dp,
-		})
+	if d.Status.AvailableReplicas == desired {
+		return "Running"
 	}
-	return rows, nil
+	return "Pending"
+}
+
+func deploymentName(o runtime.Object, _ k8s.RowContext) string { return o.(*appsv1.Deployment).Name }
+
+func deploymentReady(o runtime.Object, _ k8s.RowContext) string {
+	d := o.(*appsv1.Deployment)
+	desired := int32(0)
+	if d.Spec.Replicas != nil {
+		desired = *d.Spec.Replicas
+	}
+	return fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, desired)
+}
+
+func deploymentUpToDate(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", o.(*appsv1.Deployment).Status.UpdatedReplicas)
+}
+
+func deploymentAvailable(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", o.(*appsv1.Deployment).Status.AvailableReplicas)
+}
+
+func deploymentAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*appsv1.Deployment).CreationTimestamp)
 }
 
 func (deployment) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

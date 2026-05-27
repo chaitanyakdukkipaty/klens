@@ -7,6 +7,7 @@ import (
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -25,28 +26,27 @@ func (secret) Meta() Meta {
 
 func (secret) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "TYPE", Width: 30},
-		{Header: "DATA", Width: 8},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: secretName},
+		{Header: "TYPE", Width: 30, Render: secretType},
+		{Header: "DATA", Width: 8, Render: secretData},
+		{Header: "AGE", Width: 10, Render: secretAge},
 	}
 }
 
-func (s secret) List(c Context) ([]Row, error) {
-	secs, err := listTyped[*corev1.Secret](c, s.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
-	}
-	rows := make([]Row, 0, len(secs))
-	for _, sec := range secs {
-		rows = append(rows, Row{
-			Name:      sec.Name,
-			Namespace: sec.Namespace,
-			Values:    []string{sec.Name, string(sec.Type), fmt.Sprintf("%d", len(sec.Data)), k8s.AgeString(sec.CreationTimestamp)},
-			Raw:       sec,
-		})
-	}
-	return rows, nil
+func (s secret) List(c Context) ([]k8s.ResourceRow, error) { return listVia(s, c) }
+
+func secretName(o runtime.Object, _ k8s.RowContext) string { return o.(*corev1.Secret).Name }
+
+func secretType(o runtime.Object, _ k8s.RowContext) string {
+	return string(o.(*corev1.Secret).Type)
+}
+
+func secretData(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", len(o.(*corev1.Secret).Data))
+}
+
+func secretAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*corev1.Secret).CreationTimestamp)
 }
 
 func (secret) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

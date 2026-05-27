@@ -8,6 +8,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -27,35 +28,32 @@ func (daemonSet) Meta() Meta {
 
 func (daemonSet) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 40, Flex: true},
-		{Header: "DESIRED", Width: 10},
-		{Header: "READY", Width: 8},
-		{Header: "UP-TO-DATE", Width: 12},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 40, Flex: true, Render: daemonSetName},
+		{Header: "DESIRED", Width: 10, Render: daemonSetDesired},
+		{Header: "READY", Width: 8, Render: daemonSetReady},
+		{Header: "UP-TO-DATE", Width: 12, Render: daemonSetUpToDate},
+		{Header: "AGE", Width: 10, Render: daemonSetAge},
 	}
 }
 
-func (d daemonSet) List(c Context) ([]Row, error) {
-	sets, err := listTyped[*appsv1.DaemonSet](c, d.Meta().GVR, c.Namespace)
-	if err != nil {
-		return nil, err
-	}
-	rows := make([]Row, 0, len(sets))
-	for _, ds := range sets {
-		rows = append(rows, Row{
-			Name:      ds.Name,
-			Namespace: ds.Namespace,
-			Values: []string{
-				ds.Name,
-				fmt.Sprintf("%d", ds.Status.DesiredNumberScheduled),
-				fmt.Sprintf("%d", ds.Status.NumberReady),
-				fmt.Sprintf("%d", ds.Status.UpdatedNumberScheduled),
-				k8s.AgeString(ds.CreationTimestamp),
-			},
-			Raw: ds,
-		})
-	}
-	return rows, nil
+func (d daemonSet) List(c Context) ([]k8s.ResourceRow, error) { return listVia(d, c) }
+
+func daemonSetName(o runtime.Object, _ k8s.RowContext) string { return o.(*appsv1.DaemonSet).Name }
+
+func daemonSetDesired(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", o.(*appsv1.DaemonSet).Status.DesiredNumberScheduled)
+}
+
+func daemonSetReady(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", o.(*appsv1.DaemonSet).Status.NumberReady)
+}
+
+func daemonSetUpToDate(o runtime.Object, _ k8s.RowContext) string {
+	return fmt.Sprintf("%d", o.(*appsv1.DaemonSet).Status.UpdatedNumberScheduled)
+}
+
+func daemonSetAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*appsv1.DaemonSet).CreationTimestamp)
 }
 
 func (daemonSet) Fetch(ctx context.Context, c Context, ns, name string) (Object, error) {

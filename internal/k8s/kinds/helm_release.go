@@ -6,6 +6,7 @@ import (
 
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -32,14 +33,138 @@ func (helmRelease) Meta() Meta {
 
 func (helmRelease) Columns() []k8s.Column {
 	return []k8s.Column{
-		{Header: "NAME", Width: 36, Flex: true},
-		{Header: "CHART", Width: 24},
-		{Header: "VERSION", Width: 12},
-		{Header: "READY", Width: 8},
-		{Header: "STATUS", Width: 40},
-		{Header: "SUSPENDED", Width: 10},
-		{Header: "AGE", Width: 10},
+		{Header: "NAME", Width: 36, Flex: true, Render: helmReleaseName},
+		{Header: "CHART", Width: 24, Render: helmReleaseChart},
+		{Header: "VERSION", Width: 12, Render: helmReleaseVersion},
+		{Header: "READY", Width: 8, Render: helmReleaseReady},
+		{Header: "STATUS", Width: 40, Render: helmReleaseStatusMsg},
+		{Header: "SUSPENDED", Width: 10, Render: helmReleaseSuspended},
+		{Header: "AGE", Width: 10, Render: helmReleaseAge},
 	}
+}
+
+// RowStatus drives the color key (Suspended/Ready/NotReady).
+func (helmRelease) RowStatus(o runtime.Object) string {
+	u := o.(*unstructured.Unstructured)
+	if helmReleaseIsSuspended(u) {
+		return "Suspended"
+	}
+	if helmReleaseReadyCond(u) == "True" {
+		return "Ready"
+	}
+	return "NotReady"
+}
+
+func helmReleaseSpec(u *unstructured.Unstructured) map[string]interface{} {
+	s, _ := u.Object["spec"].(map[string]interface{})
+	return s
+}
+
+func helmReleaseChartSpec(u *unstructured.Unstructured) map[string]interface{} {
+	spec := helmReleaseSpec(u)
+	if spec == nil {
+		return nil
+	}
+	chartTop, _ := spec["chart"].(map[string]interface{})
+	if chartTop == nil {
+		return nil
+	}
+	cs, _ := chartTop["spec"].(map[string]interface{})
+	return cs
+}
+
+func helmReleaseIsSuspended(u *unstructured.Unstructured) bool {
+	spec := helmReleaseSpec(u)
+	if spec == nil {
+		return false
+	}
+	v, _ := spec["suspend"].(bool)
+	return v
+}
+
+// helmReleaseReadyCond returns the Ready condition's status ("True"/"False"/etc.)
+// from the resource's status.conditions, defaulting to "False".
+func helmReleaseReadyCond(u *unstructured.Unstructured) string {
+	status, _ := u.Object["status"].(map[string]interface{})
+	if status == nil {
+		return "False"
+	}
+	conds, _ := status["conditions"].([]interface{})
+	for _, c := range conds {
+		cm, _ := c.(map[string]interface{})
+		if cm["type"] != "Ready" {
+			continue
+		}
+		if s, ok := cm["status"].(string); ok {
+			return s
+		}
+	}
+	return "False"
+}
+
+// helmReleaseReadyMessage returns the Ready condition's message, or "-" if
+// unset.
+func helmReleaseReadyMessage(u *unstructured.Unstructured) string {
+	status, _ := u.Object["status"].(map[string]interface{})
+	if status == nil {
+		return "-"
+	}
+	conds, _ := status["conditions"].([]interface{})
+	for _, c := range conds {
+		cm, _ := c.(map[string]interface{})
+		if cm["type"] != "Ready" {
+			continue
+		}
+		if msg, ok := cm["message"].(string); ok && msg != "" {
+			return msg
+		}
+	}
+	return "-"
+}
+
+func helmReleaseName(o runtime.Object, _ k8s.RowContext) string {
+	return o.(*unstructured.Unstructured).GetName()
+}
+
+func helmReleaseChart(o runtime.Object, _ k8s.RowContext) string {
+	cs := helmReleaseChartSpec(o.(*unstructured.Unstructured))
+	if cs == nil {
+		return "-"
+	}
+	if v, ok := cs["chart"].(string); ok && v != "" {
+		return v
+	}
+	return "-"
+}
+
+func helmReleaseVersion(o runtime.Object, _ k8s.RowContext) string {
+	cs := helmReleaseChartSpec(o.(*unstructured.Unstructured))
+	if cs == nil {
+		return "-"
+	}
+	if v, ok := cs["version"].(string); ok && v != "" {
+		return v
+	}
+	return "-"
+}
+
+func helmReleaseReady(o runtime.Object, _ k8s.RowContext) string {
+	return helmReleaseReadyCond(o.(*unstructured.Unstructured))
+}
+
+func helmReleaseStatusMsg(o runtime.Object, _ k8s.RowContext) string {
+	return helmReleaseReadyMessage(o.(*unstructured.Unstructured))
+}
+
+func helmReleaseSuspended(o runtime.Object, _ k8s.RowContext) string {
+	if helmReleaseIsSuspended(o.(*unstructured.Unstructured)) {
+		return "True"
+	}
+	return "False"
+}
+
+func helmReleaseAge(o runtime.Object, _ k8s.RowContext) string {
+	return k8s.AgeString(o.(*unstructured.Unstructured).GetCreationTimestamp())
 }
 
 // gvrFor returns the live discovered GVR if Context carries one, else the
@@ -52,7 +177,7 @@ func (h helmRelease) gvrFor(c Context) schema.GroupVersionResource {
 	return h.Meta().GVR
 }
 
-func (h helmRelease) List(c Context) ([]Row, error) {
+func (h helmRelease) List(c Context) ([]k8s.ResourceRow, error) {
 	if c.Lister == nil {
 		return nil, fmt.Errorf("helmRelease.List: no Lister")
 	}
@@ -60,15 +185,7 @@ func (h helmRelease) List(c Context) ([]Row, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows := make([]Row, 0, len(objs))
-	for _, o := range objs {
-		u, ok := o.(*unstructured.Unstructured)
-		if !ok {
-			continue
-		}
-		rows = append(rows, helmReleaseRow(u))
-	}
-	return rows, nil
+	return RenderRows(h, objs, c.RenderCtx()), nil
 }
 
 // Fetch returns the cached unstructured object via the Lister. The YAML
@@ -94,73 +211,6 @@ func (h helmRelease) Fetch(_ context.Context, c Context, ns, name string) (Objec
 		}
 	}
 	return nil, fmt.Errorf("helmrelease %s/%s not in cache", ns, name)
-}
-
-// helmReleaseRow renders a single unstructured HelmRelease into a Row.
-// Status / chart / version / ready come from nested map fields the API
-// emits; the helper does defensive type assertions on every level.
-func helmReleaseRow(u *unstructured.Unstructured) Row {
-	spec, _ := u.Object["spec"].(map[string]interface{})
-	chart := "-"
-	version := "-"
-	if spec != nil {
-		if chartTop, ok := spec["chart"].(map[string]interface{}); ok {
-			if cs, ok := chartTop["spec"].(map[string]interface{}); ok {
-				if v, ok := cs["chart"].(string); ok && v != "" {
-					chart = v
-				}
-				if v, ok := cs["version"].(string); ok && v != "" {
-					version = v
-				}
-			}
-		}
-	}
-
-	suspended := false
-	if spec != nil {
-		if v, ok := spec["suspend"].(bool); ok {
-			suspended = v
-		}
-	}
-
-	ready := "False"
-	statusMsg := "-"
-	if status, _ := u.Object["status"].(map[string]interface{}); status != nil {
-		if conditions, ok := status["conditions"].([]interface{}); ok {
-			for _, c := range conditions {
-				cm, _ := c.(map[string]interface{})
-				if cm["type"] == "Ready" {
-					if s, ok := cm["status"].(string); ok {
-						ready = s
-					}
-					if msg, ok := cm["message"].(string); ok && msg != "" {
-						statusMsg = msg
-					}
-					break
-				}
-			}
-		}
-	}
-
-	statusKey := "NotReady"
-	switch {
-	case suspended:
-		statusKey = "Suspended"
-	case ready == "True":
-		statusKey = "Ready"
-	}
-	suspendedStr := "False"
-	if suspended {
-		suspendedStr = "True"
-	}
-
-	return Row{
-		Name:      u.GetName(),
-		Namespace: u.GetNamespace(),
-		Status:    statusKey,
-		Values:    []string{u.GetName(), chart, version, ready, statusMsg, suspendedStr, k8s.AgeString(u.GetCreationTimestamp())},
-		Raw:       u,
-	}
 }
 
 func init() { register(helmRelease{}) }

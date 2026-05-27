@@ -41,3 +41,14 @@ type Context struct {
 	// Populated by the model after WatcherFactory.HelmReleaseGVR resolves.
 	HelmGVR schema.GroupVersionResource
 }
+
+// RenderCtx returns the small slice of context a per-cell render closure needs
+// — today the metrics snapshot and the port-forward predicate. The kinds
+// package's Render closures call this through Context, never reaching for
+// the full Context value, so the surface available to a cell is bounded.
+func (c Context) RenderCtx() k8s.RowContext {
+	return k8s.RowContext{
+		Metrics:           c.Metrics,
+		PortForwardActive: c.PFActive,
+	}
+}
