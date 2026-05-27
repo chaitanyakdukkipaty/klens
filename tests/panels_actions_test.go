@@ -6,7 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	k8s "github.com/chaitanyak/klens/internal/k8s"
-	_ "github.com/chaitanyak/klens/internal/ui/panels" // triggers action registration
+	_ "github.com/chaitanyak/klens/internal/k8s/kinds" // triggers shim registration for migrated kinds (Pod, Namespace, …)
+	_ "github.com/chaitanyak/klens/internal/ui/panels" // triggers action registration for unmigrated kinds
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"

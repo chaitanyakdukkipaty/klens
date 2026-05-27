@@ -10,7 +10,8 @@ import (
 	"testing"
 
 	k8s "github.com/chaitanyak/klens/internal/k8s"
-	_ "github.com/chaitanyak/klens/internal/ui/panels" // triggers handler registration
+	_ "github.com/chaitanyak/klens/internal/k8s/kinds" // triggers shim registration for migrated kinds (Pod, Namespace, …)
+	_ "github.com/chaitanyak/klens/internal/ui/panels" // triggers handler registration for unmigrated kinds
 )
 
 // TestResolveRoundtrip — every Kind, Plural, and alias resolves back to the

@@ -36,8 +36,6 @@ func TableAutoScrollTickCmd() tea.Cmd {
 var (
 	tableRowCursorBase = lipgloss.NewStyle().Background(styles.ColorSelection).Foreground(styles.ColorWhite)
 	tableRowBase       = lipgloss.NewStyle()
-	pctFailedStyle     = lipgloss.NewStyle().Foreground(styles.ColorFailed)
-	pctPendingStyle    = lipgloss.NewStyle().Foreground(styles.ColorPending)
 )
 
 // ContentMode controls what is shown in the content panel.
@@ -876,77 +874,11 @@ func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 	return t
 }
 
-// BuildPodRows converts pod list to resource rows.
-// Columns: NAME, PF, READY, STATUS, RESTARTS, AGE, CPU, %CPU/R, %CPU/L, MEM, %MEM/R, %MEM/L
-//
-// pfActive may be nil — in that case the PF column shows the inactive marker
-// for every row.
-func BuildPodRows(pods []*corev1.Pod, metricsData k8sres.MetricsUpdatedMsg, pfActive func(ns, name string) bool) []k8sres.ResourceRow {
-	rows := make([]k8sres.ResourceRow, 0, len(pods))
-	for _, p := range pods {
-		ready := 0
-		total := len(p.Spec.Containers)
-		restarts := 0
-		status := string(p.Status.Phase)
-		waitingFound := false
-		for _, cs := range p.Status.ContainerStatuses {
-			if cs.Ready {
-				ready++
-			}
-			restarts += int(cs.RestartCount)
-			if !waitingFound && cs.State.Waiting != nil {
-				status = cs.State.Waiting.Reason
-				waitingFound = true
-			}
-		}
-		if p.DeletionTimestamp != nil {
-			status = "Terminating"
-		}
-		age := k8sres.AgeString(p.CreationTimestamp)
-
-		cpuStr, cpuRStr, cpuLStr := "n/a", "~", "~"
-		memStr, memRStr, memLStr := "n/a", "~", "~"
-		if rm := metricsData.Pods[p.Namespace+"/"+p.Name]; rm != nil {
-			cpuM := int64(rm.CPULatest)
-			memMi := int64(rm.MEMLatest) / (1024 * 1024)
-			cpuStr = fmt.Sprintf("%d", cpuM)
-			memStr = fmt.Sprintf("%d", memMi)
-			cpuReqM, cpuLimM, memReqB, memLimB := PodResourceTotals(p)
-			cpuRStr = fmtPctColored(cpuM, cpuReqM)
-			cpuLStr = fmtPctColored(cpuM, cpuLimM)
-			memRStr = fmtPctColored(int64(rm.MEMLatest), memReqB)
-			memLStr = fmtPctColored(int64(rm.MEMLatest), memLimB)
-		}
-
-		rows = append(rows, k8sres.ResourceRow{
-			Name:      p.Name,
-			Namespace: p.Namespace,
-			Status:    status,
-			Values: []string{
-				p.Name, pfMarker(pfActive, p.Namespace, p.Name), fmt.Sprintf("%d/%d", ready, total), status, fmt.Sprintf("%d", restarts), age,
-				cpuStr, cpuRStr, cpuLStr, memStr, memRStr, memLStr,
-			},
-			Raw: p,
-		})
-	}
-	return rows
-}
-
-// pfMarker returns the stylized indicator for the PF column. Active sessions
-// render the U+24C5 circled P in the primary accent color; inactive cells
-// show a muted bullet so the column stays visually anchored.
-func pfMarker(pfActive func(ns, name string) bool, ns, name string) string {
-	if pfActive != nil && pfActive(ns, name) {
-		return pfActiveStyle.Render("Ⓟ")
-	}
-	return pfInactiveStyle.Render("•")
-}
-
-var (
-	pfActiveStyle   = styles.Primary.Bold(true)
-	pfInactiveStyle = styles.Muted
-)
-
+// PodResourceTotals sums the per-container request/limit values across all
+// containers in the pod. Used by the metrics panel to compute the percentage
+// graphs alongside latest CPU/MEM samples. Pod row rendering lives in
+// internal/k8s/kinds/pod.go after plan 01; this helper stays here until step
+// 6 of the migration moves it into kinds/pod.go too.
 func PodResourceTotals(p *corev1.Pod) (cpuReqM, cpuLimM, memReqB, memLimB int64) {
 	for _, c := range p.Spec.Containers {
 		if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
@@ -963,29 +895,6 @@ func PodResourceTotals(p *corev1.Pod) (cpuReqM, cpuLimM, memReqB, memLimB int64)
 		}
 	}
 	return
-}
-
-func fmtPct(num, denom int64) string {
-	if denom == 0 {
-		return "~"
-	}
-	return fmt.Sprintf("%d", num*100/denom)
-}
-
-func fmtPctColored(num, denom int64) string {
-	if denom == 0 {
-		return "~"
-	}
-	pct := num * 100 / denom
-	s := fmt.Sprintf("%d", pct)
-	switch {
-	case pct >= 90:
-		return pctFailedStyle.Render(s)
-	case pct >= 70:
-		return pctPendingStyle.Render(s)
-	default:
-		return s
-	}
 }
 
 // Columns: NAME, READY, UP-TO-DATE, AVAILABLE, AGE

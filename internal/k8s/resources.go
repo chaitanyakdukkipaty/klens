@@ -119,19 +119,8 @@ type ResourceRow struct {
 
 // Registry is the static list of all known resource types.
 var Registry = []ResourceDescriptor{
-	{Kind: "Pod", Plural: "pods", Namespaced: true, Aliases: []string{"po"},
-		Columns: []Column{
-				{"NAME", 40, true, false}, {"PF", 3, false, false}, {"READY", 6, false, false}, {"STATUS", 15, false, false}, {"RESTARTS", 9, false, false}, {"AGE", 6, false, false},
-				{"CPU", 6, false, false}, {"%CPU/R", 7, false, false}, {"%CPU/L", 7, false, false},
-				{"MEM", 7, false, false}, {"%MEM/R", 7, false, false}, {"%MEM/L", 7, false, false},
-			},
-		SupportsYAML:        true,
-		SupportsLogs:        true,
-		SupportsMetrics:     true,
-		SupportsAttach:      true,
-		SupportsDeletion:    true,
-		SupportsPortForward: true,
-	},
+	// Pod migrated to internal/k8s/kinds/pod.go (plan 01).
+	// The shim re-registers an equivalent descriptor at init().
 	{Kind: "Deployment", Plural: "deployments", APIGroup: "apps", Namespaced: true, Aliases: []string{"deploy", "dp"},
 		Columns:          []Column{{"NAME", 40, true, false}, {"READY", 10, false, false}, {"UP-TO-DATE", 12, false, false}, {"AVAILABLE", 12, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
@@ -228,11 +217,8 @@ var Registry = []ResourceDescriptor{
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
-	{Kind: "Namespace", Plural: "namespaces", Namespaced: false, Aliases: []string{"ns"},
-		Columns:          []Column{{"NAME", 40, true, false}, {"STATUS", 14, false, false}, {"AGE", 10, false, false}},
-		SupportsYAML:     true,
-		SupportsDeletion: true,
-	},
+	// Namespace migrated to internal/k8s/kinds/namespace.go (plan 01).
+	// The shim re-registers an equivalent descriptor at init().
 	{Kind: "ClusterRole", Plural: "clusterroles", APIGroup: "rbac.authorization.k8s.io", Namespaced: false, Aliases: []string{"cr"},
 		Columns: []Column{{"NAME", 40, true, false}, {"AGE", 10, false, false}},
 	},
@@ -299,6 +285,29 @@ func Resolve(input string) (ResourceDescriptor, bool) {
 		return ResourceDescriptor{}, false
 	}
 	return Registry[i], true
+}
+
+// RegisterDescriptor appends a fully-built descriptor to the Registry and
+// extends aliasMap so future Resolve calls find it. Used by the kinds
+// package shim (plan 01 migration) to register kinds that were removed
+// from the static Registry slice. Returns false if any of the descriptor's
+// keys (kind, plural, alias) is already taken — programmer error.
+func RegisterDescriptor(rd ResourceDescriptor) bool {
+	keys := []string{strings.ToLower(rd.Kind), strings.ToLower(rd.Plural)}
+	for _, a := range rd.Aliases {
+		keys = append(keys, strings.ToLower(a))
+	}
+	for _, k := range keys {
+		if _, exists := aliasMap[k]; exists {
+			return false
+		}
+	}
+	Registry = append(Registry, rd)
+	idx := len(Registry) - 1
+	for _, k := range keys {
+		aliasMap[k] = idx
+	}
+	return true
 }
 
 // SetHandlers attaches behavior closures to the descriptor for `kind`. Returns

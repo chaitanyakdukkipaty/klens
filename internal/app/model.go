@@ -12,6 +12,11 @@ import (
 	"github.com/chaitanyak/klens/internal/cluster"
 	appcfg "github.com/chaitanyak/klens/internal/config"
 	k8sops "github.com/chaitanyak/klens/internal/k8s"
+	// Blank import: triggers the kinds package init that registers migrated
+	// kinds (Namespace, Pod, …) into k8s.Registry via the shim. Without this
+	// the static Registry would be missing entries that were removed in
+	// favor of the per-kind module.
+	_ "github.com/chaitanyak/klens/internal/k8s/kinds"
 	"github.com/chaitanyak/klens/internal/ui/layout"
 	"github.com/chaitanyak/klens/internal/ui/modes"
 	"github.com/chaitanyak/klens/internal/ui/panels"

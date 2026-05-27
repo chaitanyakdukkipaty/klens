@@ -1,9 +1,11 @@
 package klenstests
 
 import (
+	"context"
 	"testing"
 
 	k8s "github.com/chaitanyak/klens/internal/k8s"
+	"github.com/chaitanyak/klens/internal/k8s/kinds"
 	"github.com/chaitanyak/klens/internal/ui/panels"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -12,6 +14,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // rowAlignmentCase is one kind's fixture: a closure that builds rows for a
@@ -36,11 +39,25 @@ func TestRowsAlignWithColumns(t *testing.T) {
 		{
 			kind: "Pod",
 			build: func() []k8s.ResourceRow {
-				return panels.BuildPodRows(
-					[]*corev1.Pod{{ObjectMeta: meta, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}},
-					k8s.MetricsUpdatedMsg{},
-					nil,
+				// Pod row rendering migrated to internal/k8s/kinds/pod.go.
+				// Drive it through Kind.List against a FakeLister so the
+				// alignment invariant still gets tested via the new path.
+				cs := fake.NewSimpleClientset(
+					&corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}},
 				)
+				k, ok := kinds.Lookup("Pod")
+				if !ok {
+					t.Fatalf("kinds.Lookup(Pod) returned false")
+				}
+				rows, err := k.List(kinds.Context{
+					Ctx:       context.Background(),
+					Namespace: "ns",
+					Lister:    k8s.NewFakeLister(cs),
+				})
+				if err != nil {
+					t.Fatalf("kinds Pod.List: %v", err)
+				}
+				return rows
 			},
 		},
 		{

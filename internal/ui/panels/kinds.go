@@ -24,30 +24,9 @@ import (
 // previously had a case in model.listRows / yaml_viewer.fetchObject /
 // model.buildTopology is registered here. New kinds add ONE entry.
 func init() {
-	// Helpers ------------------------------------------------------------
-
-	rows := func(fn func() []k8sres.ResourceRow) []k8sres.ResourceRow { return fn() }
-
-	get := func(getter func(ctx context.Context) (any, error)) (any, error) {
-		return getter(context.Background())
-	}
-
-	// Topology lookup adapters: each searches the cached list for `name`
-	// and delegates to the typed BuildXxxTopology constructor. This is the
-	// shape that used to live as a switch in model.buildTopology.
-	k8sres.SetHandlers("Pod",
-		func(wf *k8sres.WatcherFactory, ns string, ctx k8sres.RowContext) []k8sres.ResourceRow {
-			return rows(func() []k8sres.ResourceRow {
-				return BuildPodRows(k8sres.ListAs[*corev1.Pod](wf, "Pod", ns), ctx.Metrics, ctx.PortForwardActive)
-			})
-		},
-		func(cs kubernetes.Interface, name, ns string) (any, error) {
-			return get(func(c context.Context) (any, error) {
-				return cs.CoreV1().Pods(ns).Get(c, name, metav1.GetOptions{})
-			})
-		},
-		nil,
-	)
+	// Pod migrated to internal/k8s/kinds/pod.go (plan 01).
+	// Topology lookup adapters search the cached list for `name` and
+	// delegate to the typed BuildXxxTopology constructor.
 
 	k8sres.SetHandlers("Deployment",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
@@ -208,14 +187,7 @@ func init() {
 		nil,
 	)
 
-	k8sres.SetHandlers("Namespace",
-		nil,
-		func(cs kubernetes.Interface, name, _ string) (any, error) {
-			return cs.CoreV1().Namespaces().Get(context.Background(), name, metav1.GetOptions{})
-		},
-		nil,
-	)
-
+	// Namespace migrated to internal/k8s/kinds/namespace.go (plan 01).
 	k8sres.SetHandlers("Event",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
 			return BuildEventRows(k8sres.ListAs[*corev1.Event](wf, "Event", ns))
@@ -292,14 +264,7 @@ func scaleAction(call func(d k8sres.ActionDeps, ctx context.Context, body []byte
 }
 
 func registerActions() {
-	// Pod
-	k8sres.RegisterAction("Pod", "delete", deleteAction(func(d k8sres.ActionDeps, ctx context.Context, o metav1.DeleteOptions) error {
-		return d.Clientset.CoreV1().Pods(d.Namespace).Delete(ctx, d.Name, o)
-	}))
-	k8sres.RegisterAction("Pod", "apply", applyAction("Pod", func(d k8sres.ActionDeps, ctx context.Context, body []byte) error {
-		_, err := d.Clientset.CoreV1().Pods(d.Namespace).Patch(ctx, d.Name, types.MergePatchType, body, metav1.PatchOptions{FieldManager: "klens"})
-		return err
-	}))
+	// Pod migrated to internal/k8s/kinds/pod.go (plan 01).
 
 	// Deployment
 	k8sres.RegisterAction("Deployment", "delete", deleteAction(func(d k8sres.ActionDeps, ctx context.Context, o metav1.DeleteOptions) error {
@@ -397,10 +362,7 @@ func registerActions() {
 		return d.Clientset.CoreV1().PersistentVolumes().Delete(ctx, d.Name, o)
 	}))
 
-	// Namespace
-	k8sres.RegisterAction("Namespace", "delete", deleteAction(func(d k8sres.ActionDeps, ctx context.Context, o metav1.DeleteOptions) error {
-		return d.Clientset.CoreV1().Namespaces().Delete(ctx, d.Name, o)
-	}))
+	// Namespace migrated to internal/k8s/kinds/namespace.go (plan 01).
 
 	// HelmRelease — suspend/resume go through the dynamic client.
 	helmSuspendCmd := func(suspend bool) k8sres.Action {
