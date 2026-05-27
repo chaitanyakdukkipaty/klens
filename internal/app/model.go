@@ -13,6 +13,7 @@ import (
 	appcfg "github.com/chaitanyak/klens/internal/config"
 	k8sops "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/ui/layout"
+	"github.com/chaitanyak/klens/internal/ui/modes"
 	"github.com/chaitanyak/klens/internal/ui/panels"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 	"github.com/chaitanyak/klens/internal/ui/widgets"
@@ -52,8 +53,8 @@ type Model struct {
 	yamlView        panels.YAMLViewer
 	yamlEdit        panels.YAMLEditor
 	logView         panels.LogViewer
-	topology        panels.TopologyPanel
-	metrics         panels.MetricsPanel
+	topologyCtrl    modes.TopologyController
+	metricsCtrl     modes.MetricsController
 	confirm         widgets.ConfirmDialog
 	scaleDialog     widgets.ScaleDialog
 	namespacePicker widgets.NamespacePicker
@@ -148,8 +149,8 @@ func New(readOnly bool) Model {
 		yamlView:        panels.NewYAMLViewer(60, 22),
 		yamlEdit:        panels.NewYAMLEditor(60, 22),
 		logView:         panels.NewLogViewer(60, 22),
-		topology:        panels.NewTopologyPanel(60, 22),
-		metrics:         panels.NewMetricsPanel(60, 22),
+		topologyCtrl:    modes.NewTopologyController(panels.NewTopologyPanel(60, 22)),
+		metricsCtrl:     modes.NewMetricsController(panels.NewMetricsPanel(60, 22)),
 		confirm:         widgets.NewConfirmDialog(),
 		scaleDialog:     widgets.NewScaleDialog(),
 		namespacePicker: widgets.NewNamespacePicker(),
@@ -327,8 +328,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case k8sops.MetricsUpdatedMsg:
 		m.metricsData = msg
 		if m.mode == ModeMetrics {
-			var cmd tea.Cmd
-			m.metrics, cmd = m.metrics.Update(msg)
+			next, cmd := m.metricsCtrl.Update(msg)
+			m.metricsCtrl = next.(modes.MetricsController)
 			return m, tea.Batch(cmd, k8sops.MetricsTickCmd())
 		}
 		if m.mode == ModeTable && m.nav.ActiveKind() == "Pod" {
@@ -742,12 +743,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
 			return m, cmd
 		case ModeTopology:
-			var cmd tea.Cmd
-			m.topology, cmd = m.topology.Update(msg)
+			next, cmd := m.topologyCtrl.Update(msg)
+			m.topologyCtrl = next.(modes.TopologyController)
 			return m, cmd
 		case ModeMetrics:
-			var cmd tea.Cmd
-			m.metrics, cmd = m.metrics.Update(msg)
+			next, cmd := m.metricsCtrl.Update(msg)
+			m.metricsCtrl = next.(modes.MetricsController)
 			return m, cmd
 		}
 	}
@@ -917,14 +918,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	if m.mode == ModeTopology {
-		var cmd tea.Cmd
-		m.topology, cmd = m.topology.Update(msg)
+		next, cmd, _ := m.topologyCtrl.HandleKey(msg)
+		m.topologyCtrl = next.(modes.TopologyController)
 		return m, cmd
 	}
 
 	if m.mode == ModeMetrics {
-		var cmd tea.Cmd
-		m.metrics, cmd = m.metrics.Update(msg)
+		next, cmd, _ := m.metricsCtrl.HandleKey(msg)
+		m.metricsCtrl = next.(modes.MetricsController)
 		return m, cmd
 	}
 
@@ -1240,7 +1241,7 @@ func (m Model) actionTopology() (Model, tea.Cmd) {
 	row := m.table.SelectedRow()
 	if row != nil && m.watcher != nil {
 		tree := m.buildTopology(m.nav.ActiveKind(), row.Name)
-		m.topology = m.topology.SetTree(m.nav.ActiveKind(), row.Name, tree)
+		m.topologyCtrl = m.topologyCtrl.SetTree(m.nav.ActiveKind(), row.Name, tree)
 		m.mode = ModeTopology
 		m.focus = FocusContent
 	}
@@ -1254,12 +1255,12 @@ func (m Model) actionMetrics() (Model, tea.Cmd) {
 	}
 	key := row.Namespace + "/" + row.Name
 	rm := m.metricsData.Pods[key]
-	m.metrics = m.metrics.SetResource(row.Name, row.Namespace, rm)
+	m.metricsCtrl = m.metricsCtrl.SetResource(row.Name, row.Namespace, rm)
 	if m.watcher != nil {
 		for _, pod := range m.watcher.ListPods(row.Namespace) {
 			if pod.Name == row.Name {
 				cpuReqM, cpuLimM, memReqB, memLimB := panels.PodResourceTotals(pod)
-				m.metrics = m.metrics.SetLimits(cpuReqM, cpuLimM, memReqB, memLimB)
+				m.metricsCtrl = m.metricsCtrl.SetLimits(cpuReqM, cpuLimM, memReqB, memLimB)
 				break
 			}
 		}
@@ -1832,9 +1833,9 @@ func (m Model) contentView() string {
 	case ModeLogs:
 		return m.logView.View()
 	case ModeTopology:
-		return m.topology.View()
+		return m.topologyCtrl.View()
 	case ModeMetrics:
-		return m.metrics.View()
+		return m.metricsCtrl.View()
 	default:
 		return m.table.View()
 	}
@@ -1874,8 +1875,8 @@ func (m Model) resizePanels() Model {
 	m.yamlView = m.yamlView.SetSize(cw, ch)
 	m.yamlEdit = m.yamlEdit.SetSize(cw, ch)
 	m.logView = m.logView.SetSize(cw, ch)
-	m.topology = m.topology.SetSize(cw, ch)
-	m.metrics = m.metrics.SetSize(cw, ch)
+	m.topologyCtrl = m.topologyCtrl.SetSize(cw, ch).(modes.TopologyController)
+	m.metricsCtrl = m.metricsCtrl.SetSize(cw, ch).(modes.MetricsController)
 
 	m.contextMenu = m.contextMenu.SetSize(termW, termH)
 	m.confirm = m.confirm.SetSize(termW, termH)
