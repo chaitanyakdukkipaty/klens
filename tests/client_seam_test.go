@@ -45,9 +45,9 @@ func TestWatcherFactoryAcceptsFakeClientset(t *testing.T) {
 		t.Fatal("Pod informer never synced from fake clientset")
 	}
 
-	pods := wf.ListPods("ns")
+	pods := k8s.ListAs[*corev1.Pod](wf, "Pod", "ns")
 	if len(pods) != 3 {
-		t.Fatalf("ListPods returned %d pods, want 3", len(pods))
+		t.Fatalf("ListAs[Pod] returned %d pods, want 3", len(pods))
 	}
 }
 

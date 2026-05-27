@@ -25,7 +25,8 @@ func BuildDeploymentTopology(deploy *appsv1.Deployment, wf *WatcherFactory) *Tre
 		Status: deployTopologyStatus(deploy),
 	}
 
-	rss := wf.ListReplicaSets(deploy.Namespace)
+	rss := ListAs[*appsv1.ReplicaSet](wf, "ReplicaSet", deploy.Namespace)
+	pods := ListAs[*corev1.Pod](wf, "Pod", deploy.Namespace)
 	for _, rs := range rss {
 		if !ownedBy(rs.OwnerReferences, deploy.UID) {
 			continue
@@ -35,7 +36,6 @@ func BuildDeploymentTopology(deploy *appsv1.Deployment, wf *WatcherFactory) *Tre
 			Name:   rs.Name,
 			Status: rsStatus(rs),
 		}
-		pods := wf.ListPods(deploy.Namespace)
 		for _, pod := range pods {
 			if !ownedBy(pod.OwnerReferences, rs.UID) {
 				continue
@@ -63,7 +63,7 @@ func BuildServiceTopology(svc *corev1.Service, wf *WatcherFactory) *TreeNode {
 	if svc.Spec.Selector == nil {
 		return root
 	}
-	pods := wf.ListPods(svc.Namespace)
+	pods := ListAs[*corev1.Pod](wf, "Pod", svc.Namespace)
 	for _, pod := range pods {
 		if matchesSelector(pod.Labels, svc.Spec.Selector) {
 			root.Children = append(root.Children, &TreeNode{
@@ -90,8 +90,8 @@ func BuildIngressTopology(ing *networkingv1.Ingress, wf *WatcherFactory) *TreeNo
 		Status: fmt.Sprintf("%d routes", totalRoutes),
 	}
 
-	svcs := wf.ListServices(ing.Namespace)
-	pods := wf.ListPods(ing.Namespace)
+	svcs := ListAs[*corev1.Service](wf, "Service", ing.Namespace)
+	pods := ListAs[*corev1.Pod](wf, "Pod", ing.Namespace)
 
 	for _, rule := range ing.Spec.Rules {
 		host := rule.Host
@@ -196,7 +196,7 @@ func ResolvePodNames(kind, name, namespace string, wf *WatcherFactory) []string 
 		return []string{name}
 
 	case "Deployment":
-		deps := wf.ListDeployments(namespace)
+		deps := ListAs[*appsv1.Deployment](wf, "Deployment", namespace)
 		var depUID interface{}
 		for _, d := range deps {
 			if d.Name == name {
@@ -207,12 +207,13 @@ func ResolvePodNames(kind, name, namespace string, wf *WatcherFactory) []string 
 		if depUID == nil {
 			return nil
 		}
+		pods := ListAs[*corev1.Pod](wf, "Pod", namespace)
 		var podNames []string
-		for _, rs := range wf.ListReplicaSets(namespace) {
+		for _, rs := range ListAs[*appsv1.ReplicaSet](wf, "ReplicaSet", namespace) {
 			if !ownedBy(rs.OwnerReferences, depUID) {
 				continue
 			}
-			for _, pod := range wf.ListPods(namespace) {
+			for _, pod := range pods {
 				if ownedBy(pod.OwnerReferences, rs.UID) {
 					podNames = append(podNames, pod.Name)
 				}
@@ -222,7 +223,7 @@ func ResolvePodNames(kind, name, namespace string, wf *WatcherFactory) []string 
 
 	case "StatefulSet", "DaemonSet", "Job":
 		var names []string
-		for _, pod := range wf.ListPods(namespace) {
+		for _, pod := range ListAs[*corev1.Pod](wf, "Pod", namespace) {
 			for _, ref := range pod.OwnerReferences {
 				if ref.Kind == kind && ref.Name == name {
 					names = append(names, pod.Name)
@@ -234,7 +235,7 @@ func ResolvePodNames(kind, name, namespace string, wf *WatcherFactory) []string 
 
 	case "ReplicaSet":
 		var rsUID interface{}
-		for _, rs := range wf.ListReplicaSets(namespace) {
+		for _, rs := range ListAs[*appsv1.ReplicaSet](wf, "ReplicaSet", namespace) {
 			if rs.Name == name {
 				rsUID = rs.UID
 				break
@@ -244,7 +245,7 @@ func ResolvePodNames(kind, name, namespace string, wf *WatcherFactory) []string 
 			return nil
 		}
 		var names []string
-		for _, pod := range wf.ListPods(namespace) {
+		for _, pod := range ListAs[*corev1.Pod](wf, "Pod", namespace) {
 			if ownedBy(pod.OwnerReferences, rsUID) {
 				names = append(names, pod.Name)
 			}

@@ -864,7 +864,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if m.clusterMgr != nil {
 			clusterNs := m.clusterNamespaces
 			if len(clusterNs) == 0 && m.watcher != nil {
-				clusterNs = m.watcher.ListNamespaces()
+				for _, ns := range k8sops.ListAs[*corev1.Namespace](m.watcher, "Namespace", "") {
+					clusterNs = append(clusterNs, ns.Name)
+				}
 			}
 			savedNs := []string(nil)
 			if m.appConfig != nil {
@@ -1283,7 +1285,7 @@ func (m Model) actionMetrics() (Model, tea.Cmd) {
 	rm := m.metricsData.Pods[key]
 	m.metricsCtrl = m.metricsCtrl.SetResource(row.Name, row.Namespace, rm)
 	if m.watcher != nil {
-		for _, pod := range m.watcher.ListPods(row.Namespace) {
+		for _, pod := range k8sops.ListAs[*corev1.Pod](m.watcher, "Pod", row.Namespace) {
 			if pod.Name == row.Name {
 				cpuReqM, cpuLimM, memReqB, memLimB := panels.PodResourceTotals(pod)
 				m.metricsCtrl = m.metricsCtrl.SetLimits(cpuReqM, cpuLimM, memReqB, memLimB)

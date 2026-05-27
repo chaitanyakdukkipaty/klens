@@ -7,11 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	corev1 "k8s.io/api/core/v1"
-	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
-	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -86,20 +82,17 @@ const coalesceWindow = 100 * time.Millisecond
 
 // WatcherFactory manages SharedIndexInformer instances for one cluster.
 type WatcherFactory struct {
-	factory        informers.SharedInformerFactory
-	dynamicClient  dynamic.Interface
-	dynamicFactory dynamicinformer.DynamicSharedInformerFactory
-	hrGVR          schema.GroupVersionResource
-	restCfg        *rest.Config // stored for async Helm GVR discovery in Start()
-	cancel         context.CancelFunc
-	msgCh          chan tea.Msg
-	started        bool
-	syncing        bool
-	accessDenied   map[string]struct{}
-	kindsSynced    map[string]bool // per-kind initial LIST completion
-	informerKinds  map[string]bool // populated by Start(); single source of truth
-	// for "is this kind informer-backed at all?"
-	mu sync.RWMutex
+	dynamicClient dynamic.Interface
+	registry      *InformerRegistry
+	hrGVR         schema.GroupVersionResource
+	restCfg       *rest.Config // stored for async Helm GVR discovery in Start()
+	cancel        context.CancelFunc
+	msgCh         chan tea.Msg
+	started       bool
+	syncing       bool
+	accessDenied  map[string]struct{}
+	kindsSynced   map[string]bool // per-kind initial LIST completion
+	mu            sync.RWMutex
 
 	// Event coalescing: instead of emitting one ResourceUpdatedMsg per
 	// informer event, dirtyKinds accumulates kinds touched within the last
@@ -133,15 +126,13 @@ func NewWatcherFactory(cs kubernetes.Interface, cfg *rest.Config, namespace stri
 	}
 
 	return &WatcherFactory{
-		factory:        factory,
-		dynamicClient:  dc,
-		dynamicFactory: dynFactory,
-		hrGVR:          helmReleaseGVR, // will be overwritten by async discovery in Start()
-		restCfg:        cfg,
-		msgCh:          msgCh,
-		accessDenied:   make(map[string]struct{}),
-		kindsSynced:    make(map[string]bool),
-		informerKinds:  make(map[string]bool),
+		dynamicClient: dc,
+		registry:      NewInformerRegistry(factory, dynFactory),
+		hrGVR:         helmReleaseGVR, // will be overwritten by async discovery in Start()
+		restCfg:       cfg,
+		msgCh:         msgCh,
+		accessDenied:  make(map[string]struct{}),
+		kindsSynced:   make(map[string]bool),
 	}
 }
 
@@ -204,15 +195,48 @@ func (w *WatcherFactory) IsSyncing() bool {
 // don't run an informer for, returns true so unrelated nav entries don't get
 // stuck on the syncing placeholder.
 //
-// The set of informer-backed kinds is whatever Start() wired into syncList —
-// no parallel hard-coded map to drift out of sync.
+// The set of informer-backed kinds is whatever Start() registered with the
+// InformerRegistry — no parallel hard-coded map to drift out of sync.
 func (w *WatcherFactory) KindSynced(kind string) bool {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	if !w.informerKinds[kind] {
+	if !w.registry.IsRegistered(kind) {
 		return true
 	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	return w.kindsSynced[kind]
+}
+
+// Registry returns the underlying InformerRegistry. Production callers should
+// use ListAs[T] / CachedLister instead; the accessor exists for tests that
+// want to inspect registration state.
+func (w *WatcherFactory) Registry() *InformerRegistry { return w.registry }
+
+// ListAs returns objects of type T from the informer cache for `kind`, optionally
+// filtered by namespace. Items that fail the type assertion are skipped — in
+// practice this only happens when the registry returns *unstructured.Unstructured
+// for a kind and the caller asked for the typed shape, which is a programmer
+// error. Returns nil if the kind is not informer-backed.
+//
+// This is the single seam for reading from the informer cache outside of the
+// CachedLister.List dispatcher. Row builders, topology, and model-side scans
+// all funnel through here, which is why the 17 per-kind List<Kind> methods
+// are no longer needed.
+func ListAs[T runtime.Object](wf *WatcherFactory, kind string, namespace string) []T {
+	if wf == nil || wf.registry == nil {
+		return nil
+	}
+	gvr, ok := wf.registry.GVRFor(kind)
+	if !ok {
+		return nil
+	}
+	objs := wf.registry.List(gvr, namespace)
+	out := make([]T, 0, len(objs))
+	for _, o := range objs {
+		if t, ok := o.(T); ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // markDirty records that an informer for `kind` had an event. The coalesce
@@ -257,6 +281,20 @@ func (w *WatcherFactory) coalesceLoop() {
 	}
 }
 
+// informedKinds is the static list of built-in kinds that get a
+// SharedIndexInformer at startup. The GVR for each comes from the kind's
+// ResourceDescriptor (resources.Registry → GVR()), so adding a new informer
+// is one row here plus one row in Registry.
+//
+// HelmRelease is registered separately because its GVR is discovered against
+// the cluster (v2 / v2beta2 / v2beta1) before the informer can be wired.
+var informedKinds = []string{
+	"Pod", "Service", "Endpoints", "Node", "Namespace", "ConfigMap", "Secret",
+	"ServiceAccount", "PersistentVolume", "PersistentVolumeClaim", "Event",
+	"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob",
+	"Ingress", "NetworkPolicy",
+}
+
 // Start begins all informers. Should be called once per factory lifetime.
 func (w *WatcherFactory) Start() {
 	if w.started {
@@ -270,68 +308,28 @@ func (w *WatcherFactory) Start() {
 	w.mu.Unlock()
 	w.coalesceStop = make(chan struct{})
 
-	// Event handler: mark the kind dirty; the coalesce loop flushes all dirty
-	// kinds every coalesceWindow as a single ResourceUpdatedMsg per kind.
-	handler := func(kind string) cache.ResourceEventHandlerFuncs {
-		mark := func(_ interface{}) { w.markDirty(kind) }
-		return cache.ResourceEventHandlerFuncs{
-			AddFunc:    mark,
-			UpdateFunc: func(_, obj interface{}) { mark(obj) },
-			DeleteFunc: mark,
+	// Reserve HelmRelease so KindSynced("HelmRelease") returns false during
+	// the GVR discovery window. The actual Register call happens once the
+	// discovery goroutine resolves the served version.
+	if w.dynamicClient != nil {
+		w.registry.Reserve("HelmRelease")
+	}
+
+	// Wire all informer-backed kinds through the registry. Each kind's GVR
+	// comes from its ResourceDescriptor; the registry picks the typed factory
+	// for in-scheme GVRs and falls through to the dynamic factory for CRDs.
+	gvrs := make([]schema.GroupVersionResource, 0, len(informedKinds))
+	for _, kind := range informedKinds {
+		rd, ok := Resolve(kind)
+		if !ok {
+			continue
 		}
+		gvr := rd.GVR()
+		gvrs = append(gvrs, gvr)
+		w.wireInformer(w.registry.Register(gvr, kind), gvr)
 	}
 
-	// setup wires an informer with our error handler and event handler before
-	// the factory is started. SetWatchErrorHandler must be called pre-Start.
-	setup := func(informer cache.SharedIndexInformer, kind string) cache.SharedIndexInformer {
-		_ = informer.SetWatchErrorHandler(w.watchErrHandler(kind))
-		informer.AddEventHandler(handler(kind)) //nolint:errcheck
-		return informer
-	}
-
-	// Track each informer alongside its kind so we can wait per-kind below.
-	type kindInformer struct {
-		kind string
-		inf  cache.SharedIndexInformer
-	}
-	syncList := []kindInformer{
-		{"Pod", setup(w.factory.Core().V1().Pods().Informer(), "Pod")},
-		{"Service", setup(w.factory.Core().V1().Services().Informer(), "Service")},
-		{"Endpoints", setup(w.factory.Core().V1().Endpoints().Informer(), "Endpoints")},
-		{"Node", setup(w.factory.Core().V1().Nodes().Informer(), "Node")},
-		{"Namespace", setup(w.factory.Core().V1().Namespaces().Informer(), "Namespace")},
-		{"ConfigMap", setup(w.factory.Core().V1().ConfigMaps().Informer(), "ConfigMap")},
-		{"Secret", setup(w.factory.Core().V1().Secrets().Informer(), "Secret")},
-		{"ServiceAccount", setup(w.factory.Core().V1().ServiceAccounts().Informer(), "ServiceAccount")},
-		{"PersistentVolume", setup(w.factory.Core().V1().PersistentVolumes().Informer(), "PersistentVolume")},
-		{"PersistentVolumeClaim", setup(w.factory.Core().V1().PersistentVolumeClaims().Informer(), "PersistentVolumeClaim")},
-		{"Event", setup(w.factory.Core().V1().Events().Informer(), "Event")},
-		{"Deployment", setup(w.factory.Apps().V1().Deployments().Informer(), "Deployment")},
-		{"StatefulSet", setup(w.factory.Apps().V1().StatefulSets().Informer(), "StatefulSet")},
-		{"DaemonSet", setup(w.factory.Apps().V1().DaemonSets().Informer(), "DaemonSet")},
-		{"ReplicaSet", setup(w.factory.Apps().V1().ReplicaSets().Informer(), "ReplicaSet")},
-		{"Job", setup(w.factory.Batch().V1().Jobs().Informer(), "Job")},
-		{"CronJob", setup(w.factory.Batch().V1().CronJobs().Informer(), "CronJob")},
-		{"Ingress", setup(w.factory.Networking().V1().Ingresses().Informer(), "Ingress")},
-		{"NetworkPolicy", setup(w.factory.Networking().V1().NetworkPolicies().Informer(), "NetworkPolicy")},
-	}
-
-	// Record which kinds are informer-backed so KindSynced can distinguish
-	// "no informer for this kind" (UI does not gate) from "informer pending
-	// initial LIST" (UI shows Syncing). HelmRelease is registered up-front
-	// even though its informer is wired asynchronously below — otherwise
-	// KindSynced("HelmRelease") would briefly return true during the GVR
-	// discovery window, masking the loading state.
-	w.mu.Lock()
-	for _, ki := range syncList {
-		w.informerKinds[ki.kind] = true
-	}
-	if w.dynamicFactory != nil {
-		w.informerKinds["HelmRelease"] = true
-	}
-	w.mu.Unlock()
-
-	w.factory.Start(ctx.Done())
+	w.registry.Start(ctx)
 
 	// Coalesce ticker — drains dirty kinds every coalesceWindow.
 	go w.coalesceLoop()
@@ -341,10 +339,37 @@ func (w *WatcherFactory) Start() {
 	// rest stream KindSyncedMsg events as they each finish their initial LIST,
 	// so the user can navigate to other kinds and see "Syncing <kind>…" until
 	// that informer's data is ready.
-	go func() {
-		// Pods first.
-		pods := w.factory.Core().V1().Pods().Informer()
+	go w.runCacheSyncWaits(ctx, gvrs)
+
+	// Helm GVR discovery and dynamic informer setup run in the background so
+	// that namespace/context switches (which call NewWatcherFactory on the UI
+	// goroutine) are not blocked by the API-server round-trips in
+	// discoverHelmReleaseGVR.
+	go w.runHelmReleaseAsync(ctx)
+}
+
+// wireInformer attaches the watch-error handler and event handler that
+// translate informer events into Bubbletea messages. Both must be set before
+// the informer starts; the registry's Start kicks the factories afterwards.
+func (w *WatcherFactory) wireInformer(informer cache.SharedIndexInformer, gvr schema.GroupVersionResource) {
+	kind := w.registry.KindFor(gvr)
+	_ = informer.SetWatchErrorHandler(w.watchErrHandler(kind))
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{ //nolint:errcheck
+		AddFunc:    func(_ interface{}) { w.markDirty(kind) },
+		UpdateFunc: func(_, _ interface{}) { w.markDirty(kind) },
+		DeleteFunc: func(_ interface{}) { w.markDirty(kind) },
+	})
+}
+
+// runCacheSyncWaits awaits the initial LIST for each registered GVR and
+// emits the corresponding sync message. Pod is the primary informer that
+// drives the "Connecting…" splash via CacheSyncedMsg; everything else
+// streams KindSyncedMsg.
+func (w *WatcherFactory) runCacheSyncWaits(ctx context.Context, gvrs []schema.GroupVersionResource) {
+	podGVR, _ := w.registry.GVRFor("Pod")
+	if pods := w.registry.Informer(podGVR); pods != nil {
 		if cache.WaitForCacheSync(ctx.Done(), pods.HasSynced) {
+			w.registry.MarkSynced(podGVR)
 			w.mu.Lock()
 			w.syncing = false
 			w.kindsSynced["Pod"] = true
@@ -354,38 +379,47 @@ func (w *WatcherFactory) Start() {
 			default:
 			}
 		}
-		// All other kinds, individually so each emits its own event when ready.
-		for _, ki := range syncList {
-			if ki.kind == "Pod" {
-				continue
-			}
-			if cache.WaitForCacheSync(ctx.Done(), ki.inf.HasSynced) {
-				w.mu.Lock()
-				w.kindsSynced[ki.kind] = true
-				w.mu.Unlock()
-				select {
-				case w.msgCh <- KindSyncedMsg{Kind: ki.kind}:
-				default:
-				}
+	}
+	for _, gvr := range gvrs {
+		if gvr == podGVR {
+			continue
+		}
+		inf := w.registry.Informer(gvr)
+		if inf == nil {
+			continue
+		}
+		if cache.WaitForCacheSync(ctx.Done(), inf.HasSynced) {
+			w.registry.MarkSynced(gvr)
+			kind := w.registry.KindFor(gvr)
+			w.mu.Lock()
+			w.kindsSynced[kind] = true
+			w.mu.Unlock()
+			select {
+			case w.msgCh <- KindSyncedMsg{Kind: kind}:
+			default:
 			}
 		}
-	}()
+	}
+}
 
-	// Helm GVR discovery and dynamic informer setup run in the background so that
-	// namespace/context switches (which call NewWatcherFactory on the UI goroutine)
-	// are not blocked by the API-server round-trips in discoverHelmReleaseGVR.
-	go func() {
-		if w.dynamicFactory == nil {
-			return
-		}
-		gvr := discoverHelmReleaseGVR(w.restCfg)
-		w.mu.Lock()
-		w.hrGVR = gvr
-		w.mu.Unlock()
-		// SetWatchErrorHandler must be called before dynamicFactory.Start().
-		setup(w.dynamicFactory.ForResource(gvr).Informer(), "HelmRelease")
-		w.dynamicFactory.Start(ctx.Done())
-		w.dynamicFactory.WaitForCacheSync(ctx.Done())
+// runHelmReleaseAsync discovers the FluxCD HelmRelease GVR, registers the
+// dynamic informer through the same registry path as the built-in kinds,
+// and awaits its initial LIST. Failure modes (no FluxCD installed, no
+// permission) surface as AccessDeniedMsg via the registered watch-error
+// handler — the same code path as any other kind.
+func (w *WatcherFactory) runHelmReleaseAsync(ctx context.Context) {
+	if w.dynamicClient == nil {
+		return
+	}
+	gvr := discoverHelmReleaseGVR(w.restCfg)
+	w.mu.Lock()
+	w.hrGVR = gvr
+	w.mu.Unlock()
+	informer := w.registry.Register(gvr, "HelmRelease")
+	w.wireInformer(informer, gvr)
+	w.registry.Start(ctx)
+	if cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		w.registry.MarkSynced(gvr)
 		w.mu.Lock()
 		w.kindsSynced["HelmRelease"] = true
 		w.mu.Unlock()
@@ -393,7 +427,7 @@ func (w *WatcherFactory) Start() {
 		case w.msgCh <- KindSyncedMsg{Kind: "HelmRelease"}:
 		default:
 		}
-	}()
+	}
 }
 
 // Stop cancels the informers and goroutines for this factory.
@@ -409,215 +443,6 @@ func (w *WatcherFactory) Stop() {
 	if w.cancel != nil {
 		w.cancel()
 	}
-}
-
-// ListPods returns pods from the informer cache for the given namespace.
-func (w *WatcherFactory) ListPods(namespace string) []*corev1.Pod {
-	objs := w.factory.Core().V1().Pods().Informer().GetStore().List()
-	out := make([]*corev1.Pod, 0, len(objs))
-	for _, o := range objs {
-		pod := o.(*corev1.Pod)
-		if namespace == "" || namespace == "all" || pod.Namespace == namespace {
-			out = append(out, pod)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListDeployments(namespace string) []*appsv1.Deployment {
-	objs := w.factory.Apps().V1().Deployments().Informer().GetStore().List()
-	out := make([]*appsv1.Deployment, 0, len(objs))
-	for _, o := range objs {
-		d := o.(*appsv1.Deployment)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListServices(namespace string) []*corev1.Service {
-	objs := w.factory.Core().V1().Services().Informer().GetStore().List()
-	out := make([]*corev1.Service, 0, len(objs))
-	for _, o := range objs {
-		svc := o.(*corev1.Service)
-		if namespace == "" || namespace == "all" || svc.Namespace == namespace {
-			out = append(out, svc)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListNodes() []*corev1.Node {
-	objs := w.factory.Core().V1().Nodes().Informer().GetStore().List()
-	out := make([]*corev1.Node, 0, len(objs))
-	for _, o := range objs {
-		out = append(out, o.(*corev1.Node))
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListStatefulSets(namespace string) []*appsv1.StatefulSet {
-	objs := w.factory.Apps().V1().StatefulSets().Informer().GetStore().List()
-	out := make([]*appsv1.StatefulSet, 0)
-	for _, o := range objs {
-		d := o.(*appsv1.StatefulSet)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListDaemonSets(namespace string) []*appsv1.DaemonSet {
-	objs := w.factory.Apps().V1().DaemonSets().Informer().GetStore().List()
-	out := make([]*appsv1.DaemonSet, 0)
-	for _, o := range objs {
-		d := o.(*appsv1.DaemonSet)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListReplicaSets(namespace string) []*appsv1.ReplicaSet {
-	objs := w.factory.Apps().V1().ReplicaSets().Informer().GetStore().List()
-	out := make([]*appsv1.ReplicaSet, 0)
-	for _, o := range objs {
-		d := o.(*appsv1.ReplicaSet)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListJobs(namespace string) []*batchv1.Job {
-	objs := w.factory.Batch().V1().Jobs().Informer().GetStore().List()
-	out := make([]*batchv1.Job, 0)
-	for _, o := range objs {
-		d := o.(*batchv1.Job)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListCronJobs(namespace string) []*batchv1.CronJob {
-	objs := w.factory.Batch().V1().CronJobs().Informer().GetStore().List()
-	out := make([]*batchv1.CronJob, 0)
-	for _, o := range objs {
-		d := o.(*batchv1.CronJob)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListIngresses(namespace string) []*networkingv1.Ingress {
-	objs := w.factory.Networking().V1().Ingresses().Informer().GetStore().List()
-	out := make([]*networkingv1.Ingress, 0)
-	for _, o := range objs {
-		d := o.(*networkingv1.Ingress)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListConfigMaps(namespace string) []*corev1.ConfigMap {
-	objs := w.factory.Core().V1().ConfigMaps().Informer().GetStore().List()
-	out := make([]*corev1.ConfigMap, 0)
-	for _, o := range objs {
-		d := o.(*corev1.ConfigMap)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListSecrets(namespace string) []*corev1.Secret {
-	objs := w.factory.Core().V1().Secrets().Informer().GetStore().List()
-	out := make([]*corev1.Secret, 0)
-	for _, o := range objs {
-		d := o.(*corev1.Secret)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListPersistentVolumes() []*corev1.PersistentVolume {
-	objs := w.factory.Core().V1().PersistentVolumes().Informer().GetStore().List()
-	out := make([]*corev1.PersistentVolume, 0)
-	for _, o := range objs {
-		out = append(out, o.(*corev1.PersistentVolume))
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListPVCs(namespace string) []*corev1.PersistentVolumeClaim {
-	objs := w.factory.Core().V1().PersistentVolumeClaims().Informer().GetStore().List()
-	out := make([]*corev1.PersistentVolumeClaim, 0)
-	for _, o := range objs {
-		d := o.(*corev1.PersistentVolumeClaim)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func (w *WatcherFactory) ListEvents(namespace string) []*corev1.Event {
-	objs := w.factory.Core().V1().Events().Informer().GetStore().List()
-	out := make([]*corev1.Event, 0)
-	for _, o := range objs {
-		d := o.(*corev1.Event)
-		if namespace == "" || namespace == "all" || d.Namespace == namespace {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// ListNamespaces returns namespace names from the informer cache.
-// Returns an empty slice if the user lacks cluster-wide namespace listing permission.
-func (w *WatcherFactory) ListNamespaces() []string {
-	objs := w.factory.Core().V1().Namespaces().Informer().GetStore().List()
-	out := make([]string, 0, len(objs))
-	for _, o := range objs {
-		out = append(out, o.(*corev1.Namespace).Name)
-	}
-	return out
-}
-
-// ListHelmReleases returns FluxCD HelmRelease objects from the dynamic informer cache.
-func (w *WatcherFactory) ListHelmReleases(namespace string) []*unstructured.Unstructured {
-	if w.dynamicFactory == nil {
-		return nil
-	}
-	w.mu.RLock()
-	gvr := w.hrGVR
-	w.mu.RUnlock()
-	objs := w.dynamicFactory.ForResource(gvr).Informer().GetStore().List()
-	out := make([]*unstructured.Unstructured, 0, len(objs))
-	for _, o := range objs {
-		u, ok := o.(*unstructured.Unstructured)
-		if !ok {
-			continue
-		}
-		if namespace != "" && namespace != "all" && u.GetNamespace() != namespace {
-			continue
-		}
-		out = append(out, u)
-	}
-	return out
 }
 
 // WatchCmd returns a tea.Cmd that reads from msgCh and relays to the Bubbletea loop.

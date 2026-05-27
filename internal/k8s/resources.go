@@ -132,7 +132,7 @@ var Registry = []ResourceDescriptor{
 		SupportsDeletion:    true,
 		SupportsPortForward: true,
 	},
-	{Kind: "Deployment", Plural: "deployments", Namespaced: true, Aliases: []string{"deploy", "dp"},
+	{Kind: "Deployment", Plural: "deployments", APIGroup: "apps", Namespaced: true, Aliases: []string{"deploy", "dp"},
 		Columns:          []Column{{"NAME", 40, true, false}, {"READY", 10, false, false}, {"UP-TO-DATE", 12, false, false}, {"AVAILABLE", 12, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
@@ -140,33 +140,33 @@ var Registry = []ResourceDescriptor{
 		SupportsScale:    true,
 		SupportsDeletion: true,
 	},
-	{Kind: "StatefulSet", Plural: "statefulsets", Namespaced: true, Aliases: []string{"sts"},
+	{Kind: "StatefulSet", Plural: "statefulsets", APIGroup: "apps", Namespaced: true, Aliases: []string{"sts"},
 		Columns:          []Column{{"NAME", 40, true, false}, {"READY", 10, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsScale:    true,
 		SupportsDeletion: true,
 	},
-	{Kind: "DaemonSet", Plural: "daemonsets", Namespaced: true, Aliases: []string{"ds"},
+	{Kind: "DaemonSet", Plural: "daemonsets", APIGroup: "apps", Namespaced: true, Aliases: []string{"ds"},
 		Columns:          []Column{{"NAME", 40, true, false}, {"DESIRED", 10, false, false}, {"READY", 8, false, false}, {"UP-TO-DATE", 12, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsDeletion: true,
 	},
-	{Kind: "ReplicaSet", Plural: "replicasets", Namespaced: true, Aliases: []string{"rs"},
+	{Kind: "ReplicaSet", Plural: "replicasets", APIGroup: "apps", Namespaced: true, Aliases: []string{"rs"},
 		Columns:          []Column{{"NAME", 40, true, false}, {"DESIRED", 10, false, false}, {"CURRENT", 10, false, false}, {"READY", 8, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsScale:    true,
 		SupportsDeletion: true,
 	},
-	{Kind: "Job", Plural: "jobs", Namespaced: true, Aliases: []string{"jo"},
+	{Kind: "Job", Plural: "jobs", APIGroup: "batch", Namespaced: true, Aliases: []string{"jo"},
 		Columns:          []Column{{"NAME", 40, true, false}, {"COMPLETIONS", 14, false, false}, {"DURATION", 12, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
 		SupportsLogs:     true,
 		SupportsDeletion: true,
 	},
-	{Kind: "CronJob", Plural: "cronjobs", Namespaced: true, Aliases: []string{"cj"},
+	{Kind: "CronJob", Plural: "cronjobs", APIGroup: "batch", Namespaced: true, Aliases: []string{"cj"},
 		Columns:          []Column{{"NAME", 40, true, false}, {"SCHEDULE", 20, false, false}, {"LAST SCHEDULE", 16, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
 		SupportsDeletion: true,
@@ -180,7 +180,7 @@ var Registry = []ResourceDescriptor{
 	{Kind: "Endpoints", Plural: "endpoints", Namespaced: true, Aliases: []string{"ep"},
 		Columns: []Column{{"NAME", 40, true, false}, {"ENDPOINTS", 40, false, false}, {"AGE", 10, false, false}},
 	},
-	{Kind: "Ingress", Plural: "ingresses", Namespaced: true, Aliases: []string{"ing"},
+	{Kind: "Ingress", Plural: "ingresses", APIGroup: "networking.k8s.io", Namespaced: true, Aliases: []string{"ing"},
 		Columns:          []Column{{"NAME", 35, true, false}, {"ADDRESSES", 22, false, false}, {"RULES", 40, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML:     true,
 		SupportsTopology: true,
@@ -205,10 +205,10 @@ var Registry = []ResourceDescriptor{
 		SupportsYAML:     true,
 		SupportsDeletion: true,
 	},
-	{Kind: "HorizontalPodAutoscaler", Plural: "horizontalpodautoscalers", Namespaced: true, Aliases: []string{"hpa"},
+	{Kind: "HorizontalPodAutoscaler", Plural: "horizontalpodautoscalers", APIGroup: "autoscaling", Namespaced: true, Aliases: []string{"hpa"},
 		Columns: []Column{{"NAME", 40, true, false}, {"REFERENCE", 30, false, false}, {"TARGETS", 20, false, false}, {"MIN", 6, false, false}, {"MAX", 6, false, false}, {"AGE", 10, false, false}},
 	},
-	{Kind: "NetworkPolicy", Plural: "networkpolicies", Namespaced: true, Aliases: []string{"netpol"},
+	{Kind: "NetworkPolicy", Plural: "networkpolicies", APIGroup: "networking.k8s.io", Namespaced: true, Aliases: []string{"netpol"},
 		Columns: []Column{{"NAME", 40, true, false}, {"POD-SELECTOR", 30, false, false}, {"AGE", 10, false, false}},
 	},
 	{Kind: "Role", Plural: "roles", APIGroup: "rbac.authorization.k8s.io", Namespaced: true, Aliases: []string{"role"},
@@ -239,7 +239,7 @@ var Registry = []ResourceDescriptor{
 	{Kind: "ClusterRoleBinding", Plural: "clusterrolebindings", APIGroup: "rbac.authorization.k8s.io", Namespaced: false, Aliases: []string{"crb"},
 		Columns: []Column{{"NAME", 40, true, false}, {"ROLE", 30, false, false}, {"AGE", 10, false, false}},
 	},
-	{Kind: "StorageClass", Plural: "storageclasses", Namespaced: false, Aliases: []string{"sc"},
+	{Kind: "StorageClass", Plural: "storageclasses", APIGroup: "storage.k8s.io", Namespaced: false, Aliases: []string{"sc"},
 		Columns: []Column{{"NAME", 40, true, false}, {"PROVISIONER", 30, false, false}, {"AGE", 10, false, false}},
 	},
 	{Kind: "Event", Plural: "events", Namespaced: true, Aliases: []string{"ev"},
@@ -259,6 +259,23 @@ var Registry = []ResourceDescriptor{
 		Columns:      []Column{{"NAME", 36, true, false}, {"CHART", 24, false, false}, {"VERSION", 12, false, false}, {"READY", 8, false, false}, {"STATUS", 40, false, false}, {"SUSPENDED", 10, false, false}, {"AGE", 10, false, false}},
 		SupportsYAML: true,
 	},
+}
+
+// GVR returns the GroupVersionResource for this descriptor. APIVersion
+// defaults to "v1"; APIGroup defaults to "" (core). Resource is the Plural.
+// HelmRelease's version is discovered at runtime — its descriptor's value is
+// the v2 default; callers that care about the live version go through
+// WatcherFactory.HelmReleaseGVR instead.
+func (rd ResourceDescriptor) GVR() schema.GroupVersionResource {
+	v := rd.APIVersion
+	if v == "" {
+		v = "v1"
+	}
+	return schema.GroupVersionResource{
+		Group:    rd.APIGroup,
+		Version:  v,
+		Resource: rd.Plural,
+	}
 }
 
 // aliasMap maps alias/kind (lowercase) → ResourceDescriptor index.

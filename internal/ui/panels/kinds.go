@@ -8,8 +8,13 @@ import (
 	tea "charm.land/bubbletea/v2"
 	k8sres "github.com/chaitanyak/klens/internal/k8s"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	sigsyaml "sigs.k8s.io/yaml"
@@ -33,7 +38,7 @@ func init() {
 	k8sres.SetHandlers("Pod",
 		func(wf *k8sres.WatcherFactory, ns string, ctx k8sres.RowContext) []k8sres.ResourceRow {
 			return rows(func() []k8sres.ResourceRow {
-				return BuildPodRows(wf.ListPods(ns), ctx.Metrics, ctx.PortForwardActive)
+				return BuildPodRows(k8sres.ListAs[*corev1.Pod](wf, "Pod", ns), ctx.Metrics, ctx.PortForwardActive)
 			})
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
@@ -46,13 +51,13 @@ func init() {
 
 	k8sres.SetHandlers("Deployment",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildDeploymentRows(wf.ListDeployments(ns))
+			return BuildDeploymentRows(k8sres.ListAs[*appsv1.Deployment](wf, "Deployment", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().Deployments(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(wf *k8sres.WatcherFactory, ns, name string) *k8sres.TreeNode {
-			for _, d := range wf.ListDeployments(ns) {
+			for _, d := range k8sres.ListAs[*appsv1.Deployment](wf, "Deployment", ns) {
 				if d.Name == name {
 					return k8sres.BuildDeploymentTopology(d, wf)
 				}
@@ -63,7 +68,7 @@ func init() {
 
 	k8sres.SetHandlers("StatefulSet",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildStatefulSetRows(wf.ListStatefulSets(ns))
+			return BuildStatefulSetRows(k8sres.ListAs[*appsv1.StatefulSet](wf, "StatefulSet", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().StatefulSets(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -73,7 +78,7 @@ func init() {
 
 	k8sres.SetHandlers("DaemonSet",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildDaemonSetRows(wf.ListDaemonSets(ns))
+			return BuildDaemonSetRows(k8sres.ListAs[*appsv1.DaemonSet](wf, "DaemonSet", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().DaemonSets(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -83,7 +88,7 @@ func init() {
 
 	k8sres.SetHandlers("ReplicaSet",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildReplicaSetRows(wf.ListReplicaSets(ns))
+			return BuildReplicaSetRows(k8sres.ListAs[*appsv1.ReplicaSet](wf, "ReplicaSet", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.AppsV1().ReplicaSets(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -93,7 +98,7 @@ func init() {
 
 	k8sres.SetHandlers("Job",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildJobRows(wf.ListJobs(ns))
+			return BuildJobRows(k8sres.ListAs[*batchv1.Job](wf, "Job", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.BatchV1().Jobs(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -103,7 +108,7 @@ func init() {
 
 	k8sres.SetHandlers("CronJob",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildCronJobRows(wf.ListCronJobs(ns))
+			return BuildCronJobRows(k8sres.ListAs[*batchv1.CronJob](wf, "CronJob", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.BatchV1().CronJobs(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -113,13 +118,13 @@ func init() {
 
 	k8sres.SetHandlers("Service",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildServiceRows(wf.ListServices(ns))
+			return BuildServiceRows(k8sres.ListAs[*corev1.Service](wf, "Service", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().Services(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(wf *k8sres.WatcherFactory, ns, name string) *k8sres.TreeNode {
-			for _, s := range wf.ListServices(ns) {
+			for _, s := range k8sres.ListAs[*corev1.Service](wf, "Service", ns) {
 				if s.Name == name {
 					return k8sres.BuildServiceTopology(s, wf)
 				}
@@ -130,13 +135,13 @@ func init() {
 
 	k8sres.SetHandlers("Ingress",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildIngressRows(wf.ListIngresses(ns))
+			return BuildIngressRows(k8sres.ListAs[*networkingv1.Ingress](wf, "Ingress", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.NetworkingV1().Ingresses(ns).Get(context.Background(), name, metav1.GetOptions{})
 		},
 		func(wf *k8sres.WatcherFactory, ns, name string) *k8sres.TreeNode {
-			for _, ing := range wf.ListIngresses(ns) {
+			for _, ing := range k8sres.ListAs[*networkingv1.Ingress](wf, "Ingress", ns) {
 				if ing.Name == name {
 					return k8sres.BuildIngressTopology(ing, wf)
 				}
@@ -147,7 +152,7 @@ func init() {
 
 	k8sres.SetHandlers("ConfigMap",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildConfigMapRows(wf.ListConfigMaps(ns))
+			return BuildConfigMapRows(k8sres.ListAs[*corev1.ConfigMap](wf, "ConfigMap", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().ConfigMaps(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -157,7 +162,7 @@ func init() {
 
 	k8sres.SetHandlers("Secret",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildSecretRows(wf.ListSecrets(ns))
+			return BuildSecretRows(k8sres.ListAs[*corev1.Secret](wf, "Secret", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().Secrets(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -175,7 +180,7 @@ func init() {
 
 	k8sres.SetHandlers("Node",
 		func(wf *k8sres.WatcherFactory, _ string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildNodeRows(wf.ListNodes())
+			return BuildNodeRows(k8sres.ListAs[*corev1.Node](wf, "Node", ""))
 		},
 		func(cs kubernetes.Interface, name, _ string) (any, error) {
 			return cs.CoreV1().Nodes().Get(context.Background(), name, metav1.GetOptions{})
@@ -185,7 +190,7 @@ func init() {
 
 	k8sres.SetHandlers("PersistentVolumeClaim",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildPVCRows(wf.ListPVCs(ns))
+			return BuildPVCRows(k8sres.ListAs[*corev1.PersistentVolumeClaim](wf, "PersistentVolumeClaim", ns))
 		},
 		func(cs kubernetes.Interface, name, ns string) (any, error) {
 			return cs.CoreV1().PersistentVolumeClaims(ns).Get(context.Background(), name, metav1.GetOptions{})
@@ -195,7 +200,7 @@ func init() {
 
 	k8sres.SetHandlers("PersistentVolume",
 		func(wf *k8sres.WatcherFactory, _ string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildPVRows(wf.ListPersistentVolumes())
+			return BuildPVRows(k8sres.ListAs[*corev1.PersistentVolume](wf, "PersistentVolume", ""))
 		},
 		func(cs kubernetes.Interface, name, _ string) (any, error) {
 			return cs.CoreV1().PersistentVolumes().Get(context.Background(), name, metav1.GetOptions{})
@@ -213,7 +218,7 @@ func init() {
 
 	k8sres.SetHandlers("Event",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildEventRows(wf.ListEvents(ns))
+			return BuildEventRows(k8sres.ListAs[*corev1.Event](wf, "Event", ns))
 		},
 		nil,
 		nil,
@@ -221,7 +226,7 @@ func init() {
 
 	k8sres.SetHandlers("HelmRelease",
 		func(wf *k8sres.WatcherFactory, ns string, _ k8sres.RowContext) []k8sres.ResourceRow {
-			return BuildHelmReleaseRows(wf.ListHelmReleases(ns))
+			return BuildHelmReleaseRows(k8sres.ListAs[*unstructured.Unstructured](wf, "HelmRelease", ns))
 		},
 		nil, // HelmRelease YAML uses the cached unstructured (FetchHelmReleaseYAMLCmd)
 		nil,
