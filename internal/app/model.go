@@ -52,7 +52,7 @@ type Model struct {
 	table           panels.ResourceTable
 	yamlView        panels.YAMLViewer
 	yamlEdit        panels.YAMLEditor
-	logView         panels.LogViewer
+	logsCtrl        modes.LogsController
 	topologyCtrl    modes.TopologyController
 	metricsCtrl     modes.MetricsController
 	confirm         widgets.ConfirmDialog
@@ -148,7 +148,7 @@ func New(readOnly bool) Model {
 		table:           panels.NewResourceTable(60, 22),
 		yamlView:        panels.NewYAMLViewer(60, 22),
 		yamlEdit:        panels.NewYAMLEditor(60, 22),
-		logView:         panels.NewLogViewer(60, 22),
+		logsCtrl:        modes.NewLogsController(panels.NewLogViewer(60, 22)),
 		topologyCtrl:    modes.NewTopologyController(panels.NewTopologyPanel(60, 22)),
 		metricsCtrl:     modes.NewMetricsController(panels.NewMetricsPanel(60, 22)),
 		confirm:         widgets.NewConfirmDialog(),
@@ -305,10 +305,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, k8sops.MetricsTickCmd()
 
 	case panels.LogAutoScrollTickMsg:
-		if m.mode != ModeLogs || !m.logView.IsDragging() {
+		if m.mode != ModeLogs || !m.logsCtrl.IsDragging() {
 			return m, nil
 		}
-		m.logView = m.logView.AutoScrollStep()
+		m.logsCtrl = m.logsCtrl.AutoScrollStep()
 		return m, panels.LogAutoScrollTickCmd()
 
 	case panels.YAMLAutoScrollTickMsg:
@@ -341,8 +341,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, k8sops.MetricsTickCmd()
 
 	case k8sops.LogLineMsg:
-		var cmd tea.Cmd
-		m.logView, cmd = m.logView.Update(msg)
+		next, cmd := m.logsCtrl.Update(msg)
+		m.logsCtrl = next.(modes.LogsController)
 		if m.mode == ModeLogs {
 			return m, tea.Batch(cmd, m.logStreamer.ReadCmd())
 		}
@@ -496,8 +496,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Bracketed paste — route to whichever input is currently capturing.
 		switch m.mode {
 		case ModeLogs:
-			var cmd tea.Cmd
-			m.logView, cmd = m.logView.Update(msg)
+			next, cmd := m.logsCtrl.Update(msg)
+			m.logsCtrl = next.(modes.LogsController)
 			return m, cmd
 		case ModeEditor:
 			var cmd tea.Cmd
@@ -640,7 +640,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				localX := mouse.X - ox
 				localY := mouse.Y - oy
 				var started bool
-				m.logView, started = m.logView.HandleMouseDown(localX, localY)
+				m.logsCtrl, started = m.logsCtrl.HandleMouseDown(localX, localY)
 				if started {
 					if m.focus != FocusContent {
 						m.focus = FocusContent
@@ -649,7 +649,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, panels.LogAutoScrollTickCmd()
 				}
 				var hit bool
-				m.logView, hit = m.logView.HandleClickAt(localX, localY)
+				m.logsCtrl, hit = m.logsCtrl.HandleClickAt(localX, localY)
 				if hit {
 					if m.focus != FocusContent {
 						m.focus = FocusContent
@@ -673,13 +673,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ModeLogs:
 				if motion, ok := msg.(tea.MouseMotionMsg); ok {
 					mp := motion.Mouse()
-					m.logView = m.logView.HandleMouseDrag(mp.X-ox, mp.Y-oy)
+					m.logsCtrl = m.logsCtrl.HandleMouseDrag(mp.X-ox, mp.Y-oy)
 					return m, nil
 				}
 				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
 					mp := release.Mouse()
 					var status string
-					m.logView, status = m.logView.HandleMouseUp(mp.X-ox, mp.Y-oy)
+					m.logsCtrl, status = m.logsCtrl.HandleMouseUp(mp.X-ox, mp.Y-oy)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -731,8 +731,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, cmd
 		case ModeLogs:
-			var cmd tea.Cmd
-			m.logView, cmd = m.logView.Update(msg)
+			next, cmd := m.logsCtrl.Update(msg)
+			m.logsCtrl = next.(modes.LogsController)
 			return m, cmd
 		case ModeYAML:
 			var cmd tea.Cmd
@@ -789,10 +789,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.yamlEdit, cmd = m.yamlEdit.Update(msg)
 			return m, cmd
 		}
-		if m.mode == ModeLogs && m.logView.IsCapturingInput() {
-			var cmd tea.Cmd
-			m.logView, cmd = m.logView.Update(msg)
-			return m, cmd
+		if m.mode == ModeLogs {
+			next, cmd, consumed := m.logsCtrl.HandleKey(msg)
+			m.logsCtrl = next.(modes.LogsController)
+			if consumed {
+				return m, cmd
+			}
 		}
 		if m.table.FilterActive() {
 			var cmd tea.Cmd
@@ -817,10 +819,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 		// Peel log viewer state (filter input, search, podFilter, split layout)
 		// BEFORE peeling fullscreen — otherwise an open filter input would be
-		// destroyed by an exit-fullscreen we didn't want.
-		if m.mode == ModeLogs && m.logView.HasActiveState() {
-			m.logView = m.logView.HandleEsc()
-			return m, nil
+		// destroyed by an exit-fullscreen we didn't want. The controller
+		// returns consumed=true when there was a layer to peel; false means
+		// nothing left to peel and we should fall through to the fullscreen
+		// / mode-exit cascade below.
+		if m.mode == ModeLogs {
+			next, cmd, consumed := m.logsCtrl.HandleKey(msg)
+			m.logsCtrl = next.(modes.LogsController)
+			if consumed {
+				return m, cmd
+			}
 		}
 		// Peel fullscreen if active — return to normal layout, stay in mode.
 		if m.fullScreen {
@@ -909,9 +917,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	if m.mode == ModeLogs {
-		var cmd tea.Cmd
-		m.logView, cmd = m.logView.Update(msg)
-		if s := m.logView.ConsumeStatusMsg(); s != "" {
+		next, cmd, _ := m.logsCtrl.HandleKey(msg)
+		m.logsCtrl = next.(modes.LogsController)
+		var s string
+		m.logsCtrl, s = m.logsCtrl.ConsumeStatusMsg()
+		if s != "" {
 			m.statusBar = m.statusBar.SetMessage(s)
 		}
 		return m, cmd
@@ -1228,7 +1238,7 @@ func (m Model) actionLogs() (Model, tea.Cmd) {
 			streamer := k8sops.NewLogStreamer(cs, m.namespace)
 			streamer.StartGrouped(groups)
 			m.logStreamer = streamer
-			m.logView = m.logView.SetPodGroups(groups)
+			m.logsCtrl = m.logsCtrl.SetPodGroups(groups)
 			m.mode = ModeLogs
 			m.focus = FocusContent
 			return m, streamer.ReadCmd()
@@ -1831,7 +1841,7 @@ func (m Model) contentView() string {
 	case ModeEditor:
 		return m.yamlEdit.View()
 	case ModeLogs:
-		return m.logView.View()
+		return m.logsCtrl.View()
 	case ModeTopology:
 		return m.topologyCtrl.View()
 	case ModeMetrics:
@@ -1874,7 +1884,7 @@ func (m Model) resizePanels() Model {
 	}
 	m.yamlView = m.yamlView.SetSize(cw, ch)
 	m.yamlEdit = m.yamlEdit.SetSize(cw, ch)
-	m.logView = m.logView.SetSize(cw, ch)
+	m.logsCtrl = m.logsCtrl.SetSize(cw, ch).(modes.LogsController)
 	m.topologyCtrl = m.topologyCtrl.SetSize(cw, ch).(modes.TopologyController)
 	m.metricsCtrl = m.metricsCtrl.SetSize(cw, ch).(modes.MetricsController)
 
