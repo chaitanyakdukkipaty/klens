@@ -84,6 +84,8 @@ internal/ui/
 - **YAML editor modal states**: `internal/ui/panels/yaml_editor.go` implements vim-style Normal/Insert/DiffConfirm/Applying states. In Normal mode both `hjkl` and arrow keys navigate; `i/a/A/o/O` enter Insert mode; `ctrl+s` opens diff preview. In Insert mode all input goes directly to the `textarea` widget.
 - **Log viewer states**: `internal/ui/panels/log_viewer.go` has layered state — filterOn (/ input), searchOn (ctrl+f input), podFilter (1-9 solo), tabGroups (multi-group). `HasActiveState()` and `HandleEsc()` let the root model peel one layer per `esc` instead of exiting log mode immediately. `LogGroup` / `StartGrouped()` in `logs.go` carry the group name through `LogLine.Group` so the viewer can route lines to tabs.
 - **JSON colorization**: `tryColorizeJSON` in `log_viewer.go` Chroma-highlights lines that are valid JSON (dracula theme, terminal256 formatter); colorCache is a parallel slice to `lines` so re-colorizing on `J` toggle only re-renders lines, not restreams data.
+- **Scrollable columns**: `k8s.Column.Scrollable` is a per-column opt-in (parallel to `Flex`). At most one column per resource sets it; `ResourceTable` reads it through `scrollableColIdx()` and exposes `←/→`, horizontal-wheel ticks, and an `esc`-peel layer on `hScroll`. Adding the flag to any new resource's column is the only step required to enable horizontal scrolling.
+- **Resource table scrollbar**: `ResourceTable.View()` reserves the rightmost inner column for a `renderScrollbar` thumb driven by `scrollStart()` over `len(t.filtered)` — works for both key navigation and mouse-wheel cursor moves. The title also appends a `i/N · P%` muted label via `cursorPositionLabel()`.
 - **CLI subcommand dispatch**: `main.go` checks `os.Args[1]` before the tmux auto-wrap block so `klens get`/`logs`/`setup` are never wrapped in a tmux session.
 - **klog suppression**: klog is silenced at startup via `klog.SetOutput(io.Discard)` — suppress before any client-go initialization to avoid noisy stderr.
 
@@ -113,6 +115,7 @@ internal/ui/
 | `ctrl+z` | rollback last YAML apply (in YAML view) |
 | `ctrl+s` | YAML diff preview / save (in YAML editor) |
 | `ctrl+v` | paste into filter / search / editor inputs |
+| `←/→` | scroll horizontally on columns marked `Scrollable` (e.g. Event MESSAGE); horizontal trackpad wheel does the same |
 | `:` | command palette (TODO) |
 | `esc` | back to table (or peel log viewer state) |
 | `q` | quit |

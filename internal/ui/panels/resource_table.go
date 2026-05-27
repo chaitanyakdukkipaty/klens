@@ -67,9 +67,10 @@ type ResourceTable struct {
 	filterOn bool
 	filterInput string
 	syncing  bool
-	// msgScroll is the rune offset applied to the MESSAGE column when kind=="Event".
-	// shift+left / shift+right adjust it; SetKind and applyFilter reset it.
-	msgScroll int
+	// hScroll is the rune offset applied to the resource's Scrollable column
+	// (see k8sres.Column.Scrollable). ←/→ keys and horizontal wheel ticks
+	// adjust it; SetKind, applyFilter, and WithRows reclamp it.
+	hScroll int
 
 	// drag holds drag-to-copy lifecycle state (indices into t.filtered).
 	// See DragSelection in drag.go.
@@ -94,7 +95,7 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.filter = ""
 		t.filterInput = ""
 		t.filterOn = false
-		t.msgScroll = 0
+		t.hScroll = 0
 	}
 	t.kind = kind
 	return t
@@ -165,10 +166,26 @@ func (t ResourceTable) supportsMultiSelect() bool {
 func (t ResourceTable) FilterActive() bool { return t.filterOn }
 func (t ResourceTable) HasFilter() bool    { return t.filterOn || t.filter != "" }
 
-// HasMsgScroll reports whether the Event view is currently scrolled
-// horizontally. Used by the root model to peel scroll state on `esc`
+// HasHScroll reports whether the current resource has an active horizontal
+// scroll offset on its Scrollable column. The root model peels this on `esc`
 // before falling back to focus-shift.
-func (t ResourceTable) HasMsgScroll() bool { return t.kind == "Event" && t.msgScroll > 0 }
+func (t ResourceTable) HasHScroll() bool { return t.hScroll > 0 && t.scrollableColIdx() >= 0 }
+
+// scrollableColIdx returns the column index marked Scrollable for the current
+// kind, or -1 if no column opts in (and so the resource doesn't support
+// horizontal scrolling). The first Scrollable column wins.
+func (t ResourceTable) scrollableColIdx() int {
+	desc, ok := k8sres.Resolve(t.kind)
+	if !ok {
+		return -1
+	}
+	for i, c := range desc.Columns {
+		if c.Scrollable {
+			return i
+		}
+	}
+	return -1
+}
 
 func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -180,6 +197,19 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 		}
 		return t, nil
 	case tea.MouseWheelMsg:
+		// Horizontal wheel ticks (trackpad horizontal swipe, tilt-wheel) scroll
+		// the resource's Scrollable column. Mirrors the bubbles viewport
+		// convention used by the log panel — no modifier required.
+		if t.scrollableColIdx() >= 0 {
+			switch msg.Button {
+			case tea.MouseWheelLeft:
+				t.scrollLeft()
+				return t, nil
+			case tea.MouseWheelRight:
+				t.scrollRight()
+				return t, nil
+			}
+		}
 		switch msg.Button {
 		case tea.MouseWheelUp:
 			if t.cursor > 0 {
@@ -241,28 +271,20 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 			t.filterOn = true
 			t.filterInput = t.filter
 		case "esc":
-			if t.kind == "Event" && t.msgScroll > 0 {
-				t.msgScroll = 0
+			if t.HasHScroll() {
+				t.hScroll = 0
 				return t, nil
 			}
 			t.filter = ""
 			t.filterInput = ""
 			t.applyFilter()
-		case "shift+right":
-			if t.kind == "Event" {
-				maxRunes := t.maxEventMessageRunes()
-				if t.msgScroll+eventMsgScrollStep < maxRunes {
-					t.msgScroll += eventMsgScrollStep
-				} else if maxRunes > 0 {
-					t.msgScroll = maxRunes - 1
-				}
+		case "right":
+			if t.scrollableColIdx() >= 0 {
+				t.scrollRight()
 			}
-		case "shift+left":
-			if t.kind == "Event" {
-				t.msgScroll -= eventMsgScrollStep
-				if t.msgScroll < 0 {
-					t.msgScroll = 0
-				}
+		case "left":
+			if t.scrollableColIdx() >= 0 {
+				t.scrollLeft()
 			}
 		case "space":
 			if t.supportsMultiSelect() {
@@ -471,25 +493,28 @@ func (t *ResourceTable) applyFilter() {
 	if t.cursor >= len(t.filtered) {
 		t.cursor = max(0, len(t.filtered)-1)
 	}
-	// A filter change may have removed every row whose message extended past
-	// the current scroll. Reclamp so we never display a fully-blank MESSAGE col.
-	t.clampMsgScroll()
+	// A filter change may have removed every row whose Scrollable column
+	// extended past the current offset. Reclamp so we never display a fully
+	// empty column.
+	t.clampHScroll()
 }
 
-// eventMsgScrollStep is the rune step applied per shift+←/→ press in the
-// Event view's MESSAGE column.
-const eventMsgScrollStep = 10
+// hScrollStep is the rune step applied per left/right press (or horizontal
+// wheel tick) on a Scrollable column.
+const hScrollStep = 10
 
-// maxEventMessageRunes returns the longest filtered event MESSAGE in runes.
-// Returns 0 for non-Event kinds or when there are no filtered rows.
-func (t ResourceTable) maxEventMessageRunes() int {
-	if t.kind != "Event" {
+// maxScrollableRunes returns the longest rune-count among the filtered rows
+// for the active Scrollable column. Returns 0 if no column opts in, or no
+// rows are visible.
+func (t ResourceTable) maxScrollableRunes() int {
+	idx := t.scrollableColIdx()
+	if idx < 0 {
 		return 0
 	}
 	maxN := 0
 	for _, r := range t.filtered {
-		if len(r.Values) > 6 {
-			if n := utf8.RuneCountInString(r.Values[6]); n > maxN {
+		if idx < len(r.Values) {
+			if n := utf8.RuneCountInString(r.Values[idx]); n > maxN {
 				maxN = n
 			}
 		}
@@ -497,20 +522,42 @@ func (t ResourceTable) maxEventMessageRunes() int {
 	return maxN
 }
 
-// clampMsgScroll caps msgScroll to (max-1) so at least one rune of the
-// longest visible message stays on screen, and floors at 0.
-func (t *ResourceTable) clampMsgScroll() {
-	if t.msgScroll <= 0 {
-		t.msgScroll = 0
+// clampHScroll caps hScroll to (max-1) so at least one rune of the longest
+// visible cell stays on screen, and floors at 0.
+func (t *ResourceTable) clampHScroll() {
+	if t.hScroll <= 0 {
+		t.hScroll = 0
 		return
 	}
-	maxN := t.maxEventMessageRunes()
+	maxN := t.maxScrollableRunes()
 	if maxN == 0 {
-		t.msgScroll = 0
+		t.hScroll = 0
 		return
 	}
-	if t.msgScroll >= maxN {
-		t.msgScroll = maxN - 1
+	if t.hScroll >= maxN {
+		t.hScroll = maxN - 1
+	}
+}
+
+// scrollLeft shifts hScroll one step to the left, floored at 0.
+func (t *ResourceTable) scrollLeft() {
+	t.hScroll -= hScrollStep
+	if t.hScroll < 0 {
+		t.hScroll = 0
+	}
+}
+
+// scrollRight shifts hScroll one step to the right, capped so at least one
+// rune of the longest visible cell stays on screen.
+func (t *ResourceTable) scrollRight() {
+	maxN := t.maxScrollableRunes()
+	if maxN == 0 {
+		return
+	}
+	if t.hScroll+hScrollStep < maxN {
+		t.hScroll += hScrollStep
+	} else {
+		t.hScroll = maxN - 1
 	}
 }
 
@@ -520,6 +567,9 @@ func (t ResourceTable) View() string {
 		border = styles.FocusedBorder
 	}
 	innerW := max(1, t.width-2)
+	// Reserve the rightmost inner column for the vertical scrollbar so users
+	// always have a "where am I" cue when key- or wheel-scrolling.
+	dataW := max(1, innerW-1)
 
 	desc, ok := k8sres.Resolve(t.kind)
 	if !ok {
@@ -527,7 +577,8 @@ func (t ResourceTable) View() string {
 			styles.Muted.Render("  Select a resource type from the left panel"))
 	}
 
-	// Title row
+	// Title row — append cursor position (e.g. "12/45  ·  27%") so the user
+	// can read where they are in the data without consulting the scrollbar.
 	countInfo := fmt.Sprintf(" %d", len(t.filtered))
 	if t.filter != "" {
 		countInfo = fmt.Sprintf(" %d/%d", len(t.filtered), len(t.rows))
@@ -535,6 +586,9 @@ func (t ResourceTable) View() string {
 	title := styles.Title.Render(t.kind) + styles.Muted.Render(countInfo)
 	if n := t.SelectionCount(); n > 0 {
 		title += styles.Primary.Render(fmt.Sprintf("  ·  %d selected", n))
+	}
+	if pos := t.cursorPositionLabel(); pos != "" {
+		title += styles.Muted.Render("  " + pos)
 	}
 
 	// Filter bar
@@ -546,10 +600,11 @@ func (t ResourceTable) View() string {
 	}
 
 	// Header
-	colWidths := computeColWidths(desc.Columns, innerW)
+	colWidths := computeColWidths(desc.Columns, dataW)
 	header := buildHeader(desc, colWidths)
-	if t.kind == "Event" && t.msgScroll > 0 && len(desc.Columns) > 0 {
-		header = buildEventHeaderWithScroll(desc, colWidths, t.msgScroll)
+	scrollIdx := t.scrollableColIdx()
+	if scrollIdx >= 0 && t.hScroll > 0 {
+		header = buildHeaderWithHScroll(desc, colWidths, scrollIdx, t.hScroll)
 	}
 
 	// Rows
@@ -561,11 +616,6 @@ func (t ResourceTable) View() string {
 		dragLo, dragHi = t.drag.Range()
 	}
 
-	msgColIdx := -1
-	if t.kind == "Event" && len(desc.Columns) > 0 {
-		msgColIdx = len(desc.Columns) - 1
-	}
-
 	var rowLines []string
 	for i := start; i < len(t.filtered) && i < start+visibleRows; i++ {
 		row := t.filtered[i]
@@ -573,11 +623,11 @@ func (t ResourceTable) View() string {
 		inDrag := dragLo >= 0 && i >= dragLo && i <= dragHi
 		isCursor := i == t.cursor || inDrag
 
-		if msgColIdx >= 0 && t.msgScroll > 0 && msgColIdx < len(row.Values) {
-			row = applyMsgScroll(row, msgColIdx, t.msgScroll)
+		if scrollIdx >= 0 && t.hScroll > 0 && scrollIdx < len(row.Values) {
+			row = applyHScroll(row, scrollIdx, t.hScroll)
 		}
 
-		line := buildRow(row, desc, innerW, colWidths, sel, isCursor)
+		line := buildRow(row, desc, dataW, colWidths, sel, isCursor)
 		rowLines = append(rowLines, line)
 	}
 
@@ -589,8 +639,38 @@ func (t ResourceTable) View() string {
 		}
 	}
 
-	content := title + filterBar + "\n" + header + "\n" + strings.Join(rowLines, "\n")
+	// Vertical scrollbar over the rows area. Use the cursor position to drive
+	// the thumb so both key navigation and mouse-wheel cursor moves update it.
+	rowsBlock := strings.Join(rowLines, "\n")
+	if len(t.filtered) > 0 {
+		sb := renderScrollbar(len(rowLines), visibleRows, len(t.filtered), start, t.focused)
+		rowsBlock = joinScrollbar(rowsBlock, sb)
+	}
+
+	content := title + filterBar + "\n" + header + "\n" + rowsBlock
 	return border.Width(t.width).Height(t.height).Render(content)
+}
+
+// cursorPositionLabel returns "i/N · P%" describing where the row cursor sits
+// in the filtered data. Empty when there's nothing to show (no rows, or one
+// row where position is trivially obvious).
+func (t ResourceTable) cursorPositionLabel() string {
+	n := len(t.filtered)
+	if n <= 1 {
+		return ""
+	}
+	pos := t.cursor + 1
+	if pos < 1 {
+		pos = 1
+	}
+	if pos > n {
+		pos = n
+	}
+	pct := 0
+	if n > 1 {
+		pct = int(float64(pos-1) / float64(n-1) * 100)
+	}
+	return fmt.Sprintf("%d/%d · %d%%", pos, n, pct)
 }
 
 func computeColWidths(cols []k8sres.Column, width int) []int {
@@ -636,11 +716,11 @@ func computeColWidths(cols []k8sres.Column, width int) []int {
 	return widths
 }
 
-// applyMsgScroll returns a copy of row with Values[colIdx] shifted left by
+// applyHScroll returns a copy of row with Values[colIdx] shifted left by
 // scroll runes and prefixed with `‹` to indicate the truncated-left state.
 // Rune-aware so multi-byte content (paths, names with non-ASCII chars from
 // regional clusters) doesn't get sliced mid-codepoint.
-func applyMsgScroll(row k8sres.ResourceRow, colIdx, scroll int) k8sres.ResourceRow {
+func applyHScroll(row k8sres.ResourceRow, colIdx, scroll int) k8sres.ResourceRow {
 	if scroll <= 0 || colIdx < 0 || colIdx >= len(row.Values) {
 		return row
 	}
@@ -657,15 +737,14 @@ func applyMsgScroll(row k8sres.ResourceRow, colIdx, scroll int) k8sres.ResourceR
 	return row
 }
 
-// buildEventHeaderWithScroll annotates the MESSAGE header with the active rune
-// offset so users can see how far they've scrolled.
-func buildEventHeaderWithScroll(desc k8sres.ResourceDescriptor, colWidths []int, scroll int) string {
+// buildHeaderWithHScroll annotates the Scrollable column header with the
+// active rune offset so users can see how far they've scrolled.
+func buildHeaderWithHScroll(desc k8sres.ResourceDescriptor, colWidths []int, scrollIdx, scroll int) string {
 	cols := desc.Columns
 	parts := make([]string, len(cols))
-	last := len(cols) - 1
 	for i, c := range cols {
 		text := c.Header
-		if i == last {
+		if i == scrollIdx {
 			text = fmt.Sprintf("%s +%d", c.Header, scroll)
 		}
 		parts[i] = padOrTrunc(text, colWidths[i])
@@ -793,7 +872,7 @@ func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 	if t.cursor >= len(t.filtered) {
 		t.cursor = max(0, len(t.filtered)-1)
 	}
-	t.clampMsgScroll()
+	t.clampHScroll()
 	return t
 }
 

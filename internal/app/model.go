@@ -809,7 +809,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, cmd
 		}
 		// If table has filter or h-scroll state, let the table handle ESC to peel it.
-		if m.mode == ModeTable && (m.table.HasFilter() || m.table.HasMsgScroll()) {
+		if m.mode == ModeTable && (m.table.HasFilter() || m.table.HasHScroll()) {
 			var cmd tea.Cmd
 			m.table, cmd = m.table.Update(msg)
 			return m, cmd
@@ -1679,7 +1679,7 @@ func (m *Model) setStatusBarKind(kind string) {
 	rd, _ := k8sops.Resolve(kind)
 	help := []panels.HelpItem{
 		{Key: "↑↓/jk", Desc: "navigate"},
-		{Key: "enter", Desc: "select"},
+		{Key: "enter", Desc: "focus"},
 		{Key: "/", Desc: "filter"},
 	}
 	if rd.SupportsYAML {
@@ -1717,12 +1717,15 @@ func (m *Model) setStatusBarKind(kind string) {
 			help = append(help, panels.HelpItem{Key: "d", Desc: "delete"})
 		}
 	}
-	if kind == "Event" {
-		help = append(help, panels.HelpItem{Key: "shift+←/→", Desc: "scroll msg"})
+	for _, c := range rd.Columns {
+		if c.Scrollable {
+			help = append(help, panels.HelpItem{Key: "←/→", Desc: "scroll col"})
+			break
+		}
 	}
 	help = append(help,
 		panels.HelpItem{Key: "ctrl+r", Desc: "refresh"},
-		panels.HelpItem{Key: "q/ctrl+c", Desc: "quit"},
+		panels.HelpItem{Key: "ctrl+c/q", Desc: "quit"},
 	)
 	m.statusBar = m.statusBar.SetHelp(help)
 }

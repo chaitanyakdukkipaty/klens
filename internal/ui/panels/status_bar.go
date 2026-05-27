@@ -21,7 +21,7 @@ type HelpItem struct {
 
 var defaultHelp = []HelpItem{
 	{Key: "↑↓/jk", Desc: "navigate"},
-	{Key: "enter", Desc: "select"},
+	{Key: "enter", Desc: "focus"},
 	{Key: "/", Desc: "filter"},
 	{Key: "y", Desc: "yaml"},
 	{Key: "e", Desc: "edit"},
@@ -64,7 +64,7 @@ func (s StatusBar) View() string {
 
 	help := s.help
 	if s.activeKind == "Pod" {
-		hint := HelpItem{Key: "space", Desc: "multi-log"}
+		hint := HelpItem{Key: "space", Desc: "mark"}
 		extended := make([]HelpItem, 0, len(help)+1)
 		extended = append(extended, help[0])
 		extended = append(extended, hint)
@@ -72,7 +72,9 @@ func (s StatusBar) View() string {
 		help = extended
 	}
 
-	line := " " + RenderHelpInline(help)
+	// styles.StatusBar has Padding(0, 1), so the content area is s.width-2.
+	inner := max(1, s.width-2)
+	line := RenderHelpInlineCentered(help, inner)
 	return styles.StatusBar.Width(s.width).Render(line)
 }
 
