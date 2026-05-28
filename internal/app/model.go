@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	unstructuredpkg "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -35,6 +36,7 @@ const (
 	ModeLogs
 	ModeTopology
 	ModeMetrics
+	ModeDescribe
 )
 
 // FocusTarget tracks which panel has keyboard focus.
@@ -56,10 +58,13 @@ type Model struct {
 	logsCtrl        modes.LogsController
 	topologyCtrl    modes.TopologyController
 	metricsCtrl     modes.MetricsController
+	describeCtrl    modes.DescribeViewController
 	confirm         widgets.ConfirmDialog
 	scaleDialog     widgets.ScaleDialog
+	sanitizeDialog  widgets.SanitizeDialog
 	namespacePicker widgets.NamespacePicker
 	clusterPicker   widgets.ClusterPicker
+	containerPicker widgets.ContainerPicker
 	contextMenu     widgets.ContextMenu
 	pfDialog        widgets.PortForwardDialog
 	pfList          widgets.PortForwardList
@@ -152,10 +157,13 @@ func New(readOnly bool) Model {
 		logsCtrl:        modes.NewLogsController(panels.NewLogViewer(60, 22)),
 		topologyCtrl:    modes.NewTopologyController(panels.NewTopologyPanel(60, 22)),
 		metricsCtrl:     modes.NewMetricsController(panels.NewMetricsPanel(60, 22)),
+		describeCtrl:    modes.NewDescribeViewController(panels.NewDescribeViewer(60, 22)),
 		confirm:         widgets.NewConfirmDialog(),
 		scaleDialog:     widgets.NewScaleDialog(),
+		sanitizeDialog:  widgets.NewSanitizeDialog(),
 		namespacePicker: widgets.NewNamespacePicker(),
 		clusterPicker:   widgets.NewClusterPicker(),
+		containerPicker: widgets.NewContainerPicker(),
 		contextMenu:     widgets.NewContextMenu(),
 		pfDialog:        widgets.NewPortForwardDialog(),
 		pfList:          widgets.NewPortForwardList(),
@@ -261,6 +269,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case widgets.ClusterPickerCancelMsg:
 		return m, nil
 
+	case widgets.ContainerPickedMsg:
+		return m.attachToContainer(msg.Namespace, msg.Pod, msg.Container)
+
+	case widgets.ContainerPickerCancelMsg:
+		return m, nil
+
 	case errMsg:
 		m.loading = false
 		if msg.ctx != "" {
@@ -360,6 +374,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focus = FocusContent
 		return m, cmd
 
+	case panels.DescribeFetchedMsg:
+		if msg.Err != nil {
+			m.statusBar = m.statusBar.SetMessage("describe: " + msg.Err.Error())
+			return m, nil
+		}
+		next, cmd := m.describeCtrl.Update(msg)
+		m.describeCtrl = next.(modes.DescribeViewController)
+		m.mode = ModeDescribe
+		m.focus = FocusContent
+		return m, cmd
+
 	case panels.ApplyYAMLRequest:
 		if m.clusterMgr == nil {
 			return m, nil
@@ -428,6 +453,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.executeConfirmedOp(msg)
 		}
 		return m, nil
+
+	case widgets.SanitizeRequest:
+		if !msg.Confirmed {
+			return m, nil
+		}
+		return m.executeSanitize(msg.Namespace)
 
 	case widgets.ScaleResult:
 		if !msg.Confirmed {
@@ -517,6 +548,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ModeEditor:
 			next, cmd := m.yamlEditCtrl.Update(msg)
 			m.yamlEditCtrl = next.(modes.YAMLEditController)
+			return m, cmd
+		case ModeDescribe:
+			next, cmd := m.describeCtrl.Update(msg)
+			m.describeCtrl = next.(modes.DescribeViewController)
 			return m, cmd
 		case ModeTable:
 			if m.focus == FocusNav && m.nav.FilterActive() {
@@ -789,7 +824,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "F":
 		switch m.mode {
-		case ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics:
+		case ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics, ModeDescribe:
 			// Let the editor controller consume F as literal text when in
 			// Insert mode. consumed=false falls through to fullscreen toggle.
 			if m.mode == ModeEditor {
@@ -854,6 +889,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 				return m, cmd
 			}
 		}
+		// Same peel pattern for the describe viewer: open filter input →
+		// applied filter → exit mode. The viewer's HandleEsc returns true
+		// while it still has state to peel.
+		if m.mode == ModeDescribe && m.describeCtrl.HasActiveState() {
+			next, consumed := m.describeCtrl.HandleEsc()
+			m.describeCtrl = next
+			if consumed {
+				return m, nil
+			}
+		}
 		// Peel fullscreen if active — return to normal layout, stay in mode.
 		if m.fullScreen {
 			m.fullScreen = false
@@ -890,7 +935,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.namespacePicker = m.namespacePicker.Show(clusterNs, savedNs)
 		}
 		return m, nil
-	case "ctrl+k":
+	case "ctrl+o":
 		if m.clusterMgr != nil {
 			m.clusterPicker = m.clusterPicker.Show(m.clusterMgr.Contexts(), m.clusterMgr.ActiveContext())
 		}
@@ -902,6 +947,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if m.mode != ModeLogs {
 			m.pfList = m.pfList.Show(m.pfManager.List())
 			return m, nil
+		}
+	case "z":
+		// Sanitize is Pod-only and a destructive op.
+		if m.mode == ModeTable && m.nav.ActiveKind() == "Pod" {
+			return m.actionSanitize()
 		}
 	case "ctrl+r":
 		if m.watcher != nil {
@@ -926,7 +976,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// Action keys fire even when nav panel has focus (but not during filter input)
 		if !m.nav.FilterActive() {
 			switch msg.String() {
-			case "y", "e", "l", "t", "m", "d", "a", "s", "f", "F":
+			case "y", "l", "t", "m", "d", "a", "s", "f", "F", "ctrl+d", "ctrl+k":
 				return m.handleTableKeys(msg)
 			}
 		}
@@ -969,6 +1019,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	if m.mode == ModeMetrics {
 		next, cmd, _ := m.metricsCtrl.HandleKey(msg)
 		m.metricsCtrl = next.(modes.MetricsController)
+		return m, cmd
+	}
+
+	if m.mode == ModeDescribe {
+		next, cmd, _ := m.describeCtrl.HandleKey(msg)
+		m.describeCtrl = next.(modes.DescribeViewController)
+		var s string
+		m.describeCtrl, s = m.describeCtrl.ConsumeStatusMsg()
+		if s != "" {
+			m.statusBar = m.statusBar.SetMessage(s)
+		}
 		return m, cmd
 	}
 
@@ -1043,8 +1104,6 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	case "y":
 		return m.actionViewYAML()
-	case "e":
-		return m.actionEditYAML()
 	case "l":
 		return m.actionLogs()
 	case "t":
@@ -1052,7 +1111,11 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "m":
 		return m.actionMetrics()
 	case "d":
+		return m.actionDescribe()
+	case "ctrl+d":
 		return m.actionDelete()
+	case "ctrl+k":
+		return m.actionKill()
 	case "s":
 		if m.nav.ActiveKind() == "HelmRelease" {
 			return m.actionSuspendHelm()
@@ -1076,8 +1139,6 @@ func (m Model) dispatchTableAction(action string) (Model, tea.Cmd) {
 	switch action {
 	case "y":
 		return m.actionViewYAML()
-	case "e":
-		return m.actionEditYAML()
 	case "l":
 		return m.actionLogs()
 	case "t":
@@ -1095,7 +1156,11 @@ func (m Model) dispatchTableAction(action string) (Model, tea.Cmd) {
 	case "resume":
 		return m.actionResumeHelm()
 	case "d":
+		return m.actionDescribe()
+	case "ctrl+d":
 		return m.actionDelete()
+	case "ctrl+k":
+		return m.actionKill()
 	case "clear-selection":
 		return m.actionClearSelection()
 	}
@@ -1160,8 +1225,15 @@ func buildMultiContextMenuItems(kind string, count int, readOnly bool) []widgets
 		if _, ok := any(k).(kinds.Deleter); ok {
 			items = append(items, widgets.MenuItem{
 				Label:  fmt.Sprintf("Delete %d…", count),
-				Action: "d",
-				Hint:   "d",
+				Action: "ctrl+d",
+				Hint:   "ctrl+d",
+			})
+		}
+		if _, ok := any(k).(kinds.Killer); ok {
+			items = append(items, widgets.MenuItem{
+				Label:  fmt.Sprintf("Kill %d… (force)", count),
+				Action: "ctrl+k",
+				Hint:   "ctrl+k",
 			})
 		}
 	}
@@ -1183,9 +1255,7 @@ func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
 	var items []widgets.MenuItem
 	// Every Kind implements Fetch, so YAML view is always available.
 	items = append(items, widgets.MenuItem{Label: "View YAML", Action: "y", Hint: "y"})
-	if !readOnly {
-		items = append(items, widgets.MenuItem{Label: "Edit YAML", Action: "e", Hint: "e"})
-	}
+	items = append(items, widgets.MenuItem{Label: "Describe", Action: "d", Hint: "d"})
 	if _, ok := any(k).(kinds.Logger); ok {
 		items = append(items, widgets.MenuItem{Label: "View Logs", Action: "l", Hint: "l"})
 	}
@@ -1212,7 +1282,10 @@ func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
 			)
 		}
 		if _, ok := any(k).(kinds.Deleter); ok {
-			items = append(items, widgets.MenuItem{Label: "Delete…", Action: "d", Hint: "d"})
+			items = append(items, widgets.MenuItem{Label: "Delete…", Action: "ctrl+d", Hint: "ctrl+d"})
+		}
+		if _, ok := any(k).(kinds.Killer); ok {
+			items = append(items, widgets.MenuItem{Label: "Kill… (force)", Action: "ctrl+k", Hint: "ctrl+k"})
 		}
 	}
 	return items
@@ -1223,6 +1296,38 @@ func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
 func (m Model) actionClearSelection() (Model, tea.Cmd) {
 	m.tableCtrl = m.tableCtrl.ClearSelection()
 	return m, nil
+}
+
+// actionDescribe fetches kubectl-style describe output for the selected row
+// and opens ModeDescribe with it. Describe is non-mutating, so it works in
+// readonly mode (no readOnly gate). The fetch runs in a goroutine and emits
+// panels.DescribeFetchedMsg on completion.
+func (m Model) actionDescribe() (Model, tea.Cmd) {
+	row := m.tableCtrl.SelectedRow()
+	if row == nil {
+		return m, nil
+	}
+	if m.clusterMgr == nil {
+		return m, nil
+	}
+	cfg, err := m.clusterMgr.ActiveRestConfig()
+	if err != nil || cfg == nil {
+		m.statusBar = m.statusBar.SetMessage("describe: no client")
+		return m, nil
+	}
+	kind := m.nav.ActiveKind()
+	k, ok := kinds.Lookup(kind)
+	if !ok {
+		return m, nil
+	}
+	meta := k.Meta()
+	gvk := schema.GroupVersionKind{
+		Group:   meta.GVR.Group,
+		Version: meta.GVR.Version,
+		Kind:    meta.Kind,
+	}
+	m.statusBar = m.statusBar.SetMessage("Loading describe…")
+	return m, panels.FetchDescribeCmd(cfg, gvk, kind, row.Name, row.Namespace)
 }
 
 func (m Model) actionViewYAML() (Model, tea.Cmd) {
@@ -1243,14 +1348,6 @@ func (m Model) actionViewYAML() (Model, tea.Cmd) {
 		}
 	}
 	return m, nil
-}
-
-func (m Model) actionEditYAML() (Model, tea.Cmd) {
-	if m.readOnly {
-		m.statusBar = m.statusBar.SetMessage("read-only mode – use 'y' to view YAML")
-		return m, nil
-	}
-	return m.actionViewYAML()
 }
 
 func (m Model) actionLogs() (Model, tea.Cmd) {
@@ -1344,6 +1441,90 @@ func (m Model) actionDelete() (Model, tea.Cmd) {
 	m.confirm = m.confirm.Show(action, resource)
 	m.pendingOp = pendingOpData{op: "delete", kind: kind, targets: targets}
 	return m, nil
+}
+
+// actionKill is the force-delete (grace=0) counterpart to actionDelete. Opens
+// a danger-styled confirm; on confirm, executeConfirmedOp dispatches KillCmd
+// per target. For non-Pod kinds KillCmd falls back to DeleteCmd, so the
+// keybinding works everywhere ctrl+d does — only Pods see different on-wire
+// semantics.
+func (m Model) actionKill() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode")
+		return m, nil
+	}
+	kind := m.nav.ActiveKind()
+	rows := m.tableCtrl.SelectedRows()
+	if len(rows) == 0 {
+		return m, nil
+	}
+	var targets []deleteTarget
+	for _, row := range rows {
+		targets = append(targets, deleteTarget{name: row.Name, namespace: row.Namespace})
+	}
+	var action, resource string
+	if len(targets) == 1 {
+		action, resource = "Kill", targets[0].name
+	} else {
+		action = fmt.Sprintf("Kill %d", len(targets))
+		resource = kind + "s"
+	}
+	m.confirm = m.confirm.ShowDanger(action, resource)
+	m.pendingOp = pendingOpData{op: "kill", kind: kind, targets: targets}
+	return m, nil
+}
+
+// actionSanitize opens the sanitize confirmation dialog for the current
+// namespace's Pod view. The actual deletion runs only after the user types
+// the exact confirmation phrase and dispatches a SanitizeRequest.
+func (m Model) actionSanitize() (Model, tea.Cmd) {
+	if m.readOnly {
+		m.statusBar = m.statusBar.SetMessage("read-only mode")
+		return m, nil
+	}
+	if m.nav.ActiveKind() != "Pod" {
+		return m, nil
+	}
+	m.sanitizeDialog = m.sanitizeDialog.Show(m.namespace)
+	return m, nil
+}
+
+// executeSanitize lists pods in the current namespace that are in a
+// completed/error state and issues a Delete for each. Filtering matches
+// k9s: phase == Succeeded || phase == Failed.
+func (m Model) executeSanitize(namespace string) (Model, tea.Cmd) {
+	if m.readOnly || m.watcher == nil || m.clusterMgr == nil {
+		return m, nil
+	}
+	cs, err := m.clusterMgr.ActiveClientset()
+	if err != nil || cs == nil {
+		m.statusBar = m.statusBar.SetMessage("sanitize: no client")
+		return m, nil
+	}
+	k, ok := kinds.Lookup("Pod")
+	if !ok {
+		return m, nil
+	}
+	deps := m.depsFor(cs)
+	var cmds []tea.Cmd
+	for _, p := range k8sops.ListAs[*corev1.Pod](m.watcher, "Pod", namespace) {
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		phase := p.Status.Phase
+		if phase != corev1.PodSucceeded && phase != corev1.PodFailed {
+			continue
+		}
+		if c := kinds.DeleteCmd(k, deps, p.Namespace, p.Name); c != nil {
+			cmds = append(cmds, c)
+		}
+	}
+	if len(cmds) == 0 {
+		m.statusBar = m.statusBar.SetMessage("sanitize: no completed/error pods")
+		return m, nil
+	}
+	m.statusBar = m.statusBar.SetMessage(fmt.Sprintf("sanitize: deleting %d pod(s)", len(cmds)))
+	return m, tea.Batch(cmds...)
 }
 
 func (m Model) actionScale() (Model, tea.Cmd) {
@@ -1515,16 +1696,32 @@ func (m Model) actionAttach() (Model, tea.Cmd) {
 		m.statusBar = m.statusBar.SetMessage("attach only available for Pods")
 		return m, nil
 	}
-	var container string
-	if pod, ok := row.Raw.(*corev1.Pod); ok && len(pod.Spec.Containers) > 0 {
-		container = pod.Spec.Containers[0].Name
+	pod, _ := row.Raw.(*corev1.Pod)
+	entries := PodContainerEntries(pod)
+	// No containers known (raw missing) — fall back to letting the API server
+	// pick the default by passing an empty container name.
+	if len(entries) == 0 {
+		return m.attachToContainer(row.Namespace, row.Name, "")
 	}
+	// Single-container pod: attach immediately, no prompt.
+	if len(entries) == 1 {
+		return m.attachToContainer(row.Namespace, row.Name, entries[0].Name)
+	}
+	// Multi-container: let the user pick.
+	m.containerPicker = m.containerPicker.Show(row.Name, row.Namespace, entries)
+	return m, nil
+}
+
+// attachToContainer dispatches the attach command for a specific container.
+// container may be empty, in which case the API server's default selection
+// is used (k8s.detectContainer falls back to spec.Containers[0]).
+func (m Model) attachToContainer(namespace, pod, container string) (Model, tea.Cmd) {
 	if os.Getenv("TMUX") != "" {
 		kubeCtx := ""
 		if m.clusterMgr != nil {
 			kubeCtx = m.clusterMgr.ActiveContext()
 		}
-		return m, k8sops.TmuxAttachWindowCmd(kubeCtx, row.Namespace, row.Name, container)
+		return m, k8sops.TmuxAttachWindowCmd(kubeCtx, namespace, pod, container)
 	}
 	// Non-tmux fallback: suspend TUI and exec directly.
 	if m.clusterMgr == nil {
@@ -1540,7 +1737,28 @@ func (m Model) actionAttach() (Model, tea.Cmd) {
 		m.statusBar = m.statusBar.SetMessage("rest config: " + err.Error())
 		return m, nil
 	}
-	return m, k8sops.AttachCmd(cs, cfg, row.Namespace, row.Name)
+	return m, k8sops.AttachCmd(cs, cfg, namespace, pod, container)
+}
+
+// PodContainerEntries flattens a pod's containers, init containers, and
+// ephemeral containers into a single picker list, preserving spec order.
+// Init/ephemeral entries are tagged so the picker can label them.
+func PodContainerEntries(pod *corev1.Pod) []widgets.ContainerEntry {
+	if pod == nil {
+		return nil
+	}
+	out := make([]widgets.ContainerEntry, 0,
+		len(pod.Spec.Containers)+len(pod.Spec.InitContainers)+len(pod.Spec.EphemeralContainers))
+	for _, c := range pod.Spec.Containers {
+		out = append(out, widgets.ContainerEntry{Name: c.Name, Kind: widgets.ContainerRegular})
+	}
+	for _, c := range pod.Spec.InitContainers {
+		out = append(out, widgets.ContainerEntry{Name: c.Name, Kind: widgets.ContainerInit})
+	}
+	for _, c := range pod.Spec.EphemeralContainers {
+		out = append(out, widgets.ContainerEntry{Name: c.Name, Kind: widgets.ContainerEphemeral})
+	}
+	return out
 }
 
 // handleYAMLViewKeys is reached only for keys the YAMLViewController refused
@@ -1603,6 +1821,8 @@ func (m Model) executeConfirmedOp(result widgets.ConfirmResult) (Model, tea.Cmd)
 		switch m.pendingOp.op {
 		case "delete":
 			return kinds.DeleteCmd(k, deps, ns, name)
+		case "kill":
+			return kinds.KillCmd(k, deps, ns, name)
 		case "suspend":
 			return kinds.SuspendCmd(k, deps, ns, name, true)
 		case "resume":
@@ -1760,11 +1980,9 @@ func (m *Model) setStatusBarKind(kind string) {
 		m.statusBar = m.statusBar.SetHelp(help)
 		return
 	}
-	// Every Kind implements Fetch — YAML view is always available.
+	// Every Kind implements Fetch — YAML view + Describe are always available.
 	help = append(help, panels.HelpItem{Key: "y", Desc: "yaml"})
-	if !m.readOnly {
-		help = append(help, panels.HelpItem{Key: "e", Desc: "edit"})
-	}
+	help = append(help, panels.HelpItem{Key: "d", Desc: "describe"})
 	if _, ok := any(k).(kinds.Logger); ok {
 		help = append(help, panels.HelpItem{Key: "l", Desc: "logs"})
 	}
@@ -1791,7 +2009,13 @@ func (m *Model) setStatusBarKind(kind string) {
 			)
 		}
 		if _, ok := any(k).(kinds.Deleter); ok {
-			help = append(help, panels.HelpItem{Key: "d", Desc: "delete"})
+			help = append(help, panels.HelpItem{Key: "ctrl+d", Desc: "delete"})
+		}
+		if _, ok := any(k).(kinds.Killer); ok {
+			help = append(help, panels.HelpItem{Key: "ctrl+k", Desc: "kill"})
+		}
+		if kind == "Pod" {
+			help = append(help, panels.HelpItem{Key: "z", Desc: "sanitize"})
 		}
 	}
 	for _, c := range k.Columns() {
@@ -1851,12 +2075,20 @@ func (m Model) renderContent() string {
 		return m.modalOverlay(m.clusterPicker.View())
 	}
 
+	if m.containerPicker.IsVisible() {
+		return m.modalOverlay(m.containerPicker.View())
+	}
+
 	if m.confirm.IsVisible() {
 		return m.modalOverlay(m.confirm.View())
 	}
 
 	if m.scaleDialog.IsVisible() {
 		return m.modalOverlay(m.scaleDialog.View())
+	}
+
+	if m.sanitizeDialog.IsVisible() {
+		return m.modalOverlay(m.sanitizeDialog.View())
 	}
 
 	if m.contextMenu.IsVisible() {
@@ -1908,6 +2140,8 @@ func (m Model) contentView() string {
 		return m.topologyCtrl.View()
 	case ModeMetrics:
 		return m.metricsCtrl.View()
+	case ModeDescribe:
+		return m.describeCtrl.View()
 	default:
 		return m.tableCtrl.View()
 	}
@@ -1949,6 +2183,7 @@ func (m Model) resizePanels() Model {
 	m.logsCtrl = m.logsCtrl.SetSize(cw, ch).(modes.LogsController)
 	m.topologyCtrl = m.topologyCtrl.SetSize(cw, ch).(modes.TopologyController)
 	m.metricsCtrl = m.metricsCtrl.SetSize(cw, ch).(modes.MetricsController)
+	m.describeCtrl = m.describeCtrl.SetSize(cw, ch).(modes.DescribeViewController)
 
 	m.contextMenu = m.contextMenu.SetSize(termW, termH)
 	m.confirm = m.confirm.SetSize(termW, termH)

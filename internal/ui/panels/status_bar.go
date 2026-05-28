@@ -24,7 +24,6 @@ var defaultHelp = []HelpItem{
 	{Key: "enter", Desc: "focus"},
 	{Key: "/", Desc: "filter"},
 	{Key: "y", Desc: "yaml"},
-	{Key: "e", Desc: "edit"},
 	{Key: "l", Desc: "logs"},
 	{Key: "t", Desc: "topology"},
 	{Key: "m", Desc: "metrics"},

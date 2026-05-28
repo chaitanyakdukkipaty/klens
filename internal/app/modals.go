@@ -100,6 +100,16 @@ func (m *Model) modals() ModalStack {
 			},
 		},
 		{
+			Name:      "containerPicker",
+			IsVisible: m.containerPicker.IsVisible,
+			Handles:   keyPressOnly,
+			Update: func(msg tea.Msg) tea.Cmd {
+				var cmd tea.Cmd
+				m.containerPicker, cmd = m.containerPicker.Update(msg)
+				return cmd
+			},
+		},
+		{
 			Name:      "confirm",
 			IsVisible: m.confirm.IsVisible,
 			Update: func(msg tea.Msg) tea.Cmd {
@@ -114,6 +124,15 @@ func (m *Model) modals() ModalStack {
 			Update: func(msg tea.Msg) tea.Cmd {
 				var cmd tea.Cmd
 				m.scaleDialog, cmd = m.scaleDialog.Update(msg)
+				return cmd
+			},
+		},
+		{
+			Name:      "sanitizeDialog",
+			IsVisible: m.sanitizeDialog.IsVisible,
+			Update: func(msg tea.Msg) tea.Cmd {
+				var cmd tea.Cmd
+				m.sanitizeDialog, cmd = m.sanitizeDialog.Update(msg)
 				return cmd
 			},
 		},

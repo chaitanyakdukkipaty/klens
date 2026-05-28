@@ -18,7 +18,7 @@ func (fakeNoCaps) List(Context) ([]Row, error)                                  
 func (fakeNoCaps) Fetch(context.Context, Context, string, string) (Object, error) { return nil, nil }
 
 // fakeFullCaps is the truth-table reference for "Kind with every capability."
-// Mirrors Pod's eventual shape — Logger, Attacher, Scaler, Deleter,
+// Mirrors Pod's eventual shape — Logger, Attacher, Scaler, Deleter, Killer,
 // PortForwarder, Topologer, Applier, Suspender.
 type fakeFullCaps struct{ fakeNoCaps }
 
@@ -28,6 +28,7 @@ func (fakeFullCaps) Attach(Context, string, string) tea.Cmd                     
 func (fakeFullCaps) Scale(Context, string, string, int32) error                       { return nil }
 func (fakeFullCaps) CurrentReplicas(Object) int32                                     { return 0 }
 func (fakeFullCaps) Delete(Context, string, string) error                             { return nil }
+func (fakeFullCaps) Kill(Context, string, string) error                               { return nil }
 func (fakeFullCaps) ContainerPorts(Context, string, string) ([]ContainerPort, error)  { return nil, nil }
 func (fakeFullCaps) Topology(Context, string, string) (*k8s.TreeNode, error)          { return nil, nil }
 func (fakeFullCaps) Apply(Context, string, string, []byte) error                      { return nil }
@@ -56,6 +57,7 @@ func TestCapabilityAssertions(t *testing.T) {
 				"Attacher":         true,
 				"Scaler":           true,
 				"Deleter":          true,
+				"Killer":           true,
 				"PortForwarder":    true,
 				"Topologer":        true,
 				"Applier":          true,
@@ -71,6 +73,7 @@ func TestCapabilityAssertions(t *testing.T) {
 			_, isAttacher := any(c.k).(Attacher)
 			_, isScaler := any(c.k).(Scaler)
 			_, isDeleter := any(c.k).(Deleter)
+			_, isKiller := any(c.k).(Killer)
 			_, isPF := any(c.k).(PortForwarder)
 			_, isTopo := any(c.k).(Topologer)
 			_, isApplier := any(c.k).(Applier)
@@ -80,6 +83,7 @@ func TestCapabilityAssertions(t *testing.T) {
 				"Attacher":      isAttacher,
 				"Scaler":        isScaler,
 				"Deleter":       isDeleter,
+				"Killer":        isKiller,
 				"PortForwarder": isPF,
 				"Topologer":     isTopo,
 				"Applier":       isApplier,

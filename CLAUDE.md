@@ -54,7 +54,7 @@ internal/config/config.go     → persisted user preferences (namespace lists, l
 internal/ui/
   layout/layout.go            → panel sizing from terminal dimensions
   panels/                     → header, status_bar, nav_panel, resource_table, yaml_viewer, yaml_editor,
-                                log_viewer, topology_panel, metrics_panel
+                                describe_viewer, log_viewer, topology_panel, metrics_panel
   widgets/                    → sparkline, diff_viewer, tree_renderer, confirm_dialog, scale_dialog,
                                 namespace_picker, cluster_picker
   styles/styles.go            → Lipgloss style definitions (Kubernetes blue theme)
@@ -64,8 +64,9 @@ internal/ui/
 
 - **Bubbletea message flow**: Informers run in background goroutines; they send to `msgCh chan tea.Msg`; `WatchCmd` relays these to the Bubbletea loop. Never mutate model state outside `Update()`.
 - **Lazy clientsets**: `cluster.Manager` creates a `*kubernetes.Clientset` on first use per context. On cluster switch, stop old `WatcherFactory` with `wf.Stop()` before creating a new one.
-- **Content modes**: `app.Model.mode` (ModeTable, ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics) controls which panel `contentView()` renders.
-- **Focus vs action keys**: `app.Model.focus` (FocusNav / FocusContent) controls which panel `↑↓/jk` navigate. Action keys (`y`, `e`, `l`, `t`, `m`, `d`, `a`, `s`) work regardless of focus — they always operate on the selected table row.
+- **Content modes**: `app.Model.mode` (ModeTable, ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics, ModeDescribe) controls which panel `contentView()` renders.
+- **Focus vs action keys**: `app.Model.focus` (FocusNav / FocusContent) controls which panel `↑↓/jk` navigate. Action keys (`y`, `d`, `l`, `t`, `m`, `a`, `s`, `ctrl+d`, `ctrl+k`) work regardless of focus — they always operate on the selected table row. Edit-YAML is reached by pressing `e` from inside the YAML viewer (ModeYAML), not from the table — `handleYAMLViewKeys` in `internal/app/model.go` owns that transition.
+- **Describe view**: `d` opens a kubectl-style describe view (ModeDescribe) for every registered kind. The thin wrapper around `k8s.io/kubectl/pkg/describe` lives in `internal/k8s/describe/` so the rest of the app keeps only one chokepoint into that library's heavy transitive graph. The view supports `/` regex filter, `n`/`N` match navigation, `c` copy-all, `ctrl+s` save-to-file (`$KLENS_DUMP_DIR` or `~/.klens/dumps`), `F` fullscreen, `esc` peel/back.
 - **Read-only mode**: `--readonly` CLI flag or `read_only: true` in config.json blocks all mutating operations (delete, scale, edit-apply, attach). The flag overrides the config but never forces it off.
 - **Metrics degradation**: if metrics-server not installed (404 on metrics API), show "n/a" — never block resource browsing.
 - **lipgloss constraint**: `MarginLeft()` breaks `Width()` in lipgloss v1.1.0 — use `PaddingLeft()` for all indented panel elements.
@@ -86,19 +87,20 @@ internal/ui/
 | `enter` | move focus to resource table |
 | `↑↓` / `jk` | navigate |
 | `/` | filter |
-| `y` | view YAML |
-| `e` | edit YAML |
+| `y` | view YAML (press `e` from this view to edit) |
+| `d` | describe (kubectl-style, all kinds) |
 | `l` | logs (or multi-pod logs with space-selected rows) |
 | `t` | topology |
 | `m` | metrics |
-| `d` | delete (with confirmation) |
+| `ctrl+d` | delete (graceful — respects `terminationGracePeriodSeconds`) |
+| `ctrl+k` | kill (force, grace=0) — red confirm dialog; only Pods see distinct on-wire semantics |
 | `a` | attach / exec into pod (tmux: new window; non-tmux: suspend TUI) |
 | `s` | scale (Deployments / StatefulSets) |
 | `shift+f` / `f` | port-forward (Pods) — modal dialog picks remote/local ports |
 | `ctrl+f` | active port-forwards list (anywhere except ModeLogs) |
 | `ctrl+r` | reconnect / refresh (stops watcher, reruns full connect) |
 | `ctrl+n` | namespace picker |
-| `ctrl+k` | cluster context picker |
+| `ctrl+o` | cluster context picker |
 | `ctrl+z` | rollback last YAML apply (in YAML view) |
 | `ctrl+s` | YAML diff preview / save (in YAML editor) |
 | `ctrl+v` | paste into filter / search / editor inputs |
@@ -106,6 +108,20 @@ internal/ui/
 | `:` | command palette (TODO) |
 | `esc` | back to table (or peel log viewer state) |
 | `q` | quit |
+
+### Describe viewer
+
+| Key | Action |
+|---|---|
+| `↑↓` / `jk`     | scroll one line |
+| `pgup` / `pgdn` | page |
+| `g` / `G`       | top / bottom |
+| `/`             | open filter input (case-insensitive regex; hides non-matching lines on enter) |
+| `n` / `N`       | next / prev match |
+| `c`             | copy full describe output to clipboard |
+| `ctrl+s`        | save to `$KLENS_DUMP_DIR/<kind>-<name>-<ts>.txt` (default `~/.klens/dumps/`) |
+| `F`             | toggle fullscreen |
+| `esc`           | peel state: cancel input → clear filter → back to table |
 
 ### Log viewer
 
@@ -130,8 +146,11 @@ Create `internal/k8s/kinds/<kind>.go`. Implement `Meta()`, `Columns()` (with a
 every kind whose read path is the standard Lister; an explicit List body is
 only required for kinds with dynamic GVR discovery (HelmRelease) or anything
 that bypasses `Lister`. Implement any capability interfaces the kind supports
-(`Deleter`, `Scaler`, `Logger`, `Applier`, `Topologer`, `PortForwarder`,
-`Attacher`, `MetricsSupporter`). Implement the optional `RowStatuser` /
+(`Deleter`, `Killer`, `Scaler`, `Logger`, `Applier`, `Topologer`,
+`PortForwarder`, `Attacher`, `MetricsSupporter`). `Killer` is force-delete
+(grace=0) — implement only when "kill" is meaningfully distinct from "delete"
+(currently just Pod); for everything else, `KillCmd` falls back to
+`DeleteCmd`. Implement the optional `RowStatuser` /
 `RowSortByTimer` / `RowNamer` interfaces when the row's color key, sort order,
 or display name should diverge from the object's metadata. Register in the
 package `init()` via `register(k)`; the shim in `kinds/shim.go` builds the

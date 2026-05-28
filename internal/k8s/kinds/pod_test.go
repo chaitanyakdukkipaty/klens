@@ -140,6 +140,7 @@ func TestPodCapabilities(t *testing.T) {
 	must(t, "Logger", func() bool { _, ok := any(k).(Logger); return ok })
 	must(t, "Attacher", func() bool { _, ok := any(k).(Attacher); return ok })
 	must(t, "Deleter", func() bool { _, ok := any(k).(Deleter); return ok })
+	must(t, "Killer", func() bool { _, ok := any(k).(Killer); return ok })
 	must(t, "PortForwarder", func() bool { _, ok := any(k).(PortForwarder); return ok })
 	must(t, "MetricsSupporter", func() bool { _, ok := any(k).(MetricsSupporter); return ok })
 	must(t, "Applier", func() bool { _, ok := any(k).(Applier); return ok })

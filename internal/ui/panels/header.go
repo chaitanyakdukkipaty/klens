@@ -35,7 +35,7 @@ func (h Header) View() string {
 	// unified HelpKey/HelpDesc styling so they're visually consistent with
 	// every other panel's help line and the status bar.
 	right := RenderHelpInline([]HelpItem{
-		{Key: "ctrl+k", Desc: "ctx"},
+		{Key: "ctrl+o", Desc: "ctx"},
 		{Key: "ctrl+n", Desc: "ns"},
 	})
 	if h.version != "" {

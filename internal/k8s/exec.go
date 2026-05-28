@@ -41,6 +41,7 @@ type PodExecCommand struct {
 	cfg       *rest.Config
 	namespace string
 	pod       string
+	container string
 	stdin     io.Reader
 	stdout    io.Writer
 	stderr    io.Writer
@@ -51,7 +52,10 @@ func (c *PodExecCommand) SetStdout(w io.Writer) { c.stdout = w }
 func (c *PodExecCommand) SetStderr(w io.Writer) { c.stderr = w }
 
 func (c *PodExecCommand) Run() error {
-	container := detectContainer(c.cs, c.namespace, c.pod)
+	container := c.container
+	if container == "" {
+		container = detectContainer(c.cs, c.namespace, c.pod)
+	}
 	req := c.cs.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(c.namespace).
@@ -79,8 +83,9 @@ func (c *PodExecCommand) Run() error {
 }
 
 // AttachCmd suspends the TUI and runs an interactive shell in the pod (non-tmux fallback).
-func AttachCmd(cs kubernetes.Interface, cfg *rest.Config, namespace, pod string) tea.Cmd {
-	c := &PodExecCommand{cs: cs, cfg: cfg, namespace: namespace, pod: pod}
+// container may be empty, in which case detectContainer picks the first one.
+func AttachCmd(cs kubernetes.Interface, cfg *rest.Config, namespace, pod, container string) tea.Cmd {
+	c := &PodExecCommand{cs: cs, cfg: cfg, namespace: namespace, pod: pod, container: container}
 	return tea.Exec(c, func(err error) tea.Msg {
 		return AttachFinishedMsg{Pod: pod, Err: err}
 	})
@@ -89,7 +94,7 @@ func AttachCmd(cs kubernetes.Interface, cfg *rest.Config, namespace, pod string)
 // TmuxAttachWindowCmd opens a new tmux window running kubectl exec into the pod.
 // It captures the new window's index so the TUI can switch to it later.
 // kubeContext pins the exec to the cluster klens is currently viewing — without
-// it, kubectl would use the on-disk current-context, which drifts after ctrl+k.
+// it, kubectl would use the on-disk current-context, which drifts after ctrl+o.
 func TmuxAttachWindowCmd(kubeContext, namespace, pod, container string) tea.Cmd {
 	return func() tea.Msg {
 		ctxFlag := ""

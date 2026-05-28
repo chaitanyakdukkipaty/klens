@@ -67,17 +67,31 @@ klens auto-wraps itself in a new tmux session on launch if tmux is installed and
 | `enter` | focus resource table |
 | `↑↓` / `jk` | navigate |
 | `/` | filter |
-| `y` | view YAML |
-| `e` | edit YAML |
+| `y` | view YAML (press `e` from this view to edit) |
+| `d` | describe (kubectl-style, all kinds) |
 | `l` | stream logs (multi-pod with `space`-select) |
 | `t` | topology tree |
 | `m` | metrics |
-| `d` | delete (with confirmation) |
+| `ctrl+d` | delete (graceful — respects `terminationGracePeriodSeconds`) |
+| `ctrl+k` | kill (force, grace=0 — Pods only have distinct semantics) |
 | `a` | attach / exec into pod |
 | `s` | scale (Deployments / StatefulSets) |
 | `ctrl+r` | reconnect / refresh |
 | `esc` | back to table (or peel log viewer state) |
 | `q` | quit |
+
+### Describe viewer
+
+| Key | Action |
+|---|---|
+| `↑↓` / `jk` | scroll |
+| `g` / `G` | top / bottom |
+| `/` | filter (regex; hides non-matching) |
+| `n` / `N` | next / prev match |
+| `c` | copy full output to clipboard |
+| `ctrl+s` | save to `$KLENS_DUMP_DIR/<kind>-<name>-<ts>.txt` (default `~/.klens/dumps/`) |
+| `F` | toggle fullscreen |
+| `esc` | peel state, then back to table |
 
 ### Log viewer
 

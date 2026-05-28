@@ -18,6 +18,7 @@ type ConfirmResult struct {
 // ConfirmDialog is a modal confirmation overlay.
 type ConfirmDialog struct {
 	visible  bool
+	danger   bool
 	action   string
 	resource string
 	termW    int
@@ -28,6 +29,17 @@ func NewConfirmDialog() ConfirmDialog { return ConfirmDialog{termW: 80, termH: 2
 
 func (d ConfirmDialog) Show(action, resource string) ConfirmDialog {
 	d.visible = true
+	d.danger = false
+	d.action = action
+	d.resource = resource
+	return d
+}
+
+// ShowDanger is Show with the dialog rendered in the destructive-action style
+// (red title and border). Used for irreversible operations like kill.
+func (d ConfirmDialog) ShowDanger(action, resource string) ConfirmDialog {
+	d.visible = true
+	d.danger = true
 	d.action = action
 	d.resource = resource
 	return d
@@ -51,7 +63,11 @@ func (d ConfirmDialog) SetSize(w, h int) ConfirmDialog {
 const confirmButtonText = "[y] confirm"
 
 func (d ConfirmDialog) renderTitle() string {
-	return appstyles.Warning.Bold(true).Render(fmt.Sprintf("  %s %q?", d.action, d.resource))
+	style := appstyles.Warning
+	if d.danger {
+		style = appstyles.Error
+	}
+	return style.Bold(true).Render(fmt.Sprintf("  %s %q?", d.action, d.resource))
 }
 
 func (d ConfirmDialog) renderHint() string {
@@ -59,7 +75,11 @@ func (d ConfirmDialog) renderHint() string {
 }
 
 func (d ConfirmDialog) renderBox() string {
-	return appstyles.DialogBox.Render(d.renderTitle() + "\n" + d.renderHint())
+	box := appstyles.DialogBox
+	if d.danger {
+		box = box.BorderForeground(appstyles.ColorFailed)
+	}
+	return box.Render(d.renderTitle() + "\n" + d.renderHint())
 }
 
 // confirmZone returns screen-space bounds [x0, y0, x1, y1) covering the

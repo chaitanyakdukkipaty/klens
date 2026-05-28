@@ -39,6 +39,23 @@ func DeleteCmd(k Kind, deps Deps, ns, name string) tea.Cmd {
 	}
 }
 
+// KillCmd returns a tea.Cmd that force-deletes the named object (grace=0).
+// Kinds implementing Killer use that path; kinds with only Deleter fall back
+// to DeleteCmd since grace=0 is a no-op for non-Pod resources. Returns nil
+// only when the kind implements neither.
+func KillCmd(k Kind, deps Deps, ns, name string) tea.Cmd {
+	if kl, ok := any(k).(Killer); ok {
+		c := contextFor(deps, ns)
+		return func() tea.Msg {
+			if err := kl.Kill(c, ns, name); err != nil {
+				return k8s.OperationResultMsg{Operation: "kill", Resource: name, Err: err}
+			}
+			return k8s.OperationResultMsg{Operation: "kill", Resource: name, Success: true}
+		}
+	}
+	return DeleteCmd(k, deps, ns, name)
+}
+
 // ScaleCmd returns a tea.Cmd that runs Scaler.Scale on the kind.
 func ScaleCmd(k Kind, deps Deps, ns, name string, replicas int32) tea.Cmd {
 	s, ok := any(k).(Scaler)

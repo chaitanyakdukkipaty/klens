@@ -76,10 +76,23 @@ type Scaler interface {
 	CurrentReplicas(obj Object) int32
 }
 
-// Deleter removes the named object from the cluster.
+// Deleter removes the named object from the cluster. Implementations should
+// use the server-default grace period (pass nil GracePeriodSeconds), which
+// for Pods honors `terminationGracePeriodSeconds`. Force/immediate removal
+// belongs on Killer.
 type Deleter interface {
 	Kind
 	Delete(c Context, ns, name string) error
+}
+
+// Killer is the force-delete variant of Deleter — grace period 0, immediate
+// removal. Today only Pod implements Kill with semantics that differ from
+// Delete; for every other kind grace=0 is a no-op so KillCmd falls back to
+// DeleteCmd. Implement this when "kill" is meaningfully distinct from
+// "delete" for the kind.
+type Killer interface {
+	Kind
+	Kill(c Context, ns, name string) error
 }
 
 // PortForwarder establishes a port-forward to a pod.

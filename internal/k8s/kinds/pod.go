@@ -65,6 +65,15 @@ func (pod) Delete(c Context, ns, name string) error {
 	if c.Clientset == nil {
 		return fmt.Errorf("pod.Delete: no Clientset")
 	}
+	return c.Clientset.CoreV1().Pods(ns).Delete(c.Ctx, name, metav1.DeleteOptions{})
+}
+
+// Kill force-deletes a pod with grace=0, skipping
+// terminationGracePeriodSeconds. Backs ctrl+k in the UI.
+func (pod) Kill(c Context, ns, name string) error {
+	if c.Clientset == nil {
+		return fmt.Errorf("pod.Kill: no Clientset")
+	}
 	grace := int64(0)
 	return c.Clientset.CoreV1().Pods(ns).Delete(c.Ctx, name, metav1.DeleteOptions{
 		GracePeriodSeconds: &grace,

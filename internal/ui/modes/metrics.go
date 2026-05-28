@@ -37,7 +37,7 @@ func (c MetricsController) SetSize(w, h int) Controller {
 
 // HandleKey forwards every key to the panel. Metrics mode has no global-key
 // passthrough requirements of its own — the root's pre-controller switch
-// already peels q / ctrl+r / ctrl+n / ctrl+k / esc / F before the key
+// already peels q / ctrl+r / ctrl+n / ctrl+o / esc / F before the key
 // reaches the controller, so anything that arrives here is panel-bound.
 func (c MetricsController) HandleKey(k tea.KeyPressMsg) (Controller, tea.Cmd, bool) {
 	p, cmd := c.panel.Update(k)
