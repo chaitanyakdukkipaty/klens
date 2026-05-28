@@ -87,7 +87,7 @@ func TestSetHandlersOnUnknownKind(t *testing.T) {
 // TestEveryDescriptorHasFetch — every registered kind exposes a Fetch
 // handler so the YAML viewer's "y" key can resolve the object. HelmRelease
 // is exempt because its YAML comes from the cached unstructured
-// (FetchHelmReleaseYAMLCmd), not a Get call. Topology presence is now an
+// (FetchHelmReleaseYAMLCmd), not a Get call. XRay presence is now an
 // interface check in the kinds package and is covered by per-kind tests.
 func TestEveryDescriptorHasFetch(t *testing.T) {
 	for _, rd := range k8s.Registry {

@@ -25,7 +25,7 @@ func (v ViewState) ResetToTable() ViewState {
 	return ViewState{Mode: ModeTable, Focus: FocusNav, FullScreen: false}
 }
 
-// EnterContentMode switches to a non-table mode (YAML/Editor/Logs/Topology/
+// EnterContentMode switches to a non-table mode (YAML/Editor/Logs/XRay/
 // Metrics). Focus moves to the content panel; fullScreen is preserved so a
 // user can transition between content modes without losing fullscreen.
 func (v ViewState) EnterContentMode(m ContentMode) ViewState {

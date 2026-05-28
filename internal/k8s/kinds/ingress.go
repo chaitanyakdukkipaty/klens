@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// ingress implements Deleter + Topologer.
+// ingress implements Deleter + XRayer.
 type ingress struct{}
 
 func (ingress) Meta() Meta {
@@ -110,7 +110,7 @@ func (ingress) Delete(c Context, ns, name string) error {
 	return c.Clientset.NetworkingV1().Ingresses(ns).Delete(c.Ctx, name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
 }
 
-func (i ingress) Topology(c Context, ns, name string) (*k8s.TreeNode, error) {
+func (i ingress) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
 	ings, err := listTyped[*networkingv1.Ingress](c, i.Meta().GVR, ns)
 	if err != nil {
 		return nil, err

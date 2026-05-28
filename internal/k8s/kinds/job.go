@@ -11,7 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// job implements Deleter + Logger.
+// job implements Deleter + Logger + XRayer.
 type job struct{}
 
 func (job) Meta() Meta {
@@ -100,6 +100,35 @@ func (job) LogTargets(c Context, ns, name string) ([]LogTarget, error) {
 		}
 	}
 	return out, nil
+}
+
+// XRay walks pods owned by this Job via owner reference UID.
+func (j job) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
+	jobs, err := listTyped[*batchv1.Job](c, j.Meta().GVR, ns)
+	if err != nil {
+		return nil, err
+	}
+	var jb *batchv1.Job
+	for _, x := range jobs {
+		if x.Name == name {
+			jb = x
+			break
+		}
+	}
+	if jb == nil {
+		return nil, nil
+	}
+	root := &k8s.TreeNode{Kind: "Job", Name: jb.Name}
+	pods, err := listTyped[*corev1.Pod](c, k8s.PodGVR, ns)
+	if err != nil {
+		return root, err
+	}
+	for _, p := range pods {
+		if ownedByUID(p.OwnerReferences, jb.UID) {
+			root.Children = append(root.Children, podTreeNode(p))
+		}
+	}
+	return root, nil
 }
 
 func init() { register(job{}) }

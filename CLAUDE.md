@@ -44,7 +44,7 @@ internal/k8s/
   resources.go                → ResourceDescriptor registry (26 types + aliases)
   logs.go                     → multi-pod log fan-in via goroutine channels; LogGroup type; Start/StartGrouped; LogLine carries Group field for tab routing
   metrics.go                  → metrics-server REST polling; MetricsUpdatedMsg
-  topology.go                 → ownerReference traversal; TreeNode builder
+  xray.go                     → ownerReference traversal; TreeNode builder
   operations.go               → delete/scale/rollout/drain/cordon
   portforward.go              → client-go SPDY port-forward (no subprocess)
   exec.go                     → remotecommand SPDY exec (pod attach)
@@ -54,7 +54,7 @@ internal/config/config.go     → persisted user preferences (namespace lists, l
 internal/ui/
   layout/layout.go            → panel sizing from terminal dimensions
   panels/                     → header, status_bar, nav_panel, resource_table, yaml_viewer, yaml_editor,
-                                describe_viewer, log_viewer, topology_panel, metrics_panel
+                                describe_viewer, log_viewer, xray_panel, metrics_panel
   widgets/                    → sparkline, diff_viewer, tree_renderer, confirm_dialog, scale_dialog,
                                 namespace_picker, cluster_picker
   styles/styles.go            → Lipgloss style definitions (Kubernetes blue theme)
@@ -64,8 +64,8 @@ internal/ui/
 
 - **Bubbletea message flow**: Informers run in background goroutines; they send to `msgCh chan tea.Msg`; `WatchCmd` relays these to the Bubbletea loop. Never mutate model state outside `Update()`.
 - **Lazy clientsets**: `cluster.Manager` creates a `*kubernetes.Clientset` on first use per context. On cluster switch, stop old `WatcherFactory` with `wf.Stop()` before creating a new one.
-- **Content modes**: `app.Model.mode` (ModeTable, ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics, ModeDescribe) controls which panel `contentView()` renders.
-- **Focus vs action keys**: `app.Model.focus` (FocusNav / FocusContent) controls which panel `↑↓/jk` navigate. Action keys (`y`, `d`, `l`, `t`, `m`, `a`, `s`, `ctrl+d`, `ctrl+k`) work regardless of focus — they always operate on the selected table row. Edit-YAML is reached by pressing `e` from inside the YAML viewer (ModeYAML), not from the table — `handleYAMLViewKeys` in `internal/app/model.go` owns that transition.
+- **Content modes**: `app.Model.mode` (ModeTable, ModeYAML, ModeEditor, ModeLogs, ModeXRay, ModeMetrics, ModeDescribe) controls which panel `contentView()` renders.
+- **Focus vs action keys**: `app.Model.focus` (FocusNav / FocusContent) controls which panel `↑↓/jk` navigate. Action keys (`y`, `d`, `l`, `x`, `m`, `a`, `s`, `ctrl+d`, `ctrl+k`) work regardless of focus — they always operate on the selected table row. Edit-YAML is reached by pressing `e` from inside the YAML viewer (ModeYAML), not from the table — `handleYAMLViewKeys` in `internal/app/model.go` owns that transition.
 - **Describe view**: `d` opens a kubectl-style describe view (ModeDescribe) for every registered kind. The thin wrapper around `k8s.io/kubectl/pkg/describe` lives in `internal/k8s/describe/` so the rest of the app keeps only one chokepoint into that library's heavy transitive graph. The view supports `/` regex filter, `n`/`N` match navigation, `c` copy-all, `ctrl+s` save-to-file (`$KLENS_DUMP_DIR` or `~/.klens/dumps`), `F` fullscreen, `esc` peel/back.
 - **Read-only mode**: `--readonly` CLI flag or `read_only: true` in config.json blocks all mutating operations (delete, scale, edit-apply, attach). The flag overrides the config but never forces it off.
 - **Metrics degradation**: if metrics-server not installed (404 on metrics API), show "n/a" — never block resource browsing.
@@ -90,7 +90,7 @@ internal/ui/
 | `y` | view YAML (press `e` from this view to edit) |
 | `d` | describe (kubectl-style, all kinds) |
 | `l` | logs (or multi-pod logs with space-selected rows) |
-| `t` | topology |
+| `x` | xray (multi-hop tree; Pod, all workload controllers, Service, Ingress, ServiceAccount) |
 | `m` | metrics |
 | `ctrl+d` | delete (graceful — respects `terminationGracePeriodSeconds`) |
 | `ctrl+k` | kill (force, grace=0) — red confirm dialog; only Pods see distinct on-wire semantics |
@@ -146,7 +146,7 @@ Create `internal/k8s/kinds/<kind>.go`. Implement `Meta()`, `Columns()` (with a
 every kind whose read path is the standard Lister; an explicit List body is
 only required for kinds with dynamic GVR discovery (HelmRelease) or anything
 that bypasses `Lister`. Implement any capability interfaces the kind supports
-(`Deleter`, `Killer`, `Scaler`, `Logger`, `Applier`, `Topologer`,
+(`Deleter`, `Killer`, `Scaler`, `Logger`, `Applier`, `XRayer`,
 `PortForwarder`, `Attacher`, `MetricsSupporter`). `Killer` is force-delete
 (grace=0) — implement only when "kill" is meaningfully distinct from "delete"
 (currently just Pod); for everything else, `KillCmd` falls back to
@@ -166,11 +166,28 @@ cells — add a field to `k8s.RowContext` only when a concrete column needs it.
 Nothing else changes; `listVia` fills `Row.Values` positionally from each
 Render closure.
 
-## Adding Topology to a Resource
+## Adding XRay to a Resource
 
-1. Set `SupportsTopology: true` in the `ResourceDescriptor` (drives the `t` hint in the status bar)
-2. Add `Build*Topology(obj, wf *WatcherFactory) *TreeNode` to `internal/k8s/topology.go`
-   - Ingress: `Ingress → Rule (host) → Route (path → svc:port) → Service → Pod`
-   - Service: `Service → Pod` (via selector matching)
-   - Deployment: `Deployment → ReplicaSet → Pod` (via OwnerReferences)
-3. Add a `case "Kind":` to `app.Model.buildTopology()` in `internal/app/model.go`
+Implement the `XRayer` capability interface on the Kind:
+
+```go
+func (k myKind) XRay(c Context, ns, name string) (*k8s.TreeNode, error)
+```
+
+The shim in `kinds/shim.go` picks it up automatically — no descriptor flag,
+no switch statement in `model.go`. Building blocks live in
+`internal/k8s/kinds/xray_helpers.go` (`lookupNode`, `containerNode`,
+`buildVolumeNode`, `ownedByUID`, `podTreeNode`, status helpers).
+
+Reference trees currently shipped:
+- Pod (`pod_xray.go`): `Pod → {Container × N → CM/Secret env-refs}` + `ServiceAccount` + `Volume → CM/Secret/PVC` (full k9s parity)
+- Deployment / ReplicaSet: `Deployment → ReplicaSet → Pod` (owner-ref)
+- StatefulSet / DaemonSet / Job: `<controller> → Pod` (owner-ref)
+- CronJob: `CronJob → Job → Pod` (owner-ref both hops)
+- Service: `Service → Pod` (selector match)
+- Ingress: `Ingress → Rule → Route → Service → Pod`
+- ServiceAccount: `ServiceAccount → Secret × N, ImagePullSecret × M`
+
+Missing referents (dangling CM / Secret / PVC / SA / Secret-ref) render with
+`TreeNode.Status = "missing"`, styled dim-red via `styles.StatusStyle`. Do
+not omit them — surfacing the gap is the whole point of the view.

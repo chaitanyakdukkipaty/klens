@@ -28,11 +28,10 @@ func renderNode(node *k8s.TreeNode, prefix string, isLast bool, lines *[]string)
 		childPrefix = prefix + "   "
 	}
 
-	statusStyle := appstyles.StatusStyle(node.Status)
-
-	label := treeKindStyle.Render(node.Kind) + " " +
-		treeNameStyle.Render(node.Name) + " " +
-		statusStyle.Render("[" + node.Status + "]")
+	label := treeKindStyle.Render(node.Kind) + " " + treeNameStyle.Render(node.Name)
+	if node.Status != "" {
+		label += " " + appstyles.StatusStyle(node.Status).Render("["+node.Status+"]")
+	}
 
 	if prefix == "" {
 		// Root node — no connector

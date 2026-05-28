@@ -35,21 +35,21 @@ type FetchFunc func(cs kubernetes.Interface, name, namespace string) (any, error
 // alongside ResourceDescriptor.Actions and Supports*. Dispatch now lives in
 // internal/k8s/kinds — every action site does `_, ok := kind.(Capability)`.)
 
-// BuildTopologyFunc returns a topology tree rooted at the named resource.
-type BuildTopologyFunc func(wf *WatcherFactory, namespace, name string) *TreeNode
+// BuildXRayFunc returns an XRay tree rooted at the named resource.
+type BuildXRayFunc func(wf *WatcherFactory, namespace, name string) *TreeNode
 
 // ResourceDescriptor describes a Kubernetes resource type.
 //
 // The metadata fields (Kind, Plural, Columns) are static and live in the
-// Registry. The behavior closures (ListRows, Fetch, BuildTopology) are
-// attached via SetHandlers from a registration site so that per-kind code can
-// live in one place even when it depends on the UI layer (lipgloss-rendered
+// Registry. The behavior closures (ListRows, Fetch, BuildXRay) are attached
+// via SetHandlers from a registration site so that per-kind code can live in
+// one place even when it depends on the UI layer (lipgloss-rendered
 // percentages, etc.) that the k8s package itself doesn't import.
 //
 // Capability presence (logs, scale, delete, …) is no longer expressed on the
 // descriptor — every action site checks via `kind.(kinds.Capability)` type
 // assertion. The descriptor's only remaining job is the legacy listing /
-// fetch / topology dispatch that the shim still bridges.
+// fetch / xray dispatch that the shim still bridges.
 type ResourceDescriptor struct {
 	Kind       string
 	Plural     string
@@ -60,9 +60,9 @@ type ResourceDescriptor struct {
 	Columns    []Column
 
 	// Behavior — populated via SetHandlers, optional per kind.
-	ListRows      ListRowsFunc
-	Fetch         FetchFunc
-	BuildTopology BuildTopologyFunc
+	ListRows  ListRowsFunc
+	Fetch     FetchFunc
+	BuildXRay BuildXRayFunc
 }
 
 // Column defines a table column for a resource type.
@@ -90,11 +90,11 @@ type Column struct {
 type ResourceRow struct {
 	Name       string
 	Namespace  string
-	Status     string    // used as color key for status styling
+	Status     string // used as color key for status styling
 	Age        string
-	SortByTime time.Time // when non-zero, WithRows sorts descending by this instead of Name
-	Values     []string  // ordered display values matching column layout; when set, buildRow uses these
-	Extra      []string  // additional column values (legacy)
+	SortByTime time.Time   // when non-zero, WithRows sorts descending by this instead of Name
+	Values     []string    // ordered display values matching column layout; when set, buildRow uses these
+	Extra      []string    // additional column values (legacy)
 	Raw        interface{} // underlying k8s object
 }
 
@@ -182,12 +182,12 @@ func RegisterDescriptor(rd ResourceDescriptor) bool {
 
 // SetHandlers attaches behavior closures to the descriptor for `kind`. Returns
 // false if the kind is not registered. Pass nil for any handler that does not
-// apply (e.g. BuildTopology for kinds without a Topologer implementation).
+// apply (e.g. BuildXRay for kinds without an XRayer implementation).
 //
 // This registration pattern lets per-kind glue live in one file while keeping
 // the metadata Registry pure data. The kinds package's shim is the only
 // remaining caller.
-func SetHandlers(kind string, list ListRowsFunc, fetch FetchFunc, topology BuildTopologyFunc) bool {
+func SetHandlers(kind string, list ListRowsFunc, fetch FetchFunc, xray BuildXRayFunc) bool {
 	i, ok := aliasMap[strings.ToLower(kind)]
 	if !ok {
 		return false
@@ -198,8 +198,8 @@ func SetHandlers(kind string, list ListRowsFunc, fetch FetchFunc, topology Build
 	if fetch != nil {
 		Registry[i].Fetch = fetch
 	}
-	if topology != nil {
-		Registry[i].BuildTopology = topology
+	if xray != nil {
+		Registry[i].BuildXRay = xray
 	}
 	return true
 }

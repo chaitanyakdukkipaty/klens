@@ -19,20 +19,20 @@ func (fakeNoCaps) Fetch(context.Context, Context, string, string) (Object, error
 
 // fakeFullCaps is the truth-table reference for "Kind with every capability."
 // Mirrors Pod's eventual shape — Logger, Attacher, Scaler, Deleter, Killer,
-// PortForwarder, Topologer, Applier, Suspender.
+// PortForwarder, XRayer, Applier, Suspender.
 type fakeFullCaps struct{ fakeNoCaps }
 
-func (fakeFullCaps) Meta() Meta                                                       { return Meta{Kind: "TruthTableB", Plural: "truthtablesb"} }
-func (fakeFullCaps) LogTargets(Context, string, string) ([]LogTarget, error)          { return nil, nil }
-func (fakeFullCaps) Attach(Context, string, string) tea.Cmd                           { return nil }
-func (fakeFullCaps) Scale(Context, string, string, int32) error                       { return nil }
-func (fakeFullCaps) CurrentReplicas(Object) int32                                     { return 0 }
-func (fakeFullCaps) Delete(Context, string, string) error                             { return nil }
-func (fakeFullCaps) Kill(Context, string, string) error                               { return nil }
-func (fakeFullCaps) ContainerPorts(Context, string, string) ([]ContainerPort, error)  { return nil, nil }
-func (fakeFullCaps) Topology(Context, string, string) (*k8s.TreeNode, error)          { return nil, nil }
-func (fakeFullCaps) Apply(Context, string, string, []byte) error                      { return nil }
-func (fakeFullCaps) Suspend(Context, string, string, bool) error                      { return nil }
+func (fakeFullCaps) Meta() Meta                                                      { return Meta{Kind: "TruthTableB", Plural: "truthtablesb"} }
+func (fakeFullCaps) LogTargets(Context, string, string) ([]LogTarget, error)         { return nil, nil }
+func (fakeFullCaps) Attach(Context, string, string) tea.Cmd                          { return nil }
+func (fakeFullCaps) Scale(Context, string, string, int32) error                      { return nil }
+func (fakeFullCaps) CurrentReplicas(Object) int32                                    { return 0 }
+func (fakeFullCaps) Delete(Context, string, string) error                            { return nil }
+func (fakeFullCaps) Kill(Context, string, string) error                              { return nil }
+func (fakeFullCaps) ContainerPorts(Context, string, string) ([]ContainerPort, error) { return nil, nil }
+func (fakeFullCaps) XRay(Context, string, string) (*k8s.TreeNode, error)             { return nil, nil }
+func (fakeFullCaps) Apply(Context, string, string, []byte) error                     { return nil }
+func (fakeFullCaps) Suspend(Context, string, string, bool) error                     { return nil }
 
 // TestCapabilityAssertions asserts that direct type assertions on Kind
 // values surface every capability for a full-cap type and none for a
@@ -53,15 +53,15 @@ func TestCapabilityAssertions(t *testing.T) {
 			name: "every capability",
 			k:    fakeFullCaps{},
 			caps: map[string]bool{
-				"Logger":           true,
-				"Attacher":         true,
-				"Scaler":           true,
-				"Deleter":          true,
-				"Killer":           true,
-				"PortForwarder":    true,
-				"Topologer":        true,
-				"Applier":          true,
-				"Suspender":        true,
+				"Logger":        true,
+				"Attacher":      true,
+				"Scaler":        true,
+				"Deleter":       true,
+				"Killer":        true,
+				"PortForwarder": true,
+				"XRayer":        true,
+				"Applier":       true,
+				"Suspender":     true,
 			},
 		},
 	}
@@ -75,7 +75,7 @@ func TestCapabilityAssertions(t *testing.T) {
 			_, isDeleter := any(c.k).(Deleter)
 			_, isKiller := any(c.k).(Killer)
 			_, isPF := any(c.k).(PortForwarder)
-			_, isTopo := any(c.k).(Topologer)
+			_, isXRay := any(c.k).(XRayer)
 			_, isApplier := any(c.k).(Applier)
 			_, isSuspender := any(c.k).(Suspender)
 			got := map[string]bool{
@@ -85,7 +85,7 @@ func TestCapabilityAssertions(t *testing.T) {
 				"Deleter":       isDeleter,
 				"Killer":        isKiller,
 				"PortForwarder": isPF,
-				"Topologer":     isTopo,
+				"XRayer":        isXRay,
 				"Applier":       isApplier,
 				"Suspender":     isSuspender,
 			}
@@ -118,11 +118,11 @@ func TestLegacyDescriptorMetadata(t *testing.T) {
 	if rd.Fetch == nil {
 		t.Errorf("expected Fetch wired")
 	}
-	if rd.BuildTopology != nil {
-		t.Errorf("BuildTopology should be nil for no-caps kind")
+	if rd.BuildXRay != nil {
+		t.Errorf("BuildXRay should be nil for no-caps kind")
 	}
 	rdFull := legacyDescriptorFrom(fakeFullCaps{})
-	if rdFull.BuildTopology == nil {
-		t.Errorf("BuildTopology should be wired for Topologer")
+	if rdFull.BuildXRay == nil {
+		t.Errorf("BuildXRay should be wired for XRayer")
 	}
 }

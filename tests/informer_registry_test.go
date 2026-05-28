@@ -70,7 +70,7 @@ func TestRegistryListsSeededTypedObjects(t *testing.T) {
 }
 
 // TestListAsTypeAssertion proves the generic helper: ListAs[*corev1.Pod]
-// returns the typed slice that row builders and topology consume, and
+// returns the typed slice that row builders and xray consume, and
 // ListAs of a kind with no informer (RBAC) returns nil rather than
 // surfacing a programmer error.
 func TestListAsTypeAssertion(t *testing.T) {

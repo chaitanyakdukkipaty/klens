@@ -42,7 +42,7 @@ const (
 	ModeYAML
 	ModeEditor
 	ModeLogs
-	ModeTopology
+	ModeXRay
 	ModeMetrics
 	ModeEvents
 )

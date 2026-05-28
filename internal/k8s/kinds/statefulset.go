@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// statefulSet implements Scaler + Deleter + Logger + Applier.
+// statefulSet implements Scaler + Deleter + Logger + Applier + XRayer.
 type statefulSet struct{}
 
 func (statefulSet) Meta() Meta {
@@ -113,6 +113,36 @@ func (statefulSet) LogTargets(c Context, ns, name string) ([]LogTarget, error) {
 		}
 	}
 	return out, nil
+}
+
+// XRay walks pods whose owner reference points at this StatefulSet by
+// Kind+Name (StatefulSets directly own pods without a controller indirection).
+func (s statefulSet) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
+	sets, err := listTyped[*appsv1.StatefulSet](c, s.Meta().GVR, ns)
+	if err != nil {
+		return nil, err
+	}
+	var sts *appsv1.StatefulSet
+	for _, x := range sets {
+		if x.Name == name {
+			sts = x
+			break
+		}
+	}
+	if sts == nil {
+		return nil, nil
+	}
+	root := &k8s.TreeNode{Kind: "StatefulSet", Name: sts.Name}
+	pods, err := listTyped[*corev1.Pod](c, k8s.PodGVR, ns)
+	if err != nil {
+		return root, err
+	}
+	for _, p := range pods {
+		if ownedByUID(p.OwnerReferences, sts.UID) {
+			root.Children = append(root.Children, podTreeNode(p))
+		}
+	}
+	return root, nil
 }
 
 func init() { register(statefulSet{}) }

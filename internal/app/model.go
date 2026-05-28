@@ -34,7 +34,7 @@ const (
 	ModeYAML
 	ModeEditor
 	ModeLogs
-	ModeTopology
+	ModeXRay
 	ModeMetrics
 	ModeDescribe
 )
@@ -56,7 +56,7 @@ type Model struct {
 	yamlViewCtrl    modes.YAMLViewController
 	yamlEditCtrl    modes.YAMLEditController
 	logsCtrl        modes.LogsController
-	topologyCtrl    modes.TopologyController
+	xrayCtrl        modes.XRayController
 	metricsCtrl     modes.MetricsController
 	describeCtrl    modes.DescribeViewController
 	confirm         widgets.ConfirmDialog
@@ -74,7 +74,7 @@ type Model struct {
 
 	// fullScreen, when true, hides header / nav / status and renders the
 	// active content panel using the entire terminal. Toggled by `F` in
-	// ModeYAML / ModeEditor / ModeLogs / ModeTopology / ModeMetrics. Reset to
+	// ModeYAML / ModeEditor / ModeLogs / ModeXRay / ModeMetrics. Reset to
 	// false whenever the user returns to ModeTable.
 	fullScreen bool
 
@@ -155,7 +155,7 @@ func New(readOnly bool) Model {
 		yamlViewCtrl:    modes.NewYAMLViewController(panels.NewYAMLViewer(60, 22)),
 		yamlEditCtrl:    modes.NewYAMLEditController(panels.NewYAMLEditor(60, 22)),
 		logsCtrl:        modes.NewLogsController(panels.NewLogViewer(60, 22)),
-		topologyCtrl:    modes.NewTopologyController(panels.NewTopologyPanel(60, 22)),
+		xrayCtrl:        modes.NewXRayController(panels.NewXRayPanel(60, 22)),
 		metricsCtrl:     modes.NewMetricsController(panels.NewMetricsPanel(60, 22)),
 		describeCtrl:    modes.NewDescribeViewController(panels.NewDescribeViewer(60, 22)),
 		confirm:         widgets.NewConfirmDialog(),
@@ -792,9 +792,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd := m.yamlEditCtrl.Update(msg)
 			m.yamlEditCtrl = next.(modes.YAMLEditController)
 			return m, cmd
-		case ModeTopology:
-			next, cmd := m.topologyCtrl.Update(msg)
-			m.topologyCtrl = next.(modes.TopologyController)
+		case ModeXRay:
+			next, cmd := m.xrayCtrl.Update(msg)
+			m.xrayCtrl = next.(modes.XRayController)
 			return m, cmd
 		case ModeMetrics:
 			next, cmd := m.metricsCtrl.Update(msg)
@@ -824,7 +824,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case "F":
 		switch m.mode {
-		case ModeYAML, ModeEditor, ModeLogs, ModeTopology, ModeMetrics, ModeDescribe:
+		case ModeYAML, ModeEditor, ModeLogs, ModeXRay, ModeMetrics, ModeDescribe:
 			// Let the editor controller consume F as literal text when in
 			// Insert mode. consumed=false falls through to fullscreen toggle.
 			if m.mode == ModeEditor {
@@ -976,7 +976,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// Action keys fire even when nav panel has focus (but not during filter input)
 		if !m.nav.FilterActive() {
 			switch msg.String() {
-			case "y", "l", "t", "m", "d", "a", "s", "f", "F", "ctrl+d", "ctrl+k":
+			case "y", "l", "x", "m", "d", "a", "s", "f", "F", "ctrl+d", "ctrl+k":
 				return m.handleTableKeys(msg)
 			}
 		}
@@ -1010,9 +1010,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if m.mode == ModeTopology {
-		next, cmd, _ := m.topologyCtrl.HandleKey(msg)
-		m.topologyCtrl = next.(modes.TopologyController)
+	if m.mode == ModeXRay {
+		next, cmd, _ := m.xrayCtrl.HandleKey(msg)
+		m.xrayCtrl = next.(modes.XRayController)
 		return m, cmd
 	}
 
@@ -1106,8 +1106,8 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m.actionViewYAML()
 	case "l":
 		return m.actionLogs()
-	case "t":
-		return m.actionTopology()
+	case "x":
+		return m.actionXRay()
 	case "m":
 		return m.actionMetrics()
 	case "d":
@@ -1141,8 +1141,8 @@ func (m Model) dispatchTableAction(action string) (Model, tea.Cmd) {
 		return m.actionViewYAML()
 	case "l":
 		return m.actionLogs()
-	case "t":
-		return m.actionTopology()
+	case "x":
+		return m.actionXRay()
 	case "m":
 		return m.actionMetrics()
 	case "a":
@@ -1206,7 +1206,7 @@ func pluralizeKind(kind string) string {
 }
 
 // buildMultiContextMenuItems returns the menu entries that make sense when more
-// than one row is selected. Single-resource actions (View YAML, Topology, Attach,
+// than one row is selected. Single-resource actions (View YAML, XRay, Attach,
 // Scale, etc.) are intentionally excluded.
 func buildMultiContextMenuItems(kind string, count int, readOnly bool) []widgets.MenuItem {
 	k, ok := kinds.Lookup(kind)
@@ -1259,8 +1259,8 @@ func buildContextMenuItems(kind string, readOnly bool) []widgets.MenuItem {
 	if _, ok := any(k).(kinds.Logger); ok {
 		items = append(items, widgets.MenuItem{Label: "View Logs", Action: "l", Hint: "l"})
 	}
-	if _, ok := any(k).(kinds.Topologer); ok {
-		items = append(items, widgets.MenuItem{Label: "View Topology", Action: "t", Hint: "t"})
+	if _, ok := any(k).(kinds.XRayer); ok {
+		items = append(items, widgets.MenuItem{Label: "View XRay", Action: "x", Hint: "x"})
 	}
 	if _, ok := any(k).(kinds.MetricsSupporter); ok {
 		items = append(items, widgets.MenuItem{Label: "View Metrics", Action: "m", Hint: "m"})
@@ -1384,12 +1384,12 @@ func (m Model) actionLogs() (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) actionTopology() (Model, tea.Cmd) {
+func (m Model) actionXRay() (Model, tea.Cmd) {
 	row := m.tableCtrl.SelectedRow()
 	if row != nil && m.watcher != nil {
-		tree := m.buildTopology(m.nav.ActiveKind(), row.Name)
-		m.topologyCtrl = m.topologyCtrl.SetTree(m.nav.ActiveKind(), row.Name, tree)
-		m.mode = ModeTopology
+		tree := m.buildXRay(m.nav.ActiveKind(), row.Name)
+		m.xrayCtrl = m.xrayCtrl.SetTree(m.nav.ActiveKind(), row.Name, tree)
+		m.mode = ModeXRay
 		m.focus = FocusContent
 	}
 	return m, nil
@@ -1801,7 +1801,7 @@ type deleteTarget struct {
 type pendingOpData struct {
 	op        string
 	kind      string
-	name      string         // single-resource ops (scale, suspend, etc.)
+	name      string // single-resource ops (scale, suspend, etc.)
 	namespace string
 	targets   []deleteTarget // multi-delete
 }
@@ -1941,15 +1941,15 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 	)
 }
 
-func (m Model) buildTopology(kind, name string) *k8sops.TreeNode {
+func (m Model) buildXRay(kind, name string) *k8sops.TreeNode {
 	if m.watcher == nil {
 		return nil
 	}
 	rd, ok := k8sops.Resolve(kind)
-	if !ok || rd.BuildTopology == nil {
+	if !ok || rd.BuildXRay == nil {
 		return nil
 	}
-	return rd.BuildTopology(m.watcher, m.namespace, name)
+	return rd.BuildXRay(m.watcher, m.namespace, name)
 }
 
 // kindSyncing reports whether the watcher's informer for `kind` has not yet
@@ -1986,8 +1986,8 @@ func (m *Model) setStatusBarKind(kind string) {
 	if _, ok := any(k).(kinds.Logger); ok {
 		help = append(help, panels.HelpItem{Key: "l", Desc: "logs"})
 	}
-	if _, ok := any(k).(kinds.Topologer); ok {
-		help = append(help, panels.HelpItem{Key: "t", Desc: "topology"})
+	if _, ok := any(k).(kinds.XRayer); ok {
+		help = append(help, panels.HelpItem{Key: "x", Desc: "xray"})
 	}
 	if _, ok := any(k).(kinds.MetricsSupporter); ok {
 		help = append(help, panels.HelpItem{Key: "m", Desc: "metrics"})
@@ -2136,8 +2136,8 @@ func (m Model) contentView() string {
 		return m.yamlEditCtrl.View()
 	case ModeLogs:
 		return m.logsCtrl.View()
-	case ModeTopology:
-		return m.topologyCtrl.View()
+	case ModeXRay:
+		return m.xrayCtrl.View()
 	case ModeMetrics:
 		return m.metricsCtrl.View()
 	case ModeDescribe:
@@ -2181,7 +2181,7 @@ func (m Model) resizePanels() Model {
 	m.yamlViewCtrl = m.yamlViewCtrl.SetSize(cw, ch).(modes.YAMLViewController)
 	m.yamlEditCtrl = m.yamlEditCtrl.SetSize(cw, ch).(modes.YAMLEditController)
 	m.logsCtrl = m.logsCtrl.SetSize(cw, ch).(modes.LogsController)
-	m.topologyCtrl = m.topologyCtrl.SetSize(cw, ch).(modes.TopologyController)
+	m.xrayCtrl = m.xrayCtrl.SetSize(cw, ch).(modes.XRayController)
 	m.metricsCtrl = m.metricsCtrl.SetSize(cw, ch).(modes.MetricsController)
 	m.describeCtrl = m.describeCtrl.SetSize(cw, ch).(modes.DescribeViewController)
 
@@ -2323,6 +2323,3 @@ func (m *Model) stopAll() {
 		m.pfManager.StopAll()
 	}
 }
-
-
-

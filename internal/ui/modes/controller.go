@@ -1,5 +1,5 @@
 // Package modes hosts per-mode controllers — one per non-table content surface
-// (yaml view, yaml edit, logs, topology, metrics). The root model holds the
+// (yaml view, yaml edit, logs, xray, metrics). The root model holds the
 // active controller and forwards messages to it; controllers consume keys
 // themselves and emit explicit messages (see internal/app/messages.go) when
 // they want the root to take action.

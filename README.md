@@ -1,13 +1,13 @@
 # klens
 
-Kubernetes TUI with k9s-style keyboard navigation and OpenLens-class visual richness — topology trees, metrics sparklines, multi-pod log streaming, and a YAML editor with diff preview. Pure terminal. No Electron. No WebView.
+Kubernetes TUI with k9s-style keyboard navigation and OpenLens-class visual richness — XRay relationship trees, metrics sparklines, multi-pod log streaming, and a YAML editor with diff preview. Pure terminal. No Electron. No WebView.
 
 ## Features
 
 - **Resource browser** — 26 Kubernetes resource types with filterable, sortable tables
 - **YAML viewer & editor** — syntax-highlighted viewer; vim-style editor with diff preview before applying (`ctrl+s`)
 - **Log streaming** — multi-pod fan-in; space-select multiple pods and stream all logs at once; tab mode groups resources into named tabs; JSON lines are Chroma-highlighted with pretty-print toggle (`J`); inline search (`ctrl+f`) with `n`/`N` navigation; pod solo filter (`1`–`9`); live / paused scroll indicator
-- **Topology trees** — visual ownerReference traversal: `Ingress → Service → Pod`, `Deployment → ReplicaSet → Pod`
+- **XRay trees** (`x`) — multi-hop relationship view: `Pod → Containers (env+envFrom refs) + ServiceAccount + Volume → CM/Secret/PVC`, owner-ref chains for every workload controller, `Ingress → Rule → Route → Service → Pod`, `ServiceAccount → Secrets + ImagePullSecrets`. Missing referents render with a dim-red `[missing]` marker.
 - **Metrics panel** — ASCII sparklines for CPU and memory via metrics-server (degrades gracefully if not installed)
 - **Pod attach** — exec into a pod shell (`a`); opens a new tmux window when running inside tmux
 - **Scale** — scale Deployments and StatefulSets interactively (`s`)
@@ -70,7 +70,7 @@ klens auto-wraps itself in a new tmux session on launch if tmux is installed and
 | `y` | view YAML (press `e` from this view to edit) |
 | `d` | describe (kubectl-style, all kinds) |
 | `l` | stream logs (multi-pod with `space`-select) |
-| `t` | topology tree |
+| `x` | xray tree (Pod, workload controllers, Service, Ingress, ServiceAccount) |
 | `m` | metrics |
 | `ctrl+d` | delete (graceful — respects `terminationGracePeriodSeconds`) |
 | `ctrl+k` | kill (force, grace=0 — Pods only have distinct semantics) |

@@ -7,8 +7,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// TreeNode is a node in the resource topology tree. Each Kind that
-// implements Topologer (internal/k8s/kinds) builds a tree of these.
+// TreeNode is a node in the resource XRay tree. Each Kind that implements
+// XRayer (internal/k8s/kinds) builds a tree of these. Status is the badge
+// rendered next to the node: phase strings for live objects, "missing" for
+// references whose target is absent from the informer cache.
 type TreeNode struct {
 	Kind     string
 	Name     string

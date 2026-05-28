@@ -12,14 +12,14 @@ import (
 // the static k8s.Registry held for `k.Meta().Kind`. Every migrated Kind
 // goes through this once at init time; the resulting descriptor is appended
 // to k8s.Registry via RegisterDescriptor so the unmigrated callers
-// (model.go::listRows, buildTopology) keep working unchanged.
+// (model.go::listRows, buildXRay) keep working unchanged.
 //
 // Now that capability presence is checked via direct interface assertion at
 // every action site, this shim no longer derives Supports* booleans or
 // wires an Actions map — its only remaining job is to expose Columns +
-// ListRows + Fetch + BuildTopology so the unmigrated dispatch sites in
-// model.go::listRows / buildTopology still resolve. Step 6 of plan 01
-// deletes this file entirely.
+// ListRows + Fetch + BuildXRay so the unmigrated dispatch sites in
+// model.go::listRows / buildXRay still resolve. Step 6 of plan 01 deletes
+// this file entirely.
 func legacyDescriptorFrom(k Kind) k8s.ResourceDescriptor {
 	m := k.Meta()
 	rd := k8s.ResourceDescriptor{
@@ -33,8 +33,8 @@ func legacyDescriptorFrom(k Kind) k8s.ResourceDescriptor {
 	}
 	rd.ListRows = bridgeListRows(k)
 	rd.Fetch = bridgeFetch(k)
-	if t, ok := any(k).(Topologer); ok {
-		rd.BuildTopology = bridgeTopology(t)
+	if t, ok := any(k).(XRayer); ok {
+		rd.BuildXRay = bridgeXRay(t)
 	}
 	return rd
 }
@@ -76,8 +76,8 @@ func bridgeFetch(k Kind) k8s.FetchFunc {
 	}
 }
 
-// bridgeTopology lifts Topologer onto the legacy BuildTopologyFunc.
-func bridgeTopology(t Topologer) k8s.BuildTopologyFunc {
+// bridgeXRay lifts XRayer onto the legacy BuildXRayFunc.
+func bridgeXRay(t XRayer) k8s.BuildXRayFunc {
 	return func(wf *k8s.WatcherFactory, ns, name string) *k8s.TreeNode {
 		c := Context{
 			Ctx:       context.Background(),
@@ -85,7 +85,7 @@ func bridgeTopology(t Topologer) k8s.BuildTopologyFunc {
 			Lister:    k8s.NewCachedLister(wf),
 			HelmGVR:   wf.HelmReleaseGVR(),
 		}
-		tree, err := t.Topology(c, ns, name)
+		tree, err := t.XRay(c, ns, name)
 		if err != nil {
 			return nil
 		}

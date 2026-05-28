@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// deployment satisfies Scaler, Deleter, Logger, Applier, Topologer — the
+// deployment satisfies Scaler, Deleter, Logger, Applier, XRayer — the
 // canonical workload kind.
 type deployment struct{}
 
@@ -158,7 +158,7 @@ func (d deployment) LogTargets(c Context, ns, name string) ([]LogTarget, error) 
 	return targets, nil
 }
 
-func (d deployment) Topology(c Context, ns, name string) (*k8s.TreeNode, error) {
+func (d deployment) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
 	deps, err := listTyped[*appsv1.Deployment](c, d.Meta().GVR, ns)
 	if err != nil {
 		return nil, err
@@ -173,7 +173,7 @@ func (d deployment) Topology(c Context, ns, name string) (*k8s.TreeNode, error) 
 	if dep == nil {
 		return nil, nil
 	}
-	root := &k8s.TreeNode{Kind: "Deployment", Name: dep.Name, Status: deploymentTopologyStatus(dep)}
+	root := &k8s.TreeNode{Kind: "Deployment", Name: dep.Name, Status: deploymentXRayStatus(dep)}
 	rss, err := listTyped[*appsv1.ReplicaSet](c, k8s.ReplicaSetGVR, ns)
 	if err != nil {
 		return root, err
@@ -186,7 +186,7 @@ func (d deployment) Topology(c Context, ns, name string) (*k8s.TreeNode, error) 
 		if !ownedByUID(rs.OwnerReferences, dep.UID) {
 			continue
 		}
-		rsNode := &k8s.TreeNode{Kind: "ReplicaSet", Name: rs.Name, Status: replicaSetTopologyStatus(rs)}
+		rsNode := &k8s.TreeNode{Kind: "ReplicaSet", Name: rs.Name, Status: replicaSetXRayStatus(rs)}
 		for _, p := range pods {
 			if ownedByUID(p.OwnerReferences, rs.UID) {
 				rsNode.Children = append(rsNode.Children, podTreeNode(p))

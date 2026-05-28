@@ -10,8 +10,8 @@ import (
 	"github.com/chaitanyak/klens/internal/ui/widgets"
 )
 
-// TopologyPanel renders a unicode tree of resource relationships.
-type TopologyPanel struct {
+// XRayPanel renders a unicode tree of resource relationships.
+type XRayPanel struct {
 	viewport viewport.Model
 	width    int
 	height   int
@@ -20,12 +20,12 @@ type TopologyPanel struct {
 	name     string
 }
 
-func NewTopologyPanel(w, h int) TopologyPanel {
+func NewXRayPanel(w, h int) XRayPanel {
 	vp := viewport.New(viewport.WithWidth(max(1, w-4)), viewport.WithHeight(max(1, h-6)))
-	return TopologyPanel{viewport: vp, width: w, height: h}
+	return XRayPanel{viewport: vp, width: w, height: h}
 }
 
-func (t TopologyPanel) SetSize(w, h int) TopologyPanel {
+func (t XRayPanel) SetSize(w, h int) XRayPanel {
 	t.width = w
 	t.height = h
 	t.viewport.SetWidth(max(1, w-4))
@@ -33,21 +33,21 @@ func (t TopologyPanel) SetSize(w, h int) TopologyPanel {
 	return t
 }
 
-func (t TopologyPanel) SetFocused(f bool) TopologyPanel { t.focused = f; return t }
+func (t XRayPanel) SetFocused(f bool) XRayPanel { t.focused = f; return t }
 
-func (t TopologyPanel) SetTree(kind, name string, root *k8s.TreeNode) TopologyPanel {
+func (t XRayPanel) SetTree(kind, name string, root *k8s.TreeNode) XRayPanel {
 	t.kind = kind
 	t.name = name
 	if root != nil {
 		t.viewport.SetContent(widgets.RenderTree(root))
 	} else {
-		t.viewport.SetContent(styles.Muted.Render("  No topology data available"))
+		t.viewport.SetContent(styles.Muted.Render("  No XRay data available"))
 	}
 	t.viewport.GotoTop()
 	return t
 }
 
-func (t TopologyPanel) Update(msg tea.Msg) (TopologyPanel, tea.Cmd) {
+func (t XRayPanel) Update(msg tea.Msg) (XRayPanel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
 		var cmd tea.Cmd
@@ -69,12 +69,12 @@ func (t TopologyPanel) Update(msg tea.Msg) (TopologyPanel, tea.Cmd) {
 	return t, nil
 }
 
-func (t TopologyPanel) View() string {
+func (t XRayPanel) View() string {
 	border := styles.NormalBorder
 	if t.focused {
 		border = styles.FocusedBorder
 	}
-	title := styles.Title.Render(fmt.Sprintf("Topology: %s/%s", t.kind, t.name))
+	title := styles.Title.Render(fmt.Sprintf("XRay: %s/%s", t.kind, t.name))
 	help := "  " + RenderHelpInline([]HelpItem{
 		{Key: "↑↓/jk", Desc: "scroll"},
 		{Key: "g", Desc: "top"},

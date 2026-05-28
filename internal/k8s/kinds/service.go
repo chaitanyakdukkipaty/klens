@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// service implements Deleter + Applier + Topologer.
+// service implements Deleter + Applier + XRayer.
 type service struct{}
 
 func (service) Meta() Meta {
@@ -85,7 +85,7 @@ func (service) Apply(c Context, ns, name string, body []byte) error {
 	return err
 }
 
-func (s service) Topology(c Context, ns, name string) (*k8s.TreeNode, error) {
+func (s service) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
 	svcs, err := listTyped[*corev1.Service](c, s.Meta().GVR, ns)
 	if err != nil {
 		return nil, err

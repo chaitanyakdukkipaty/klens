@@ -6,11 +6,12 @@ import (
 
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// cronJob implements only Deleter. YAML view comes from the always-on
+// cronJob implements Deleter + XRayer. YAML view comes from the always-on
 // Fetch; no scale/logs/apply.
 type cronJob struct{}
 
@@ -66,6 +67,47 @@ func (cronJob) Delete(c Context, ns, name string) error {
 	}
 	grace := int64(0)
 	return c.Clientset.BatchV1().CronJobs(ns).Delete(c.Ctx, name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+}
+
+// XRay walks CronJob → Job → Pod via owner refs on both hops. If a CronJob
+// has zero active Jobs the tree has zero Job children — the truthful answer.
+func (j cronJob) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
+	crons, err := listTyped[*batchv1.CronJob](c, j.Meta().GVR, ns)
+	if err != nil {
+		return nil, err
+	}
+	var cj *batchv1.CronJob
+	for _, x := range crons {
+		if x.Name == name {
+			cj = x
+			break
+		}
+	}
+	if cj == nil {
+		return nil, nil
+	}
+	root := &k8s.TreeNode{Kind: "CronJob", Name: cj.Name}
+	jobs, err := listTyped[*batchv1.Job](c, k8s.JobGVR, ns)
+	if err != nil {
+		return root, err
+	}
+	pods, err := listTyped[*corev1.Pod](c, k8s.PodGVR, ns)
+	if err != nil {
+		return root, err
+	}
+	for _, jb := range jobs {
+		if !ownedByUID(jb.OwnerReferences, cj.UID) {
+			continue
+		}
+		jobNode := &k8s.TreeNode{Kind: "Job", Name: jb.Name}
+		for _, p := range pods {
+			if ownedByUID(p.OwnerReferences, jb.UID) {
+				jobNode.Children = append(jobNode.Children, podTreeNode(p))
+			}
+		}
+		root.Children = append(root.Children, jobNode)
+	}
+	return root, nil
 }
 
 func init() { register(cronJob{}) }

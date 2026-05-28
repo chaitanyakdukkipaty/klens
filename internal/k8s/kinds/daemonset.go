@@ -12,8 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// daemonSet implements Deleter + Logger + Applier. No Scaler (DaemonSets are
-// scheduled per-node, not by replicas).
+// daemonSet implements Deleter + Logger + Applier + XRayer. No Scaler
+// (DaemonSets are scheduled per-node, not by replicas).
 type daemonSet struct{}
 
 func (daemonSet) Meta() Meta {
@@ -96,6 +96,35 @@ func (daemonSet) LogTargets(c Context, ns, name string) ([]LogTarget, error) {
 		}
 	}
 	return out, nil
+}
+
+// XRay walks pods owned by this DaemonSet via owner reference UID.
+func (d daemonSet) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
+	sets, err := listTyped[*appsv1.DaemonSet](c, d.Meta().GVR, ns)
+	if err != nil {
+		return nil, err
+	}
+	var ds *appsv1.DaemonSet
+	for _, x := range sets {
+		if x.Name == name {
+			ds = x
+			break
+		}
+	}
+	if ds == nil {
+		return nil, nil
+	}
+	root := &k8s.TreeNode{Kind: "DaemonSet", Name: ds.Name}
+	pods, err := listTyped[*corev1.Pod](c, k8s.PodGVR, ns)
+	if err != nil {
+		return root, err
+	}
+	for _, p := range pods {
+		if ownedByUID(p.OwnerReferences, ds.UID) {
+			root.Children = append(root.Children, podTreeNode(p))
+		}
+	}
+	return root, nil
 }
 
 func init() { register(daemonSet{}) }

@@ -215,15 +215,18 @@ func TestListRowsHandlersRegisteredForExpectedKinds(t *testing.T) {
 		}
 	}
 
-	expectTopology := []string{"Deployment", "Service", "Ingress"}
-	for _, kind := range expectTopology {
+	expectXRay := []string{
+		"Pod", "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet",
+		"Job", "CronJob", "Service", "Ingress", "ServiceAccount",
+	}
+	for _, kind := range expectXRay {
 		rd, ok := k8s.Resolve(kind)
 		if !ok {
 			t.Errorf("kind %q not registered", kind)
 			continue
 		}
-		if rd.BuildTopology == nil {
-			t.Errorf("kind %q: BuildTopology handler not registered", kind)
+		if rd.BuildXRay == nil {
+			t.Errorf("kind %q: BuildXRay handler not registered", kind)
 		}
 	}
 }

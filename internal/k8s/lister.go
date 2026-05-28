@@ -33,6 +33,7 @@ var (
 	NamespaceGVR             = corev1.SchemeGroupVersion.WithResource("namespaces")
 	ConfigMapGVR             = corev1.SchemeGroupVersion.WithResource("configmaps")
 	SecretGVR                = corev1.SchemeGroupVersion.WithResource("secrets")
+	ServiceAccountGVR        = corev1.SchemeGroupVersion.WithResource("serviceaccounts")
 	PersistentVolumeGVR      = corev1.SchemeGroupVersion.WithResource("persistentvolumes")
 	PersistentVolumeClaimGVR = corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims")
 	EventGVR                 = corev1.SchemeGroupVersion.WithResource("events")

@@ -15,10 +15,10 @@ import (
 )
 
 // pod exercises every capability interface end-to-end: Logger, Attacher,
-// Deleter, PortForwarder, Applier, MetricsSupporter. It does NOT implement
-// Scaler (pods don't scale) or Topologer (no per-Pod tree). Every action
-// site type-asserts against these capability interfaces directly — there
-// is no Supports* indirection.
+// Deleter, PortForwarder, Applier, MetricsSupporter, XRayer (defined in
+// pod_xray.go). It does NOT implement Scaler (pods don't scale). Every
+// action site type-asserts against these capability interfaces directly
+// — there is no Supports* indirection.
 type pod struct{}
 
 func (pod) Meta() Meta {

@@ -76,6 +76,12 @@ func (f *FakeLister) List(ctx context.Context, gvr schema.GroupVersionResource, 
 			return nil, err
 		}
 		return wrapItems(l.Items, func(i int) runtime.Object { return &l.Items[i] }), nil
+	case ServiceAccountGVR:
+		l, err := f.cs.CoreV1().ServiceAccounts(scoped).List(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		return wrapItems(l.Items, func(i int) runtime.Object { return &l.Items[i] }), nil
 	case PersistentVolumeGVR:
 		l, err := f.cs.CoreV1().PersistentVolumes().List(ctx, opts)
 		if err != nil {

@@ -18,14 +18,14 @@ var (
 	colorBorder    = lipgloss.Color("#333355")
 
 	// Exported base colors (for direct use by panels/widgets)
-	ColorPrimary    = colorPrimary
-	ColorMuted      = colorMuted
-	ColorSelection  = colorSecondary            // #5C6BC0 — selected row/nav background
-	ColorHeaderBg   = lipgloss.Color("#0D1117") // Space Black — header bar
-	ColorAbyss      = lipgloss.Color("#0D0D1A") // Abyss — status bar, dialog backdrop
-	ColorReadOnly   = lipgloss.Color("#FF6B6B") // Readonly Coral — [RO] indicator
-	ColorBodyText   = lipgloss.Color("#AAAAAA") // secondary body text
-	ColorWhite      = lipgloss.Color("#FFFFFF") // selection foreground
+	ColorPrimary     = colorPrimary
+	ColorMuted       = colorMuted
+	ColorSelection   = colorSecondary            // #5C6BC0 — selected row/nav background
+	ColorHeaderBg    = lipgloss.Color("#0D1117") // Space Black — header bar
+	ColorAbyss       = lipgloss.Color("#0D0D1A") // Abyss — status bar, dialog backdrop
+	ColorReadOnly    = lipgloss.Color("#FF6B6B") // Readonly Coral — [RO] indicator
+	ColorBodyText    = lipgloss.Color("#AAAAAA") // secondary body text
+	ColorWhite       = lipgloss.Color("#FFFFFF") // selection foreground
 	ColorDiffContext = lipgloss.Color("#888888") // diff viewer context lines (unchanged lines)
 
 	// Status colors
@@ -137,6 +137,7 @@ var statusStyleMap = map[string]lipgloss.Style{
 	"Running":           lipgloss.NewStyle().Foreground(ColorRunning),
 	"Active":            lipgloss.NewStyle().Foreground(ColorRunning),
 	"Bound":             lipgloss.NewStyle().Foreground(ColorRunning),
+	"Ready":             lipgloss.NewStyle().Foreground(ColorRunning),
 	"True":              lipgloss.NewStyle().Foreground(ColorRunning),
 	"Pending":           lipgloss.NewStyle().Foreground(ColorPending),
 	"ContainerCreating": lipgloss.NewStyle().Foreground(ColorPending),
@@ -149,6 +150,9 @@ var statusStyleMap = map[string]lipgloss.Style{
 	"Terminating":       lipgloss.NewStyle().Foreground(ColorTerminated),
 	"Succeeded":         lipgloss.NewStyle().Foreground(ColorSucceeded),
 	"Completed":         lipgloss.NewStyle().Foreground(ColorSucceeded),
+	// "missing" flags an XRay reference whose target isn't in the informer
+	// cache — dim-red so it reads as a real warning without screaming.
+	"missing": lipgloss.NewStyle().Foreground(ColorFailed).Faint(true),
 }
 
 var statusStyleDefault = lipgloss.NewStyle().Foreground(ColorUnknown)

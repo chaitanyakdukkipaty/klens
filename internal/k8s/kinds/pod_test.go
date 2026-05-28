@@ -127,11 +127,10 @@ func TestPodLogTargets(t *testing.T) {
 }
 
 // TestPodCapabilities — every key Pod participates in (yaml view, logs,
-// attach, delete, port-forward, metrics, apply) is now a capability
-// interface that pod{} must implement. Scaler / Topologer must not be
-// satisfied: pods don't scale and don't render a tree. Catches regressions
-// in pod's interface satisfaction (a missed method would silently disable
-// the UI hint).
+// attach, delete, port-forward, metrics, apply, xray) is a capability
+// interface that pod{} must implement. Scaler must not be satisfied: pods
+// don't scale. Catches regressions in pod's interface satisfaction (a
+// missed method would silently disable the UI hint).
 func TestPodCapabilities(t *testing.T) {
 	k, ok := Default.Resolve("Pod")
 	if !ok {
@@ -144,8 +143,8 @@ func TestPodCapabilities(t *testing.T) {
 	must(t, "PortForwarder", func() bool { _, ok := any(k).(PortForwarder); return ok })
 	must(t, "MetricsSupporter", func() bool { _, ok := any(k).(MetricsSupporter); return ok })
 	must(t, "Applier", func() bool { _, ok := any(k).(Applier); return ok })
+	must(t, "XRayer", func() bool { _, ok := any(k).(XRayer); return ok })
 	mustNot(t, "Scaler", func() bool { _, ok := any(k).(Scaler); return ok })
-	mustNot(t, "Topologer", func() bool { _, ok := any(k).(Topologer); return ok })
 }
 
 func must(t *testing.T, name string, f func() bool) {
@@ -161,4 +160,3 @@ func mustNot(t *testing.T, name string, f func() bool) {
 		t.Errorf("expected Pod to NOT implement %s", name)
 	}
 }
-

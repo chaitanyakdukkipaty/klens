@@ -218,9 +218,9 @@ func (w *WatcherFactory) Registry() *InformerRegistry { return w.registry }
 // error. Returns nil if the kind is not informer-backed.
 //
 // This is the single seam for reading from the informer cache outside of the
-// CachedLister.List dispatcher. Row builders, topology, and model-side scans
-// all funnel through here, which is why the 17 per-kind List<Kind> methods
-// are no longer needed.
+// CachedLister.List dispatcher. Row builders, xray, and model-side scans all
+// funnel through here, which is why the 17 per-kind List<Kind> methods are
+// no longer needed.
 func ListAs[T runtime.Object](wf *WatcherFactory, kind string, namespace string) []T {
 	if wf == nil || wf.registry == nil {
 		return nil

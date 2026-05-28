@@ -10,7 +10,9 @@ import (
 )
 
 // serviceAccount preserves the pre-migration behavior: Fetch is wired so the
-// YAML view works, but List returns nil because no row builder existed.
+// YAML view works, but List returns nil because no row builder existed. It
+// also implements XRayer so users can see which Secrets / ImagePullSecrets
+// the SA references and which are missing.
 type serviceAccount struct{}
 
 func (serviceAccount) Meta() Meta {
@@ -19,7 +21,7 @@ func (serviceAccount) Meta() Meta {
 		Plural:     "serviceaccounts",
 		Aliases:    []string{"sa"},
 		Namespaced: true,
-		GVR:        corev1.SchemeGroupVersion.WithResource("serviceaccounts"),
+		GVR:        k8s.ServiceAccountGVR,
 	}
 }
 
@@ -38,6 +40,39 @@ func (serviceAccount) Fetch(ctx context.Context, c Context, ns, name string) (Ob
 		return nil, fmt.Errorf("serviceAccount.Fetch: no Clientset")
 	}
 	return c.Clientset.CoreV1().ServiceAccounts(ns).Get(ctx, name, metav1.GetOptions{})
+}
+
+// XRay lists the Secrets + ImagePullSecrets this ServiceAccount references,
+// marking any whose name is not present in the namespace Secret cache as
+// "missing" — the canonical "why is image-pull failing?" trail.
+func (serviceAccount) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
+	sas, err := listTyped[*corev1.ServiceAccount](c, k8s.ServiceAccountGVR, ns)
+	if err != nil {
+		return nil, err
+	}
+	var sa *corev1.ServiceAccount
+	for _, x := range sas {
+		if x.Name == name {
+			sa = x
+			break
+		}
+	}
+	if sa == nil {
+		return nil, nil
+	}
+	secs, err := listTyped[*corev1.Secret](c, k8s.SecretGVR, ns)
+	if err != nil {
+		return nil, err
+	}
+	present := secretNames(secs)
+	root := &k8s.TreeNode{Kind: "ServiceAccount", Name: sa.Name}
+	for _, ref := range sa.Secrets {
+		root.Children = append(root.Children, lookupNode("Secret", ref.Name, present[ref.Name]))
+	}
+	for _, ref := range sa.ImagePullSecrets {
+		root.Children = append(root.Children, lookupNode("ImagePullSecret", ref.Name, present[ref.Name]))
+	}
+	return root, nil
 }
 
 func init() { register(serviceAccount{}) }

@@ -1,6 +1,6 @@
 // Package kinds owns per-Kubernetes-kind behavior. Each kind is one file: it
 // implements the Kind interface plus zero or more capability interfaces
-// (Logger, Attacher, Scaler, Deleter, PortForwarder, Topologer, Applier,
+// (Logger, Attacher, Scaler, Deleter, PortForwarder, XRayer, Applier,
 // Suspender, MetricsSupporter). Capability presence is "does this type
 // satisfy the interface" — there is no Supports* boolean. Adding a kind is
 // a single file, not five coordinated edits.
@@ -14,7 +14,7 @@
 // with this package via the shim in shim.go that builds a metadata-only
 // k8s.ResourceDescriptor for every Kind registered here. Step 6 of that
 // plan deletes the shim and the legacy registry; model.go's remaining
-// listRows / buildTopology paths then switch to kinds.Lookup directly.
+// listRows / buildXRay paths then switch to kinds.Lookup directly.
 package kinds
 
 import (
@@ -112,10 +112,11 @@ type ContainerPort struct {
 	Port int32  // container port number
 }
 
-// Topologer returns a topology tree rooted at the named resource.
-type Topologer interface {
+// XRayer returns an XRay tree rooted at the named resource — a multi-hop
+// view of what the resource is wired to (owner refs, selectors, references).
+type XRayer interface {
 	Kind
-	Topology(c Context, ns, name string) (*k8s.TreeNode, error)
+	XRay(c Context, ns, name string) (*k8s.TreeNode, error)
 }
 
 // Applier patches a kind with raw merge-patch JSON. Every kind that supports

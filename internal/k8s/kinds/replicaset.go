@@ -13,9 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// replicaSet implements Scaler + Deleter + Logger. Apply is intentionally
-// not implemented — RS pods are owned by their parent Deployment, so
-// merge-patch through klens would race the controller.
+// replicaSet implements Scaler + Deleter + Logger + XRayer. Apply is
+// intentionally not implemented — RS pods are owned by their parent
+// Deployment, so merge-patch through klens would race the controller.
 type replicaSet struct{}
 
 func (replicaSet) Meta() Meta {
@@ -124,6 +124,35 @@ func (r replicaSet) LogTargets(c Context, ns, name string) ([]LogTarget, error) 
 		}
 	}
 	return out, nil
+}
+
+// XRay walks pods owned by this ReplicaSet via owner reference UID.
+func (r replicaSet) XRay(c Context, ns, name string) (*k8s.TreeNode, error) {
+	sets, err := listTyped[*appsv1.ReplicaSet](c, r.Meta().GVR, ns)
+	if err != nil {
+		return nil, err
+	}
+	var rs *appsv1.ReplicaSet
+	for _, s := range sets {
+		if s.Name == name {
+			rs = s
+			break
+		}
+	}
+	if rs == nil {
+		return nil, nil
+	}
+	root := &k8s.TreeNode{Kind: "ReplicaSet", Name: rs.Name, Status: replicaSetXRayStatus(rs)}
+	pods, err := listTyped[*corev1.Pod](c, k8s.PodGVR, ns)
+	if err != nil {
+		return root, err
+	}
+	for _, p := range pods {
+		if ownedByUID(p.OwnerReferences, rs.UID) {
+			root.Children = append(root.Children, podTreeNode(p))
+		}
+	}
+	return root, nil
 }
 
 func init() { register(replicaSet{}) }
