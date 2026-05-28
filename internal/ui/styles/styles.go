@@ -150,6 +150,11 @@ var statusStyleMap = map[string]lipgloss.Style{
 	"Terminating":       lipgloss.NewStyle().Foreground(ColorTerminated),
 	"Succeeded":         lipgloss.NewStyle().Foreground(ColorSucceeded),
 	"Completed":         lipgloss.NewStyle().Foreground(ColorSucceeded),
+	// Event TYPE coloring. Warning shares the pending-yellow tone so it
+	// pops; Normal reuses the muted terminated-gray so it reads as
+	// informational rather than implying a positive health signal.
+	"Warning": lipgloss.NewStyle().Foreground(ColorPending),
+	"Normal":  lipgloss.NewStyle().Foreground(ColorTerminated),
 	// "missing" flags an XRay reference whose target isn't in the informer
 	// cache — dim-red so it reads as a real warning without screaming.
 	"missing": lipgloss.NewStyle().Foreground(ColorFailed).Faint(true),
