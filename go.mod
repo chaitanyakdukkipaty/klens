@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/alecthomas/chroma/v2 v2.24.0
 	github.com/atotto/clipboard v0.1.4
+	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/guptarohit/asciigraph v0.9.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	k8s.io/api v0.36.0
@@ -23,7 +24,6 @@ require (
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260416155717-489999b90468 // indirect
-	github.com/charmbracelet/x/ansi v0.11.7 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect

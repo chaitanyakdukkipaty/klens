@@ -1,6 +1,8 @@
 package klenstests
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -186,5 +188,317 @@ func TestLogViewerQConsumedInsideFilterInput(t *testing.T) {
 	_, _, consumed := v.HandleKey(tea.KeyPressMsg{Code: 'q', Text: "q"})
 	if !consumed {
 		t.Fatal("q inside filter input not consumed; would quit the app mid-type")
+	}
+}
+
+// feedLogLine drives one LogLineMsg through the panel via Update and returns
+// the resulting viewer. Used by buffer/filter/wrap tests to seed content
+// without going through the streamer.
+func feedLogLine(t *testing.T, v panels.LogViewer, group, pod, text string) panels.LogViewer {
+	t.Helper()
+	msg := k8s.LogLineMsg{Lines: []k8s.LogLine{{Pod: pod, Group: group, Text: text}}}
+	next, _ := v.Update(msg)
+	return next
+}
+
+// TestLogViewerPauseBuffersIncomingLines — pressing `s` enters paused mode;
+// subsequent LogLineMsg batches are buffered, not rendered. Resuming flushes
+// them. The visible state changes (pause indicator + post-resume line count)
+// are the load-bearing observable contract.
+func TestLogViewerPauseBuffersIncomingLines(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+
+	// One line before pause — should land in the live buffer.
+	v = feedLogLine(t, v, "", "api-0", "line-before-pause")
+	if !strings.Contains(v.View(), "line-before-pause") {
+		t.Fatalf("pre-pause line missing from view")
+	}
+
+	// Toggle pause.
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 's', Text: "s"}})
+
+	// Lines arriving while paused must not appear in the view.
+	v = feedLogLine(t, v, "", "api-0", "line-during-pause")
+	view := v.View()
+	if strings.Contains(view, "line-during-pause") {
+		t.Fatalf("paused viewer rendered buffered line; view contained 'line-during-pause'")
+	}
+	if !strings.Contains(view, "■ paused") {
+		t.Fatalf("paused indicator missing from view; got:\n%s", view)
+	}
+	if !strings.Contains(view, "+1") {
+		t.Fatalf("pending-count indicator missing; expected '+1' in:\n%s", view)
+	}
+
+	// Resume — the buffered line must now be visible.
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 's', Text: "s"}})
+	view = v.View()
+	if !strings.Contains(view, "line-during-pause") {
+		t.Fatalf("resumed viewer dropped buffered line; view:\n%s", view)
+	}
+	if strings.Contains(view, "■ paused") {
+		t.Fatalf("resumed viewer still shows paused indicator; view:\n%s", view)
+	}
+}
+
+// TestLogViewerPauseBufferCapped — pendingLines is capped at maxLogLines so
+// a long pause against a chatty pod doesn't grow the buffer without bound.
+// We can't easily observe the cap directly (the field is unexported and the
+// constant is 10000), but the resumed line count must equal exactly
+// maxLogLines even after we feed more than that while paused. We assert via
+// the "+N" indicator on the paused header.
+func TestLogViewerPauseBufferCapped(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 's', Text: "s"}})
+
+	const cap = 10000
+	// Build one giant batch — exercising the drop-oldest path inside
+	// LogLineMsg handling rather than feeding ~10k discrete messages.
+	lines := make([]k8s.LogLine, cap+50)
+	for i := range lines {
+		lines[i] = k8s.LogLine{Pod: "api-0", Text: "pl"}
+	}
+	next, _ := v.Update(k8s.LogLineMsg{Lines: lines})
+	v = next
+
+	view := v.View()
+	// The indicator must show the capped count, never higher.
+	if !strings.Contains(view, "+10000") {
+		t.Fatalf("expected '+10000' (cap) in paused indicator; view:\n%s", view)
+	}
+	if strings.Contains(view, "+10050") {
+		t.Fatalf("paused buffer exceeded cap; view:\n%s", view)
+	}
+}
+
+// TestLogViewerPauseDoesNotDisturbLastLineAt — `lastLineAt` tracks upstream
+// activity, so the "quiet 30s" hint reflects stream silence and not display
+// silence. Lines arriving while paused must still bump it. We assert the
+// indicator does NOT show "quiet" after a brief paused-line feed.
+func TestLogViewerPauseDoesNotShowQuietRightAfterFeed(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 's', Text: "s"}})
+	v = feedLogLine(t, v, "", "api-0", "x")
+	// View should be the paused indicator only — no "quiet Ns" appended.
+	if strings.Contains(v.View(), "quiet ") {
+		t.Fatalf("unexpected 'quiet' marker right after a paused feed; view:\n%s", v.View())
+	}
+}
+
+// TestLogViewerGlobalFilterAppliesAcrossGroups — viewer-level filter renders
+// matching lines in every tab. Switching tabs preserves the filter.
+func TestLogViewerGlobalFilterAppliesAcrossGroups(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPodGroups([]k8s.LogGroup{
+		{Name: "deploy/api", Pods: []string{"api-0"}},
+		{Name: "deploy/worker", Pods: []string{"worker-0"}},
+	})
+	// Seed both groups: "ERROR foo" lines that should match, "INFO bar" should not.
+	v = feedLogLine(t, v, "deploy/api", "api-0", "ERROR api-failure")
+	v = feedLogLine(t, v, "deploy/api", "api-0", "INFO api-startup")
+	v = feedLogLine(t, v, "deploy/worker", "worker-0", "ERROR worker-failure")
+	v = feedLogLine(t, v, "deploy/worker", "worker-0", "INFO worker-startup")
+
+	// Commit a viewer-wide filter for "ERROR".
+	v = pressKeys(t, v, []tea.KeyPressMsg{
+		{Code: '/', Text: "/"},
+		{Code: 'E', Text: "E"},
+		{Code: 'R', Text: "R"},
+		{Code: 'R', Text: "R"},
+		{Code: 'O', Text: "O"},
+		{Code: 'R', Text: "R"},
+		keyEnter,
+	})
+
+	// First group (deploy/api) is focused after SetPodGroups.
+	view := v.View()
+	if !strings.Contains(view, "ERROR api-failure") {
+		t.Fatalf("focused group missing filtered line; view:\n%s", view)
+	}
+	if strings.Contains(view, "INFO api-startup") {
+		t.Fatalf("filter leak: unmatched line rendered; view:\n%s", view)
+	}
+
+	// Switch to deploy/worker tab — filter must still be active there.
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: '2', Text: "2"}})
+	view = v.View()
+	if !strings.Contains(view, "ERROR worker-failure") {
+		t.Fatalf("second group missing filtered line after tab switch; view:\n%s", view)
+	}
+	if strings.Contains(view, "INFO worker-startup") {
+		t.Fatalf("filter not preserved across tab switch; view:\n%s", view)
+	}
+}
+
+// TestLogViewerAutoscrollViewerWide — `a` toggles autoscroll; the indicator
+// flips between "live" (when on) and "⏸ N%" (when off).
+func TestLogViewerAutoscrollViewerWide(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+	v = feedLogLine(t, v, "", "api-0", "tail-line")
+
+	if !strings.Contains(v.View(), "● live") {
+		t.Fatalf("expected 'live' indicator after fresh autoScroll feed; view:\n%s", v.View())
+	}
+
+	// Toggle off — expect the muted scroll indicator instead.
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'a', Text: "a"}})
+	if strings.Contains(v.View(), "● live") {
+		t.Fatalf("'a' did not disable autoscroll; view still shows 'live':\n%s", v.View())
+	}
+
+	// Toggle back on — restore live indicator.
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'a', Text: "a"}})
+	if !strings.Contains(v.View(), "● live") {
+		t.Fatalf("'a' did not re-enable autoscroll; view:\n%s", v.View())
+	}
+}
+
+// TestLogViewerWrapTogglesIndicator — `w` flips the [wrap] hint in the header.
+// We don't assert the precise wrap output (depends on terminal width math) —
+// the toggle visibility is the public contract.
+func TestLogViewerWrapTogglesIndicator(t *testing.T) {
+	v := panels.NewLogViewer(80, 24).SetPods([]string{"api-0"})
+	if strings.Contains(v.View(), "[wrap]") {
+		t.Fatalf("[wrap] indicator visible at start when wrap is off")
+	}
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'w', Text: "w"}})
+	if !strings.Contains(v.View(), "[wrap]") {
+		t.Fatalf("[wrap] indicator missing after 'w'; view:\n%s", v.View())
+	}
+}
+
+// TestLogViewerWrapDoesNotBreakDragSelectIndexing — a wrapped log line spans
+// multiple display rows; LineAtScreenY must still resolve every row to the
+// same source-line index so drag-select across the wrapped rows collapses to
+// one entry. We feed one long line, toggle wrap on, and verify a row near the
+// top of the wrapped block and a row a few lines below both map back to
+// source index 0.
+func TestLogViewerWrapDoesNotBreakDragSelectIndexing(t *testing.T) {
+	v := panels.NewLogViewer(80, 24).SetPods([]string{"api-0"})
+	// Build a line wide enough to wrap several times at 80 cols.
+	long := strings.Repeat("abcdefghijklmnopqrst", 30) // 600 cols
+	v = feedLogLine(t, v, "", "api-0", long)
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'w', Text: "w"}})
+	// LineAtScreenY uses the panel-local Y coordinate. The viewport content
+	// starts a few rows in (header + help + blank); we sweep through the first
+	// handful of content rows and assert each one resolves to source index 0.
+	hits := 0
+	for y := 0; y < 24; y++ {
+		if idx, ok := v.LineAtScreenY(y); ok {
+			if idx != 0 {
+				t.Fatalf("wrapped row at y=%d resolved to source idx %d; expected 0", y, idx)
+			}
+			hits++
+		}
+	}
+	if hits < 2 {
+		t.Fatalf("expected at least 2 wrapped display rows for source idx 0, got %d hits", hits)
+	}
+}
+
+// TestLogViewerCtrlSWritesFile — `ctrl+s` writes the focused group's visible
+// lines to $KLENS_DUMP_DIR. The status message returned by ConsumeStatusMsg
+// must include "saved to" plus the dump dir path.
+func TestLogViewerCtrlSWritesFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("KLENS_DUMP_DIR", tmp)
+
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+	v = feedLogLine(t, v, "", "api-0", "savable-line")
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 's', Mod: tea.ModCtrl}})
+
+	status := v.ConsumeStatusMsg()
+	if !strings.HasPrefix(status, "saved to ") {
+		t.Fatalf("expected 'saved to ' status, got %q", status)
+	}
+	files, err := filepath.Glob(filepath.Join(tmp, "logs-*.log"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected one dump file in %s, found %d", tmp, len(files))
+	}
+	body, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read dump: %v", err)
+	}
+	if !strings.Contains(string(body), "savable-line") {
+		t.Fatalf("dump file missing seeded line; got %q", string(body))
+	}
+}
+
+// TestLogViewerCopyEmitsStatus — `c` (no drag) writes to clipboard and emits
+// a "copied N lines" status. Clipboard write may fail on headless CI; in that
+// case the status reflects "copy failed:" — we accept either prefix.
+func TestLogViewerCopyEmitsStatus(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+	v = feedLogLine(t, v, "", "api-0", "copyable")
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'c', Text: "c"}})
+
+	status := v.ConsumeStatusMsg()
+	if !strings.HasPrefix(status, "copied ") && !strings.HasPrefix(status, "copy failed:") {
+		t.Fatalf("expected 'copied ' or 'copy failed:' status, got %q", status)
+	}
+}
+
+// TestLogViewerPKeyEmitsToggleMsg — `p` returns a LogPreviousToggleMsg as a
+// tea.Cmd so the root model can re-create the streamer with previous=true.
+func TestLogViewerPKeyEmitsToggleMsg(t *testing.T) {
+	v := panels.NewLogViewer(80, 24).SetPods([]string{"api-0"})
+	next, cmd, consumed := v.HandleKey(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	if !consumed {
+		t.Fatal("'p' not consumed by log viewer")
+	}
+	_ = next
+	if cmd == nil {
+		t.Fatal("'p' did not emit a tea.Cmd; root cannot toggle previous-container source")
+	}
+	msg := cmd()
+	if _, ok := msg.(panels.LogPreviousToggleMsg); !ok {
+		t.Fatalf("expected LogPreviousToggleMsg, got %T", msg)
+	}
+}
+
+// TestLogViewerHelpHasNoGGEntry — the legacy "g/G top/bottom" entry must be
+// gone from the help line. RenderHelpInline trims the leading letter when it
+// matches the key (e.g. "[a]utoscroll"), so we test for the trimmed forms.
+func TestLogViewerHelpHasNoGGEntry(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+	view := v.View()
+	if strings.Contains(view, "g/G") || strings.Contains(view, "top/bottom") {
+		t.Fatalf("help line still advertises g/G; expected removal. view:\n%s", view)
+	}
+	// "[s]pause" — 's' doesn't share a leading letter with "pause" so the
+	// word is preserved intact.
+	if !strings.Contains(view, "pause") {
+		t.Fatalf("help line missing new 'pause' (s) entry; view:\n%s", view)
+	}
+	// "[a]utoscroll" — leading 'a' is trimmed because key 'a' matches.
+	if !strings.Contains(view, "utoscroll") {
+		t.Fatalf("help line missing new 'autoscroll' (a) entry; view:\n%s", view)
+	}
+}
+
+// TestLogViewerGAndGAreInert — pressing G must not re-enable autoscroll, and
+// pressing g must not scroll-to-top. Both are removed from log mode in spec
+// 0005. The viewport's default keymap would otherwise consume them and the
+// AtBottom recheck would re-enable autoscroll as a side-effect, so the panel
+// explicitly swallows them.
+func TestLogViewerGAndGAreInert(t *testing.T) {
+	v := panels.NewLogViewer(120, 24).SetPods([]string{"api-0"})
+	v = feedLogLine(t, v, "", "api-0", "tail-line")
+	// Disable autoscroll explicitly.
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'a', Text: "a"}})
+	if strings.Contains(v.View(), "● live") {
+		t.Fatalf("autoscroll did not turn off after 'a'; view:\n%s", v.View())
+	}
+	// Press G — must NOT flip autoscroll back on.
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'G', Text: "G"}})
+	if strings.Contains(v.View(), "● live") {
+		t.Fatalf("'G' re-enabled autoscroll; should be inert in log mode. view:\n%s", v.View())
+	}
+	// Press g — same expectation (the indicator stays in scroll-percent mode).
+	v = pressKeys(t, v, []tea.KeyPressMsg{{Code: 'g', Text: "g"}})
+	if strings.Contains(v.View(), "● live") {
+		t.Fatalf("'g' flipped state; should be inert in log mode. view:\n%s", v.View())
 	}
 }

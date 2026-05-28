@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,9 +16,18 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	xansi "github.com/charmbracelet/x/ansi"
 	k8slogs "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/ui/styles"
 )
+
+// LogPreviousToggleMsg requests the root model to flip the streamer's
+// "previous container" flag. The root tears down the current LogStreamer,
+// builds a new one with Previous set to the inverse of its prior state, and
+// re-seeds the viewer with empty lines. The viewer mirrors that flag in
+// LogViewer.previous so the title can show "[previous]" while the stream is
+// re-routed.
+type LogPreviousToggleMsg struct{}
 
 // klensChromaStyle is a minimal Chroma style aligned to the klens palette.
 // Foreground-only — no background color so it doesn't fight the lipgloss panel backgrounds.
@@ -62,22 +73,19 @@ func LogAutoScrollTickCmd() tea.Cmd {
 	})
 }
 
-// logGroupState owns the per-group filter, search, scroll, autoScroll, and
+// logGroupState owns the per-group viewport, drag-select, match index, and
 // pod-solo state. There is always at least one group — even when SetPods is
 // used (no tabs), a synthetic group with empty name represents "all pods".
+// Filter / search query state and the autoScroll flag have been promoted to
+// LogViewer so a single query/toggle drives every group.
 type logGroupState struct {
 	group    string // "" when there are no tab groups
 	viewport viewport.Model
 
-	autoScroll bool
-
-	filterOn    bool
-	filterInput string
-	filter      string
-
-	searchOn      bool
-	searchInput   string
-	searchQuery   string
+	// searchMatches and searchCurrent are positions inside *this* group's
+	// viewport — viewLine indices that depend on which lines belong to the
+	// group. They stay per-group because n/N navigation needs to walk the
+	// matches in this stripe's coordinate space.
 	searchMatches []int
 	searchCurrent int
 
@@ -103,7 +111,6 @@ func newGroupState(name string) logGroupState {
 	return logGroupState{
 		group:         name,
 		viewport:      vp,
-		autoScroll:    true,
 		podFilter:     -1,
 		searchCurrent: -1,
 		lineCountStr:  "  0 lines",
@@ -117,9 +124,11 @@ func newGroupState(name string) logGroupState {
 func (g *logGroupState) clearSelection() { g.drag.Reset() }
 
 // LogViewer displays merged streaming logs from multiple pods, organized into
-// one or more groups (tabs). Each group owns its own filter, search, scroll
-// position, autoScroll flag, and pod-solo state — preserved across tab
-// switches and across split-view layout cycles.
+// one or more groups (tabs or split stripes). Filter, search query, autoscroll,
+// pause, wrap, and the "previous container" flag live at the viewer level so a
+// single query/toggle drives every group. Per-group state is limited to
+// viewport position, drag selection, search-match positions inside that
+// viewport, and pod-solo.
 type LogViewer struct {
 	width, height int
 	focused       bool
@@ -139,6 +148,31 @@ type LogViewer struct {
 	focusedGroup int             // index into groups
 	layout       LogLayoutMode
 
+	// Viewer-wide filter / search query state. Applied at render time to every
+	// group. The match *positions* (searchMatches, searchCurrent) stay
+	// per-group because each viewport has its own viewLine numbering.
+	autoScroll  bool
+	filter      string
+	filterInput string
+	filterOn    bool
+	searchQuery string
+	searchInput string
+	searchOn    bool
+
+	// paused freezes ingestion. While true, incoming LogLineMsg batches are
+	// appended to pendingLines (capped at maxLogLines, drop-oldest) instead of
+	// to lines. On resume the buffer is flushed into lines + rebuilt.
+	paused       bool
+	pendingLines []k8slogs.LogLine
+
+	// wrap toggles ANSI-aware line wrapping at viewport width.
+	wrap bool
+
+	// previous mirrors the streamer's Previous flag so the title can show
+	// "[previous]" while the stream is sourced from the previous container
+	// instance. Toggled by the root when it handles LogPreviousToggleMsg.
+	previous bool
+
 	// Status messages surface transient one-shot feedback
 	// (e.g. "split view requires 2-5 groups") via the parent status bar.
 	// LogViewer does not own a status bar; we expose a getter and the model
@@ -151,6 +185,7 @@ func NewLogViewer(w, h int) LogViewer {
 		width:      w,
 		height:     h,
 		jsonIndent: false,
+		autoScroll: true,
 		groups:     []logGroupState{newGroupState("")},
 		layout:     LayoutTabs,
 	}
@@ -234,6 +269,7 @@ func (v LogViewer) SetPods(pods []string) LogViewer {
 	v.lowerCache = nil
 	v.jsonIndent = false
 	v.lastLineAt = time.Time{}
+	v.resetViewerState()
 	v.groups = []logGroupState{newGroupState("")}
 	v.focusedGroup = 0
 	v.layout = LayoutTabs
@@ -266,12 +302,51 @@ func (v LogViewer) SetPodGroups(groups []k8slogs.LogGroup) LogViewer {
 	v.lowerCache = nil
 	v.jsonIndent = false
 	v.lastLineAt = time.Time{}
+	v.resetViewerState()
 	v.groups = gs
 	v.focusedGroup = 0
 	v.layout = LayoutTabs
 	v.applySizes()
 	return v
 }
+
+// resetViewerState wipes the viewer-level filter/search/pause/wrap/previous
+// state when the pod set changes. Filter and search are deliberately not
+// preserved across "open logs for a different selection" — there is no shared
+// referent. autoScroll is reset to the default-on state (matches k9s "follow"
+// on entering log mode).
+func (v *LogViewer) resetViewerState() {
+	v.autoScroll = true
+	v.filter = ""
+	v.filterInput = ""
+	v.filterOn = false
+	v.searchQuery = ""
+	v.searchInput = ""
+	v.searchOn = false
+	v.paused = false
+	v.pendingLines = nil
+	v.wrap = false
+	v.previous = false
+}
+
+// SetPrevious is called by the root after restarting the streamer with the
+// inverted Previous flag, so the viewer's title can reflect the current
+// source. The viewer mirrors the flag but does not own the streamer.
+func (v LogViewer) SetPrevious(prev bool) LogViewer {
+	v.previous = prev
+	v.lines = nil
+	v.colorCache = nil
+	v.indentCache = nil
+	v.lowerCache = nil
+	v.pendingLines = nil
+	v.lastLineAt = time.Time{}
+	v.rebuildAll()
+	return v
+}
+
+// Previous returns the current "previous container" state — used by the root
+// when restarting the streamer in response to LogPreviousToggleMsg.
+func (v LogViewer) Previous() bool { return v.previous }
 
 // HandleKey routes a keypress through the viewer's layered state machine and
 // reports whether the viewer consumed it. The peel order on ESC is: drag
@@ -302,67 +377,72 @@ func (v LogViewer) HandleKey(k tea.KeyPressMsg) (LogViewer, tea.Cmd, bool) {
 	return next, cmd, true
 }
 
-// hasActiveState reports whether any peelable state is active on the focused
-// group, OR the viewer is in a non-default layout. Used by HandleKey to
-// decide whether to peel state vs. yield ESC to the root.
+// hasActiveState reports whether any peelable state is active. Used by
+// HandleKey to decide whether to peel state vs. yield ESC to the root. Pause
+// is deliberately not peelable — the user resumes with `s`, not ESC.
 func (v LogViewer) hasActiveState() bool {
 	if v.layout != LayoutTabs {
+		return true
+	}
+	if v.filterOn || v.searchOn || v.filter != "" || v.searchQuery != "" {
 		return true
 	}
 	if len(v.groups) == 0 {
 		return false
 	}
 	g := v.groups[v.focusedGroup]
-	return g.drag.Active || g.podFilter >= 0 || g.filter != "" || g.filterOn || g.searchQuery != "" || g.searchOn
+	return g.drag.Active || g.podFilter >= 0
 }
 
-// isCapturingInput reports whether the focused group's filter or search
-// input is open. Used by HandleKey to absorb q / ctrl+c / F as literal text
-// while typing into a filter or search field.
+// isCapturingInput reports whether a filter or search input is open. Used by
+// HandleKey to absorb q / ctrl+c / F as literal text while typing into a
+// filter or search field. Both inputs are viewer-level now.
 func (v LogViewer) isCapturingInput() bool {
-	if len(v.groups) == 0 {
-		return false
-	}
-	g := v.groups[v.focusedGroup]
-	return g.filterOn || g.searchOn
+	return v.filterOn || v.searchOn
 }
 
-// handleEsc peels one layer of state on the focused group, then returns to
-// LayoutTabs from any split layout. Called by HandleKey on ESC.
+// handleEsc peels one layer of state, then returns to LayoutTabs from any
+// split layout. Called by HandleKey on ESC. Order:
+//
+//	drag selection → search input → filter input → pod-solo
+//	→ search query → filter query → split layout
+//
+// Pause is intentionally not in this list — see the type doc on paused.
 func (v LogViewer) handleEsc() LogViewer {
-	if len(v.groups) == 0 {
+	if len(v.groups) > 0 {
+		g := &v.groups[v.focusedGroup]
+		if g.drag.Active {
+			g.clearSelection()
+			v.rebuildGroup(v.focusedGroup)
+			return v
+		}
+	}
+	if v.searchOn {
+		v.searchOn = false
 		return v
 	}
-	g := &v.groups[v.focusedGroup]
-	if g.drag.Active {
-		g.clearSelection()
-		v.rebuildGroup(v.focusedGroup)
+	if v.filterOn {
+		v.filterOn = false
 		return v
 	}
-	if g.searchOn {
-		g.searchOn = false
-		return v
+	if len(v.groups) > 0 {
+		g := &v.groups[v.focusedGroup]
+		if g.podFilter >= 0 {
+			g.podFilter = -1
+			v.rebuildAll()
+			return v
+		}
 	}
-	if g.filterOn {
-		g.filterOn = false
-		return v
-	}
-	if g.podFilter >= 0 {
-		g.podFilter = -1
+	if v.searchQuery != "" {
+		v.searchQuery = ""
+		v.searchInput = ""
+		v.clearGroupMatches()
 		v.rebuildAll()
 		return v
 	}
-	if g.searchQuery != "" {
-		g.searchQuery = ""
-		g.searchInput = ""
-		g.searchMatches = nil
-		g.searchCurrent = -1
-		v.rebuildAll()
-		return v
-	}
-	if g.filter != "" {
-		g.filter = ""
-		g.filterInput = ""
+	if v.filter != "" {
+		v.filter = ""
+		v.filterInput = ""
 		v.rebuildAll()
 		return v
 	}
@@ -375,148 +455,175 @@ func (v LogViewer) handleEsc() LogViewer {
 	return v
 }
 
+// clearGroupMatches wipes per-group search positions. Used when the viewer-
+// level search query is cleared; the rebuild then re-populates positions
+// for any remaining query, or leaves them empty.
+func (v *LogViewer) clearGroupMatches() {
+	for i := range v.groups {
+		v.groups[i].searchMatches = nil
+		v.groups[i].searchCurrent = -1
+	}
+}
+
 func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.PasteMsg:
-		// Bracketed paste — used by terminals that emit \e[200~ … \e[201~ when the
-		// user hits Cmd+V / Ctrl+Shift+V. Route into whichever input is open on the focused group.
+		// Bracketed paste — used by terminals that emit \e[200~ … \e[201~ when
+		// the user hits Cmd+V / Ctrl+Shift+V. Route into whichever viewer-level
+		// input is open.
 		clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(msg.Content)
-		g := &v.groups[v.focusedGroup]
-		if g.filterOn {
-			g.filterInput += clean
-			v.rebuildGroup(v.focusedGroup)
-		} else if g.searchOn {
-			g.searchInput += clean
-			v.rebuildGroup(v.focusedGroup)
+		if v.filterOn {
+			v.filterInput += clean
+			v.rebuildAll()
+		} else if v.searchOn {
+			v.searchInput += clean
+			v.rebuildAll()
 		}
 		return v, nil
 
 	case k8slogs.LogLineMsg:
-		for _, line := range msg.Lines {
-			v.lines = append(v.lines, line)
-			v.colorCache = append(v.colorCache, tryColorizeJSON(line.Text, v.jsonIndent))
-			v.indentCache = append(v.indentCache, tryIndentJSON(line.Text))
-			v.lowerCache = append(v.lowerCache, strings.ToLower(line.Text))
-		}
 		if len(msg.Lines) > 0 {
+			// lastLineAt tracks *upstream* activity — bump it even while paused
+			// so the "quiet 30s" hint reflects the stream, not the display.
 			v.lastLineAt = time.Now()
 		}
-		if len(v.lines) > maxLogLines {
-			trim := len(v.lines) - maxLogLines
-			v.lines = v.lines[trim:]
-			v.colorCache = v.colorCache[trim:]
-			v.indentCache = v.indentCache[trim:]
-			v.lowerCache = v.lowerCache[trim:]
-			// A trim shifts every absolute v.lines index. Drag-select stores
-			// indices into v.lines, so cancelling any in-flight selection is
-			// safer than rewriting indices (rare path on chatty pods).
-			for i := range v.groups {
-				if v.groups[i].drag.Active {
-					v.groups[i].clearSelection()
-				}
+		if v.paused {
+			// Buffer with drop-oldest cap. A 60s pause against a 1000-line/sec
+			// pod would otherwise grow pendingLines without bound; capping at
+			// maxLogLines matches the live-buffer policy.
+			v.pendingLines = append(v.pendingLines, msg.Lines...)
+			if over := len(v.pendingLines) - maxLogLines; over > 0 {
+				v.pendingLines = v.pendingLines[over:]
 			}
+			return v, nil
 		}
+		v.appendLines(msg.Lines)
 		v.rebuildAll()
-		for i := range v.groups {
-			if v.groups[i].autoScroll {
+		if v.autoScroll {
+			for i := range v.groups {
 				v.groups[i].viewport.GotoBottom()
 			}
 		}
 		return v, nil
 
 	case tea.KeyPressMsg:
-		g := &v.groups[v.focusedGroup]
-
-		// Filter input mode (/)
-		if g.filterOn {
+		// Filter input mode (/) — viewer-level
+		if v.filterOn {
 			switch msg.String() {
 			case "enter", "esc":
-				g.filterOn = false
-				g.filter = g.filterInput
-				v.rebuildGroup(v.focusedGroup)
+				v.filterOn = false
+				v.filter = v.filterInput
+				v.rebuildAll()
 			case "backspace":
-				if len(g.filterInput) > 0 {
-					g.filterInput = g.filterInput[:len(g.filterInput)-1]
-					v.rebuildGroup(v.focusedGroup)
+				if len(v.filterInput) > 0 {
+					v.filterInput = v.filterInput[:len(v.filterInput)-1]
+					v.rebuildAll()
 				}
 			case "ctrl+v":
 				if text, err := clipboard.ReadAll(); err == nil && text != "" {
 					clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(text)
-					g.filterInput += clean
-					v.rebuildGroup(v.focusedGroup)
+					v.filterInput += clean
+					v.rebuildAll()
 				}
 			default:
 				if len(msg.Text) > 0 {
-					g.filterInput += msg.Text
-					v.rebuildGroup(v.focusedGroup)
+					v.filterInput += msg.Text
+					v.rebuildAll()
 				}
 			}
 			return v, nil
 		}
 
-		// Search input mode (ctrl+f)
-		if g.searchOn {
+		// Search input mode (ctrl+f) — viewer-level
+		if v.searchOn {
 			switch msg.String() {
 			case "enter":
-				g.searchQuery = g.searchInput
-				g.searchOn = false
-				v.rebuildGroup(v.focusedGroup)
+				v.searchQuery = v.searchInput
+				v.searchOn = false
+				v.autoScroll = false
+				v.rebuildAll()
+				g := &v.groups[v.focusedGroup]
 				if len(g.searchMatches) > 0 {
 					g.searchCurrent = 0
 					g.viewport.SetYOffset(g.searchMatches[0])
-					g.autoScroll = false
 				}
 			case "esc":
-				g.searchOn = false
+				v.searchOn = false
 			case "backspace":
-				if len(g.searchInput) > 0 {
-					g.searchInput = g.searchInput[:len(g.searchInput)-1]
-					v.rebuildGroup(v.focusedGroup)
+				if len(v.searchInput) > 0 {
+					v.searchInput = v.searchInput[:len(v.searchInput)-1]
+					v.rebuildAll()
 				}
 			case "ctrl+v":
 				if text, err := clipboard.ReadAll(); err == nil && text != "" {
 					clean := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(text)
-					g.searchInput += clean
-					v.rebuildGroup(v.focusedGroup)
+					v.searchInput += clean
+					v.rebuildAll()
 				}
 			default:
 				if len(msg.Text) > 0 {
-					g.searchInput += msg.Text
-					v.rebuildGroup(v.focusedGroup)
+					v.searchInput += msg.Text
+					v.rebuildAll()
 				}
 			}
 			return v, nil
 		}
 
+		g := &v.groups[v.focusedGroup]
+
 		switch msg.String() {
 		case "/":
-			g.searchOn = false
-			g.filterOn = true
-			g.filterInput = g.filter
+			v.searchOn = false
+			v.filterOn = true
+			v.filterInput = v.filter
 		case "ctrl+f":
-			g.filterOn = false
-			g.searchOn = true
-			g.searchInput = g.searchQuery
-			g.autoScroll = false
+			v.filterOn = false
+			v.searchOn = true
+			v.searchInput = v.searchQuery
+			v.autoScroll = false
 		case "n":
 			if len(g.searchMatches) > 0 {
 				g.searchCurrent = (g.searchCurrent + 1) % len(g.searchMatches)
 				g.viewport.SetYOffset(g.searchMatches[g.searchCurrent])
-				g.autoScroll = false
+				v.autoScroll = false
 			}
 		case "N":
 			if len(g.searchMatches) > 0 {
 				g.searchCurrent = (g.searchCurrent - 1 + len(g.searchMatches)) % len(g.searchMatches)
 				g.viewport.SetYOffset(g.searchMatches[g.searchCurrent])
-				g.autoScroll = false
+				v.autoScroll = false
 			}
-		case "G":
-			g.viewport.GotoBottom()
-			g.autoScroll = true
-		case "g":
-			g.viewport.GotoTop()
-			g.viewport.SetXOffset(0)
-			g.autoScroll = false
+		case "s":
+			return v.togglePause(), nil
+		case "a":
+			v.autoScroll = !v.autoScroll
+			if v.autoScroll {
+				for i := range v.groups {
+					v.groups[i].viewport.GotoBottom()
+				}
+			}
+		case "w":
+			v.wrap = !v.wrap
+			v.rebuildAll()
+		case "c":
+			if g.drag.Active {
+				// Live drag selection — HandleMouseUp owns the copy path.
+				return v, nil
+			}
+			lines := v.visibleLinesForFocusedGroup()
+			if len(lines) == 0 {
+				v.statusMsg = "logs: nothing to copy"
+				return v, nil
+			}
+			if err := clipboard.WriteAll(strings.Join(lines, "\n")); err != nil {
+				v.statusMsg = "copy failed: " + err.Error()
+				return v, nil
+			}
+			v.statusMsg = fmt.Sprintf("copied %d line%s to clipboard", len(lines), plural(len(lines)))
+		case "ctrl+s":
+			v.statusMsg = v.saveVisibleToFile()
+		case "p":
+			return v, func() tea.Msg { return LogPreviousToggleMsg{} }
 		case "tab":
 			if len(v.tabGroups) > 1 {
 				v.groups[v.focusedGroup].clearSelection()
@@ -525,7 +632,7 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 				if v.layout == LayoutTabs {
 					ng := &v.groups[v.focusedGroup]
 					ng.viewport.SetXOffset(0)
-					if ng.autoScroll {
+					if v.autoScroll {
 						ng.viewport.GotoBottom()
 					}
 				}
@@ -538,6 +645,13 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 				v.colorCache[i] = tryColorizeJSON(l.Text, v.jsonIndent)
 			}
 			v.rebuildAll()
+		case "g", "G":
+			// g/G are intentionally inert in log mode (spec 0005). The new
+			// `a` toggle subsumes "jump to bottom"; pgup/pgdn cover the rest.
+			// We swallow them here so the viewport's default keymap doesn't
+			// scroll on our behalf and the AtBottom recheck below doesn't
+			// re-enable autoscroll as a side-effect.
+			return v, nil
 		case "0":
 			g.viewport.SetXOffset(0)
 			if len(v.tabGroups) > 1 {
@@ -560,7 +674,7 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 					v.focusedGroup = n
 					if v.layout == LayoutTabs {
 						ng := &v.groups[v.focusedGroup]
-						if ng.autoScroll {
+						if v.autoScroll {
 							ng.viewport.GotoBottom()
 						}
 					}
@@ -575,10 +689,10 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 			g.viewport, cmd = g.viewport.Update(msg)
 			switch msg.String() {
 			case "up", "k", "pgup", "ctrl+u":
-				g.autoScroll = false
+				v.autoScroll = false
 			default:
 				if g.viewport.AtBottom() {
-					g.autoScroll = true
+					v.autoScroll = true
 				}
 			}
 			return v, cmd
@@ -586,16 +700,16 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 		return v, nil
 
 	case tea.MouseWheelMsg:
-		// Wheel scrolls the focused group's viewport.
+		// Wheel scrolls the focused group's viewport; autoscroll is viewer-wide.
 		g := &v.groups[v.focusedGroup]
 		var cmd tea.Cmd
 		g.viewport, cmd = g.viewport.Update(msg)
 		switch msg.Button {
 		case tea.MouseWheelUp:
-			g.autoScroll = false
+			v.autoScroll = false
 		case tea.MouseWheelDown:
 			if g.viewport.AtBottom() {
-				g.autoScroll = true
+				v.autoScroll = true
 			}
 		}
 		return v, cmd
@@ -606,6 +720,134 @@ func (v LogViewer) Update(msg tea.Msg) (LogViewer, tea.Cmd) {
 		g.viewport, cmd = g.viewport.Update(msg)
 		return v, cmd
 	}
+}
+
+// appendLines pushes new lines onto the master buffer, growing the parallel
+// caches and trimming to maxLogLines if needed. Trimming may invalidate
+// drag-select indices, so any active selection is cleared.
+func (v *LogViewer) appendLines(lines []k8slogs.LogLine) {
+	for _, line := range lines {
+		v.lines = append(v.lines, line)
+		v.colorCache = append(v.colorCache, tryColorizeJSON(line.Text, v.jsonIndent))
+		v.indentCache = append(v.indentCache, tryIndentJSON(line.Text))
+		v.lowerCache = append(v.lowerCache, strings.ToLower(line.Text))
+	}
+	if len(v.lines) > maxLogLines {
+		trim := len(v.lines) - maxLogLines
+		v.lines = v.lines[trim:]
+		v.colorCache = v.colorCache[trim:]
+		v.indentCache = v.indentCache[trim:]
+		v.lowerCache = v.lowerCache[trim:]
+		for i := range v.groups {
+			if v.groups[i].drag.Active {
+				v.groups[i].clearSelection()
+			}
+		}
+	}
+}
+
+// togglePause flips paused. On resume the pending buffer is flushed into the
+// main lines buffer via the same trim/rebuild path the live append uses.
+func (v LogViewer) togglePause() LogViewer {
+	v.paused = !v.paused
+	if !v.paused && len(v.pendingLines) > 0 {
+		v.appendLines(v.pendingLines)
+		v.pendingLines = nil
+		v.rebuildAll()
+		if v.autoScroll {
+			for i := range v.groups {
+				v.groups[i].viewport.GotoBottom()
+			}
+		}
+	}
+	return v
+}
+
+// visibleLinesForFocusedGroup returns the post-filter, group-belonging line
+// text for the focused group. Shared by the copy ('c') and save ('ctrl+s')
+// paths and by HandleMouseUp's drag-to-copy path so the three stay in sync.
+func (v LogViewer) visibleLinesForFocusedGroup() []string {
+	if len(v.groups) == 0 {
+		return nil
+	}
+	g := v.groups[v.focusedGroup]
+	activeFilter := v.filter
+	if v.filterOn {
+		activeFilter = v.filterInput
+	}
+	lowFilter := strings.ToLower(activeFilter)
+	var out []string
+	for i, l := range v.lines {
+		if !v.lineBelongsToGroup(l, g) {
+			continue
+		}
+		if lowFilter != "" {
+			var lowText string
+			if i < len(v.lowerCache) {
+				lowText = v.lowerCache[i]
+			} else {
+				lowText = strings.ToLower(l.Text)
+			}
+			if !strings.Contains(lowText, lowFilter) {
+				continue
+			}
+		}
+		out = append(out, l.Text)
+	}
+	return out
+}
+
+// saveVisibleToFile writes the focused group's visible lines to
+// $KLENS_DUMP_DIR (default ~/.klens/dumps/), using a timestamp-suffixed name
+// so repeated dumps don't clobber each other. Returns a status string.
+func (v LogViewer) saveVisibleToFile() string {
+	lines := v.visibleLinesForFocusedGroup()
+	if len(lines) == 0 {
+		return "logs: nothing to save"
+	}
+	dir := os.Getenv("KLENS_DUMP_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "save failed: " + err.Error()
+		}
+		dir = filepath.Join(home, ".klens", "dumps")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "save failed: " + err.Error()
+	}
+	label := v.dumpLabel()
+	ts := time.Now().Format("20060102-150405")
+	name := fmt.Sprintf("logs-%s-%s.log", label, ts)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		return "save failed: " + err.Error()
+	}
+	return "saved to " + path
+}
+
+// dumpLabel returns a filesystem-safe label identifying the focused group's
+// source — group name in tab mode, pod name in single-group mode, or "all".
+func (v LogViewer) dumpLabel() string {
+	if len(v.groups) == 0 {
+		return "all"
+	}
+	g := v.groups[v.focusedGroup]
+	var raw string
+	switch {
+	case len(v.tabGroups) > 1:
+		raw = v.tabGroups[v.focusedGroup]
+	case g.podFilter >= 0 && g.podFilter < len(v.pods):
+		raw = v.pods[g.podFilter]
+	case len(v.pods) > 0:
+		raw = v.pods[0]
+	default:
+		raw = "all"
+	}
+	// Replace path separators and whitespace so the result is safe to slot
+	// into a filename. Keep colons and slashes out (deploy/api → deploy-api).
+	r := strings.NewReplacer("/", "-", "\\", "-", " ", "_", ":", "-")
+	return r.Replace(raw)
 }
 
 // splitViewCap is the maximum number of groups that can be shown side-by-side
@@ -683,7 +925,8 @@ func (v *LogViewer) rebuildAll() {
 }
 
 // rebuildGroup rebuilds a single group's viewport content from v.lines,
-// applying its filter and search and updating its searchMatches & lineCountStr.
+// applying the viewer-level filter/search and updating per-group
+// searchMatches & lineCountStr.
 func (v *LogViewer) rebuildGroup(idx int) {
 	if idx < 0 || idx >= len(v.groups) {
 		return
@@ -692,15 +935,15 @@ func (v *LogViewer) rebuildGroup(idx int) {
 	g.searchMatches = nil
 	g.displayRows = g.displayRows[:0]
 
-	activeFilter := g.filter
-	if g.filterOn {
-		activeFilter = g.filterInput
+	activeFilter := v.filter
+	if v.filterOn {
+		activeFilter = v.filterInput
 	}
 	lowFilter := strings.ToLower(activeFilter)
 
-	activeSearch := g.searchQuery
-	if g.searchOn {
-		activeSearch = g.searchInput
+	activeSearch := v.searchQuery
+	if v.searchOn {
+		activeSearch = v.searchInput
 	}
 	lowSearch := strings.ToLower(activeSearch)
 
@@ -711,6 +954,11 @@ func (v *LogViewer) rebuildGroup(idx int) {
 		if selLo > selHi {
 			selLo, selHi = selHi, selLo
 		}
+	}
+
+	wrapWidth := 0
+	if v.wrap {
+		wrapWidth = g.viewport.Width()
 	}
 
 	var sb strings.Builder
@@ -765,6 +1013,11 @@ func (v *LogViewer) rebuildGroup(idx int) {
 		rendered := renderLogLineText(l, text)
 		if selected {
 			rendered = lipgloss.NewStyle().Reverse(true).Render(rendered)
+		}
+		if wrapWidth > 0 {
+			// ANSI-aware wrap preserves SGR resumption across wrap points so
+			// Chroma colorization and search-highlight reverse stay intact.
+			rendered = xansi.Wrap(rendered, wrapWidth, "")
 		}
 		sb.WriteString(rendered)
 		sb.WriteByte('\n')
@@ -894,7 +1147,7 @@ func (v LogViewer) View() string {
 }
 
 // renderTabs renders a single bordered panel: shared title + (optional) tab
-// bar + the focused group's filter/search/help/viewport.
+// bar + viewer-level filter/search bars + the focused group's help/viewport.
 func (v LogViewer) renderTabs() string {
 	border := styles.NormalBorder
 	if v.focused {
@@ -925,11 +1178,18 @@ func (v LogViewer) renderTabs() string {
 		}
 		title = styles.Title.Render("Logs: ") + styles.Primary.Render(titlePods)
 	}
+	if v.previous {
+		title += "  " + styles.Warning.Render("[previous]")
+	}
 
-	scrollStatus := liveOrPaused(g, v.lastLineAt)
+	scrollStatus := v.liveStateLabel(g)
 	indentHint := ""
 	if v.jsonIndent {
 		indentHint = "  " + styles.Muted.Render("[json indent]")
+	}
+	wrapHint := ""
+	if v.wrap {
+		wrapHint = "  " + styles.Muted.Render("[wrap]")
 	}
 
 	tabBar := ""
@@ -937,43 +1197,11 @@ func (v LogViewer) renderTabs() string {
 		tabBar = "\n" + v.renderTabBar()
 	}
 
-	filterBar := renderFilterBar(g)
-	searchBar := renderSearchBar(g)
+	filterBar := v.renderFilterBar(g)
+	searchBar := v.renderSearchBar(g)
 
-	var help string
-	if len(v.tabGroups) > 1 {
-		items := []HelpItem{
-			{Key: "↑↓/jk", Desc: "scroll"},
-			{Key: "tab/1-9", Desc: "switch"},
-		}
-		if v.canSplit() {
-			items = append(items, HelpItem{Key: "v", Desc: "split"})
-		}
-		items = append(items,
-			HelpItem{Key: "/", Desc: "filter"},
-			HelpItem{Key: "ctrl+f", Desc: "search"},
-			HelpItem{Key: "n/N", Desc: "next/prev"},
-			HelpItem{Key: "J", Desc: "indent"},
-			HelpItem{Key: "g/G", Desc: "top/bottom"},
-			HelpItem{Key: "F", Desc: "fullscreen"},
-			HelpItem{Key: "esc", Desc: "back"},
-		)
-		help = "  " + RenderHelpInline(items)
-	} else {
-		help = "  " + RenderHelpInline([]HelpItem{
-			{Key: "↑↓/jk", Desc: "scroll"},
-			{Key: "/", Desc: "filter"},
-			{Key: "ctrl+f", Desc: "search"},
-			{Key: "n/N", Desc: "next/prev"},
-			{Key: "1-9", Desc: "solo pod"},
-			{Key: "0", Desc: "all"},
-			{Key: "J", Desc: "indent"},
-			{Key: "g/G", Desc: "top/bottom"},
-			{Key: "F", Desc: "fullscreen"},
-			{Key: "esc", Desc: "back"},
-		})
-	}
-	header := title + scrollStatus + indentHint + "  " + styles.Muted.Render(g.lineCountStr) + tabBar + filterBar + searchBar + "\n" + help
+	help := "  " + RenderHelpInline(v.helpItems())
+	header := title + scrollStatus + indentHint + wrapHint + "  " + styles.Muted.Render(g.lineCountStr) + tabBar + filterBar + searchBar + "\n" + help
 
 	sbStr := renderScrollbar(
 		g.viewport.Height(),
@@ -985,6 +1213,39 @@ func (v LogViewer) renderTabs() string {
 	return border.Width(max(1, v.width)).Height(max(1, v.height)).Render(
 		header + "\n\n" + joinScrollbar(g.viewport.View(), sbStr),
 	)
+}
+
+// helpItems builds the inline help list. The full key surface is too wide for
+// narrow terminals on a single line; RenderHelpInline takes care of wrapping
+// based on the visible width.
+func (v LogViewer) helpItems() []HelpItem {
+	items := []HelpItem{{Key: "↑↓/jk", Desc: "scroll"}}
+	if len(v.tabGroups) > 1 {
+		items = append(items, HelpItem{Key: "tab/1-9", Desc: "switch"})
+		if v.canSplit() {
+			items = append(items, HelpItem{Key: "v", Desc: "split"})
+		}
+	} else {
+		items = append(items,
+			HelpItem{Key: "1-9", Desc: "solo pod"},
+			HelpItem{Key: "0", Desc: "all"},
+		)
+	}
+	items = append(items,
+		HelpItem{Key: "/", Desc: "filter"},
+		HelpItem{Key: "ctrl+f", Desc: "search"},
+		HelpItem{Key: "n/N", Desc: "next/prev"},
+		HelpItem{Key: "s", Desc: "pause"},
+		HelpItem{Key: "a", Desc: "autoscroll"},
+		HelpItem{Key: "w", Desc: "wrap"},
+		HelpItem{Key: "c", Desc: "copy"},
+		HelpItem{Key: "ctrl+s", Desc: "save"},
+		HelpItem{Key: "p", Desc: "prev"},
+		HelpItem{Key: "J", Desc: "indent"},
+		HelpItem{Key: "F", Desc: "fullscreen"},
+		HelpItem{Key: "esc", Desc: "back"},
+	)
+	return items
 }
 
 // renderTabBar builds the "1:name │ 2:name │ ..." bar for tab mode.
@@ -1009,7 +1270,9 @@ func (v LogViewer) renderTabBar() string {
 }
 
 // renderSplit renders an outer panel containing N stripe boxes (one per group),
-// laid out either as horizontal stripes or vertical columns.
+// laid out either as horizontal stripes or vertical columns. Viewer-level
+// filter and search bars live on the outer header so a single query covers
+// every stripe.
 func (v LogViewer) renderSplit() string {
 	border := styles.NormalBorder
 	if v.focused {
@@ -1022,17 +1285,39 @@ func (v LogViewer) renderSplit() string {
 	}
 	title := styles.Title.Render("Logs ") +
 		styles.Muted.Render("("+layoutName+"): ") +
-		styles.Primary.Render(fmt.Sprintf("%d groups", len(v.tabGroups))) +
-		"   " + RenderHelpInline([]HelpItem{
+		styles.Primary.Render(fmt.Sprintf("%d groups", len(v.tabGroups)))
+	if v.previous {
+		title += "  " + styles.Warning.Render("[previous]")
+	}
+	title += "   " + RenderHelpInline([]HelpItem{
 		{Key: "v", Desc: "cycle layout"},
 		{Key: "tab", Desc: "focus next"},
+		{Key: "/", Desc: "filter"},
+		{Key: "ctrl+f", Desc: "search"},
+		{Key: "s", Desc: "pause"},
+		{Key: "a", Desc: "autoscroll"},
+		{Key: "w", Desc: "wrap"},
 		{Key: "F", Desc: "fullscreen"},
 		{Key: "esc", Desc: "exit split"},
 	})
 
+	g := v.groups[v.focusedGroup]
+	filterBar := v.renderFilterBar(g)
+	searchBar := v.renderSearchBar(g)
+	outerHeader := title + filterBar + searchBar
+
+	// Header line count: title (1) + filter (0 or 1) + search (0 or 1) + blank (1).
+	headerLines := 1 + 1 // title + blank
+	if v.filterOn || v.filter != "" {
+		headerLines++
+	}
+	if v.searchOn || v.searchQuery != "" {
+		headerLines++
+	}
+
 	// Compute stripe size & build stripe boxes.
 	innerW := max(1, v.width-2)
-	innerH := max(1, v.height-2-2) // border + outer header (title + blank)
+	innerH := max(1, v.height-2-headerLines)
 
 	var stripes []string
 	switch v.layout {
@@ -1050,7 +1335,7 @@ func (v LogViewer) renderSplit() string {
 		}
 		body := lipgloss.JoinVertical(lipgloss.Left, stripes...)
 		return border.Width(max(1, v.width)).Height(max(1, v.height)).Render(
-			title + "\n\n" + body,
+			outerHeader + "\n\n" + body,
 		)
 	case LayoutVertical:
 		n := len(v.groups)
@@ -1066,14 +1351,15 @@ func (v LogViewer) renderSplit() string {
 		}
 		body := lipgloss.JoinHorizontal(lipgloss.Top, stripes...)
 		return border.Width(max(1, v.width)).Height(max(1, v.height)).Render(
-			title + "\n\n" + body,
+			outerHeader + "\n\n" + body,
 		)
 	}
 	return ""
 }
 
-// renderStripeBox builds the bordered box for group i sized w x h. The
-// viewport inside is sized to fit; rebuild content for current dims.
+// renderStripeBox builds the bordered box for group i sized w x h. Viewer-
+// level filter/search bars render on the outer panel header, so per-stripe
+// chrome is title + counts + viewport only.
 func (v LogViewer) renderStripeBox(i, w, h int) string {
 	g := &v.groups[i] // safe: receiver is a value but groups slice array is shared
 
@@ -1082,15 +1368,8 @@ func (v LogViewer) renderStripeBox(i, w, h int) string {
 		stripeBorder = styles.FocusedBorder
 	}
 
-	// Set viewport dimensions for this box.
-	chromeLines := 1 // title
-	if g.filterOn || g.filter != "" {
-		chromeLines++
-	}
-	if g.searchOn || g.searchQuery != "" {
-		chromeLines++
-	}
-	chromeLines++ // help line
+	// chromeLines: title (1) + help (1).
+	chromeLines := 1 + 1
 	vpW := max(1, w-3)
 	vpH := max(1, h-2-chromeLines)
 	g.viewport.SetWidth(vpW)
@@ -1110,20 +1389,16 @@ func (v LogViewer) renderStripeBox(i, w, h int) string {
 	} else {
 		focusMark = "   "
 	}
-	stripeTitle := focusMark + styles.Primary.Render(name) + liveOrPaused(*g, v.lastLineAt) +
+	stripeTitle := focusMark + styles.Primary.Render(name) + v.liveStateLabel(*g) +
 		"  " + styles.Muted.Render(g.lineCountStr)
-
-	filterBar := renderFilterBar(*g)
-	searchBar := renderSearchBar(*g)
 
 	help := "  " + RenderHelpInline([]HelpItem{
 		{Key: "↑↓/jk", Desc: "scroll"},
-		{Key: "/", Desc: "filter"},
-		{Key: "ctrl+f", Desc: "search"},
+		{Key: "tab", Desc: "focus next"},
 		{Key: "esc", Desc: "tabs"},
 	})
 
-	header := stripeTitle + filterBar + searchBar + "\n" + help
+	header := stripeTitle + "\n" + help
 
 	sbStr := renderScrollbar(
 		g.viewport.Height(),
@@ -1137,12 +1412,23 @@ func (v LogViewer) renderStripeBox(i, w, h int) string {
 	)
 }
 
-// liveOrPaused renders the green "live" or muted "⏸ N%" indicator for a group.
-func liveOrPaused(g logGroupState, lastLineAt time.Time) string {
-	if g.autoScroll {
+// liveStateLabel returns the three-state indicator for the group. Order:
+//
+//	paused      → "■ paused +N"   (N = pending lines)
+//	autoscroll+ → "● live"        (plus optional "· quiet Ks" after 30s)
+//	otherwise   → "⏸ N%"          (N = scroll percent)
+//
+// The pause label takes priority over autoscroll because pause is the
+// stronger UX commitment — once paused, the user wants to know the buffered
+// count and isn't reading from the live tail.
+func (v LogViewer) liveStateLabel(g logGroupState) string {
+	if v.paused {
+		return styles.Muted.Render(fmt.Sprintf("  ■ paused +%d", len(v.pendingLines)))
+	}
+	if v.autoScroll && g.viewport.AtBottom() {
 		s := styles.Success.Render("  ● live")
-		if !lastLineAt.IsZero() {
-			if since := time.Since(lastLineAt); since >= 30*time.Second {
+		if !v.lastLineAt.IsZero() {
+			if since := time.Since(v.lastLineAt); since >= 30*time.Second {
 				s += styles.Muted.Render(fmt.Sprintf(" · quiet %ds", int(since.Seconds())))
 			}
 		}
@@ -1155,31 +1441,31 @@ func liveOrPaused(g logGroupState, lastLineAt time.Time) string {
 	return styles.Muted.Render(fmt.Sprintf("  ⏸ %d%%", pct))
 }
 
-func renderFilterBar(g logGroupState) string {
-	if g.filterOn {
-		return "\n" + styles.Primary.Render("filter: ") + g.filterInput + styles.Muted.Render("█")
+func (v LogViewer) renderFilterBar(g logGroupState) string {
+	if v.filterOn {
+		return "\n" + styles.Primary.Render("filter: ") + v.filterInput + styles.Muted.Render("█")
 	}
-	if g.filter != "" {
-		return "\n" + styles.Primary.Render("filter: ") + styles.Warning.Render(g.filter) +
+	if v.filter != "" {
+		return "\n" + styles.Primary.Render("filter: ") + styles.Warning.Render(v.filter) +
 			styles.Muted.Render("  (/ change, esc clear)")
 	}
 	return ""
 }
 
-func renderSearchBar(g logGroupState) string {
-	if g.searchOn {
+func (v LogViewer) renderSearchBar(g logGroupState) string {
+	if v.searchOn {
 		extra := ""
-		if g.searchInput != "" && len(g.searchMatches) > 0 {
+		if v.searchInput != "" && len(g.searchMatches) > 0 {
 			extra = "  " + styles.Muted.Render(fmt.Sprintf("%d matches", len(g.searchMatches)))
 		}
-		return "\n" + styles.Primary.Render("search: ") + g.searchInput + styles.Muted.Render("█") + extra
+		return "\n" + styles.Primary.Render("search: ") + v.searchInput + styles.Muted.Render("█") + extra
 	}
-	if g.searchQuery != "" {
+	if v.searchQuery != "" {
 		matchInfo := "no matches"
 		if len(g.searchMatches) > 0 {
 			matchInfo = fmt.Sprintf("%d/%d", g.searchCurrent+1, len(g.searchMatches))
 		}
-		return "\n" + styles.Primary.Render("search: ") + styles.Warning.Render(g.searchQuery) +
+		return "\n" + styles.Primary.Render("search: ") + styles.Warning.Render(v.searchQuery) +
 			"  " + styles.Muted.Render(matchInfo+"  n↓ N↑  esc clear")
 	}
 	return ""
@@ -1195,7 +1481,7 @@ func (v LogViewer) HandleClickAt(x, y int) (LogViewer, bool) {
 				v.rebuildGroup(v.focusedGroup)
 			}
 			v.focusedGroup = z.idx
-			if v.layout == LayoutTabs && v.groups[z.idx].autoScroll {
+			if v.layout == LayoutTabs && v.autoScroll {
 				v.groups[z.idx].viewport.GotoBottom()
 			}
 			return v, true
@@ -1214,6 +1500,22 @@ func (v LogViewer) HandleClickAt(x, y int) (LogViewer, bool) {
 	return v, false
 }
 
+// outerHeaderRows returns the number of rows the outer panel header occupies
+// in split layouts: title (1) + optional filter (0/1) + optional search (0/1)
+// + blank separator (1). The tabs path computes this inline; split-layout
+// arithmetic in stripeBoundsFor / hit zones / size calcs all read from here
+// so they stay consistent.
+func (v LogViewer) outerHeaderRows() int {
+	rows := 1 + 1 // title + blank
+	if v.filterOn || v.filter != "" {
+		rows++
+	}
+	if v.searchOn || v.searchQuery != "" {
+		rows++
+	}
+	return rows
+}
+
 // stripeBoundsFor returns panel-local bounds (inclusive) of group i's outer
 // stripe rectangle in split layouts. Returns ok=false in tabs mode or for
 // out-of-range indices.
@@ -1225,13 +1527,14 @@ func (v LogViewer) stripeBoundsFor(i int) (x1, y1, x2, y2 int, ok bool) {
 	if n == 0 || i < 0 || i >= n {
 		return 0, 0, 0, 0, false
 	}
+	headerRows := v.outerHeaderRows()
 	innerW := max(1, v.width-2)
-	innerH := max(1, v.height-2-2) // outer border (2) + outer header (title + blank = 2)
+	innerH := max(1, v.height-2-headerRows)
 	switch v.layout {
 	case LayoutHorizontal:
 		stripeH := innerH / n
 		extra := innerH - stripeH*n
-		y := 1 + 2 // outer border-top + outer header (title + blank)
+		y := 1 + headerRows // outer border-top + outer header
 		for k := 0; k < i; k++ {
 			h := stripeH
 			if k == n-1 {
@@ -1247,7 +1550,7 @@ func (v LogViewer) stripeBoundsFor(i int) (x1, y1, x2, y2 int, ok bool) {
 	case LayoutVertical:
 		stripeW := innerW / n
 		extra := innerW - stripeW*n
-		yTop := 1 + 2
+		yTop := 1 + headerRows
 		yBot := yTop + innerH - 1
 		x := 1
 		for k := 0; k < i; k++ {
@@ -1283,10 +1586,10 @@ func (v LogViewer) viewportBoundsFor(i int) (x1, y1, x2, y2 int, ok bool) {
 		if len(v.tabGroups) > 1 {
 			row++
 		}
-		if g.filterOn || g.filter != "" {
+		if v.filterOn || v.filter != "" {
 			row++
 		}
-		if g.searchOn || g.searchQuery != "" {
+		if v.searchOn || v.searchQuery != "" {
 			row++
 		}
 		row++ // help line
@@ -1299,13 +1602,7 @@ func (v LogViewer) viewportBoundsFor(i int) (x1, y1, x2, y2 int, ok bool) {
 	}
 	chrome := 1 // stripe border-top
 	chrome++    // stripe title
-	if g.filterOn || g.filter != "" {
-		chrome++
-	}
-	if g.searchOn || g.searchQuery != "" {
-		chrome++
-	}
-	chrome++ // help line (no blank row in split — only "\n" between header and viewport)
+	chrome++    // help line (no blank row in split — only "\n" between header and viewport)
 	vpY1 := sy1 + chrome
 	vpY2 := vpY1 + g.viewport.Height() - 1
 	if vpY2 > sy2-1 {
@@ -1466,9 +1763,9 @@ func (v LogViewer) AutoScrollStep() LogViewer {
 	}
 	g.viewport.SetYOffset(next)
 	// Disable autoScroll-to-tail when manually scrolling up; matches keyboard
-	// scroll semantics elsewhere in the file.
+	// scroll semantics elsewhere in the file. autoScroll is viewer-wide.
 	if next < cur {
-		g.autoScroll = false
+		v.autoScroll = false
 	}
 	var endRow int
 	if g.drag.LastY < y1 {
@@ -1509,9 +1806,9 @@ func (v LogViewer) HandleMouseUp(localX, localY int) (LogViewer, string) {
 		hi = len(v.lines) - 1
 	}
 	fg := v.groups[v.focusedGroup]
-	activeFilter := fg.filter
-	if fg.filterOn {
-		activeFilter = fg.filterInput
+	activeFilter := v.filter
+	if v.filterOn {
+		activeFilter = v.filterInput
 	}
 	lowFilter := strings.ToLower(activeFilter)
 	var parts []string

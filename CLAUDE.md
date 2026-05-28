@@ -71,7 +71,7 @@ internal/ui/
 - **Metrics degradation**: if metrics-server not installed (404 on metrics API), show "n/a" — never block resource browsing.
 - **lipgloss constraint**: `MarginLeft()` breaks `Width()` in lipgloss v1.1.0 — use `PaddingLeft()` for all indented panel elements.
 - **YAML editor modal states**: `internal/ui/panels/yaml_editor.go` implements vim-style Normal/Insert/DiffConfirm/Applying states. In Normal mode both `hjkl` and arrow keys navigate; `i/a/A/o/O` enter Insert mode; `ctrl+s` opens diff preview. In Insert mode all input goes directly to the `textarea` widget.
-- **Log viewer states**: `internal/ui/panels/log_viewer.go` has layered state — filterOn (/ input), searchOn (ctrl+f input), podFilter (1-9 solo), tabGroups (multi-group). `HasActiveState()` and `HandleEsc()` let the root model peel one layer per `esc` instead of exiting log mode immediately. `LogGroup` / `StartGrouped()` in `logs.go` carry the group name through `LogLine.Group` so the viewer can route lines to tabs.
+- **Log viewer states**: `internal/ui/panels/log_viewer.go` has layered state — viewer-wide filterOn (/ input), searchOn (ctrl+f input), autoScroll, paused, wrap, and previous flags; per-group podFilter (1-9 solo, single-group mode only), drag-select, and search-match positions. Filter and search query apply to every tab/stripe (single `/` typing covers all groups); scrolling up in *any* group disables autoscroll *everywhere*. The `esc` peel order is: drag → search input → filter input → pod-solo → search query → filter query → split layout. `s` (pause) is deliberately not peeled by esc — the user resumes with `s`. While paused, incoming lines are buffered into `pendingLines` (capped at `maxLogLines`, drop-oldest) and the channel keeps draining via the root's self-rechained `ReadCmd`. `LogGroup` / `StartGrouped()` in `logs.go` carry the group name through `LogLine.Group` so the viewer can route lines to tabs. `LogStreamer.SetPrevious(true)` plumbs `PodLogOptions.Previous=true` (with `Follow=false`) through `streamContainer`; previous-logs streams are one-shot — the retry loop exits on natural EOF rather than reconnecting. The root model caches `m.logGroups` so `p` (LogPreviousToggleMsg) can rebuild a fresh streamer against the same composition without re-resolving from table selection.
 - **JSON colorization**: `tryColorizeJSON` in `log_viewer.go` Chroma-highlights lines that are valid JSON (dracula theme, terminal256 formatter); colorCache is a parallel slice to `lines` so re-colorizing on `J` toggle only re-renders lines, not restreams data.
 - **Scrollable columns**: `k8s.Column.Scrollable` is a per-column opt-in (parallel to `Flex`). At most one column per resource sets it; `ResourceTable` reads it through `scrollableColIdx()` and exposes `←/→`, horizontal-wheel ticks, and an `esc`-peel layer on `hScroll`. Adding the flag to any new resource's column is the only step required to enable horizontal scrolling.
 - **Resource table scrollbar**: `ResourceTable.View()` reserves the rightmost inner column for a `renderScrollbar` thumb driven by `scrollStart()` over `len(t.filtered)` — works for both key navigation and mouse-wheel cursor moves. The title also appends a `i/N · P%` muted label via `cursorPositionLabel()`.
@@ -127,16 +127,23 @@ internal/ui/
 
 | Key | Action |
 |---|---|
-| `↑↓` / `jk` | scroll |
-| `g` / `G` | top / bottom (G also re-enables auto-scroll) |
-| `/` | filter lines (hides non-matching) |
-| `ctrl+f` | inline search (highlights matches) |
-| `n` / `N` | next / prev search match |
+| `↑↓` / `jk` / `pgup` / `pgdn` | scroll |
+| `/` | filter lines (viewer-wide; hides non-matching across every tab/stripe) |
+| `ctrl+f` | inline search (viewer-wide; highlights matches) |
+| `n` / `N` | next / prev search match (focused group) |
+| `s` | pause / resume streaming (buffered, capped at `maxLogLines`) |
+| `a` | toggle autoscroll (viewer-wide; on-enable snaps every group to bottom) |
+| `w` | toggle line wrap (ANSI-aware via `ansi.Wrap`) |
+| `c` | copy focused group's visible (post-filter) lines to clipboard |
+| `ctrl+s` | save focused group's visible lines to `$KLENS_DUMP_DIR/logs-<group>-<ts>.log` (default `~/.klens/dumps/`) |
+| `p` | toggle previous-container logs (re-streams with `Previous=true`) |
 | `1`–`9` | solo pod (single-group) or jump to tab (multi-group) |
 | `0` | show all pods / return to first tab |
-| `tab` | cycle tabs (multi-group mode) |
+| `tab` | cycle tabs / stripe focus (multi-group mode) |
+| `v` | cycle layout: tabs → horizontal split → vertical split → tabs |
 | `J` | toggle JSON pretty-print + Chroma colorization |
-| `esc` | peel state: cancel input → clear search → clear pod filter → clear filter → exit logs |
+| `F` | fullscreen |
+| `esc` | peel state: drag → search input → filter input → pod-solo → search query → filter query → split layout → exit logs |
 
 ## Adding a New Resource Type
 

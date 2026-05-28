@@ -41,6 +41,13 @@ type LogStreamer struct {
 	lineCh    chan LogLine
 	ctx       context.Context
 	cancel    context.CancelFunc
+
+	// previous mirrors PodLogOptions.Previous — when true, the streamer asks
+	// the API server for the previous-container instance's logs. Previous
+	// implies non-following: the API server returns whatever is available and
+	// the stream ends, so the retry loop falls through to "stream ended" on
+	// the natural EOF instead of reconnecting.
+	previous bool
 }
 
 func NewLogStreamer(cs kubernetes.Interface, namespace string) *LogStreamer {
@@ -53,6 +60,14 @@ func NewLogStreamer(cs kubernetes.Interface, namespace string) *LogStreamer {
 		cancel:    cancel,
 	}
 }
+
+// SetPrevious switches the streamer to sourcing the previous container
+// instance's logs. Must be called before Start / StartGrouped.
+func (s *LogStreamer) SetPrevious(prev bool) { s.previous = prev }
+
+// Previous reports whether this streamer is currently sourcing previous-
+// container logs.
+func (s *LogStreamer) Previous() bool { return s.previous }
 
 // Start begins streaming from the given pod names. Multi-container pods are
 // fanned out: one stream per container, labelled with the container name.
@@ -144,7 +159,8 @@ func (s *LogStreamer) streamContainer(podName, container, group string, colorIdx
 	tailLines := int64(200)
 	opts := &corev1.PodLogOptions{
 		Container: container,
-		Follow:    true,
+		Follow:    !s.previous, // previous logs are inherently non-following
+		Previous:  s.previous,
 		TailLines: &tailLines,
 	}
 
@@ -189,6 +205,13 @@ func (s *LogStreamer) streamContainer(podName, container, group string, colorIdx
 		stream.Close()
 
 		if s.ctx.Err() != nil {
+			return
+		}
+		if s.previous {
+			// Previous-container logs are a one-shot snapshot; the stream
+			// ending naturally means we've delivered everything available.
+			// Reconnecting would re-stream the same lines on every loop.
+			s.sendSystem(podName, container, group, colorIdx, fmt.Sprintf("[%s] previous logs complete", label))
 			return
 		}
 		s.sendSystem(podName, container, group, colorIdx, fmt.Sprintf("[%s] stream ended, reconnecting…", label))

@@ -85,6 +85,11 @@ type Model struct {
 	clusterMgr        *cluster.Manager
 	watcher           *k8sops.WatcherFactory
 	logStreamer       *k8sops.LogStreamer
+	// logGroups is the pod-set composition that was streamed into the active
+	// log session. Cached so `p` (previous-container logs) can rebuild a
+	// fresh LogStreamer against the same pods/groups without re-resolving
+	// from the table selection — which may have moved on.
+	logGroups         []k8sops.LogGroup
 	pfManager         *k8sops.PortForwardManager
 	metricsData       k8sops.MetricsUpdatedMsg
 	msgCh             chan tea.Msg
@@ -362,6 +367,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmd, m.logStreamer.ReadCmd())
 		}
 		return m, cmd
+
+	case panels.LogPreviousToggleMsg:
+		// Flip the streamer's Previous flag, re-seeding the viewer with empty
+		// lines so the new source doesn't visually concatenate with the old.
+		if m.mode != ModeLogs || m.clusterMgr == nil || len(m.logGroups) == 0 {
+			return m, nil
+		}
+		cs, err := m.clusterMgr.ActiveClientset()
+		if err != nil || cs == nil {
+			m.statusBar = m.statusBar.SetMessage("logs: no client")
+			return m, nil
+		}
+		var nextPrev bool
+		if m.logStreamer != nil {
+			nextPrev = !m.logStreamer.Previous()
+			m.logStreamer.Stop()
+		}
+		streamer := k8sops.NewLogStreamer(cs, m.namespace)
+		streamer.SetPrevious(nextPrev)
+		streamer.StartGrouped(m.logGroups)
+		m.logStreamer = streamer
+		m.logsCtrl = m.logsCtrl.SetPanel(m.logsCtrl.Panel().SetPrevious(nextPrev))
+		if nextPrev {
+			m.statusBar = m.statusBar.SetMessage("streaming previous container logs")
+		} else {
+			m.statusBar = m.statusBar.SetMessage("streaming live logs")
+		}
+		return m, streamer.ReadCmd()
 
 	case panels.YAMLFetchedMsg:
 		if msg.Err != nil {
@@ -1375,6 +1408,7 @@ func (m Model) actionLogs() (Model, tea.Cmd) {
 			streamer := k8sops.NewLogStreamer(cs, m.namespace)
 			streamer.StartGrouped(groups)
 			m.logStreamer = streamer
+			m.logGroups = groups
 			m.logsCtrl = m.logsCtrl.SetPodGroups(groups)
 			m.mode = ModeLogs
 			m.focus = FocusContent
