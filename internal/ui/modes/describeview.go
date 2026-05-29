@@ -32,6 +32,9 @@ func (c DescribeViewController) SetSize(w, h int) Controller {
 // HasActiveState / HandleEsc let the root peel one layer at a time: open
 // filter input → applied filter → exit mode. Matches the log viewer pattern.
 func (c DescribeViewController) HasActiveState() bool { return c.panel.HasActiveState() }
+func (c DescribeViewController) WheelAtBoundary(button tea.MouseButton) bool {
+	return c.panel.WheelAtBoundary(button)
+}
 func (c DescribeViewController) HandleEsc() (DescribeViewController, bool) {
 	p, consumed := c.panel.HandleEsc()
 	c.panel = p

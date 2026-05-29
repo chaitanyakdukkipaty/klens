@@ -102,6 +102,82 @@ func TestEventCellTerminalEscaping(t *testing.T) {
 	}
 }
 
+// TestEventIsFaultRow covers all four meaningful Type values the events
+// table can produce: Warning + the Error string literal are faults; Normal
+// and the empty string are not. Hardcoded against the spec so any future
+// "be lenient about Error" change is visible.
+func TestEventIsFaultRow(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"Warning", true},
+		{"Error", true},
+		{"Normal", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		ev := &corev1.Event{Type: c.in}
+		if got := (event{}).IsFaultRow(ev); got != c.want {
+			t.Errorf("IsFaultRow(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestEventInvolvedObject pins the three branches: a fully-populated
+// reference resolves; an empty-Kind reference returns ok=false; a reference
+// missing its own namespace inherits the event's namespace.
+func TestEventInvolvedObject(t *testing.T) {
+	t.Run("kind and namespace present", func(t *testing.T) {
+		ev := &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "ns-event"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "foo", Namespace: "ns-pod", APIVersion: "v1"},
+		}
+		gvk, ns, name, ok := (event{}).InvolvedObject(ev)
+		if !ok {
+			t.Fatal("InvolvedObject ok=false on fully-populated reference")
+		}
+		if gvk.Kind != "Pod" || gvk.Version != "v1" || gvk.Group != "" {
+			t.Errorf("gvk = %v, want {Group:\"\", Version:\"v1\", Kind:\"Pod\"}", gvk)
+		}
+		if ns != "ns-pod" {
+			t.Errorf("namespace = %q, want ns-pod (reference's own value)", ns)
+		}
+		if name != "foo" {
+			t.Errorf("name = %q, want foo", name)
+		}
+	})
+	t.Run("empty kind returns ok=false", func(t *testing.T) {
+		ev := &corev1.Event{InvolvedObject: corev1.ObjectReference{Name: "foo"}}
+		if _, _, _, ok := (event{}).InvolvedObject(ev); ok {
+			t.Error("InvolvedObject ok=true on empty-kind reference")
+		}
+	})
+	t.Run("namespace inherits from event when reference is namespace-less", func(t *testing.T) {
+		ev := &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Namespace: "ns-event"},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "foo"},
+		}
+		_, ns, _, ok := (event{}).InvolvedObject(ev)
+		if !ok {
+			t.Fatal("InvolvedObject ok=false")
+		}
+		if ns != "ns-event" {
+			t.Errorf("namespace = %q, want ns-event (inherited from event)", ns)
+		}
+	})
+	t.Run("grouped APIVersion parses correctly", func(t *testing.T) {
+		ev := &corev1.Event{InvolvedObject: corev1.ObjectReference{Kind: "Deployment", Name: "x", APIVersion: "apps/v1"}}
+		gvk, _, _, ok := (event{}).InvolvedObject(ev)
+		if !ok {
+			t.Fatal("InvolvedObject ok=false")
+		}
+		if gvk.Group != "apps" || gvk.Version != "v1" || gvk.Kind != "Deployment" {
+			t.Errorf("gvk = %v, want apps/v1/Deployment", gvk)
+		}
+	})
+}
+
 // TestEventRowSortByTime pins the lastSeenTime precedence chain. Series
 // wins over EventTime wins over LastTimestamp.
 func TestEventRowSortByTime(t *testing.T) {
@@ -141,5 +217,16 @@ func TestEventRowSortByTime(t *testing.T) {
 				t.Errorf("RowSortByTime = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestEventDoesNotImplementRowNamer is a regression guard. An earlier version
+// of event{} overrode RowName to return InvolvedObject.Name, which broke
+// YAML / Describe (the row's Name became the involved object's name, so
+// events.Get(ns, name) returned 404). If a future change re-adds RowName on
+// event, this test fails loudly instead of waiting for a user bug report.
+func TestEventDoesNotImplementRowNamer(t *testing.T) {
+	if _, ok := any(event{}).(RowNamer); ok {
+		t.Fatal("event must not implement RowNamer — row.Name is used to fetch the resource for YAML/describe and must equal the event's metadata Name, not InvolvedObject.Name")
 	}
 }

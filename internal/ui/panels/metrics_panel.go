@@ -43,6 +43,18 @@ func (m MetricsPanel) SetSize(w, h int) MetricsPanel {
 
 func (m MetricsPanel) SetFocused(f bool) MetricsPanel { m.focused = f; return m }
 
+// WheelAtBoundary reports whether the viewport is already at the edge the
+// wheel event would scroll toward.
+func (m MetricsPanel) WheelAtBoundary(button tea.MouseButton) bool {
+	switch button {
+	case tea.MouseWheelUp:
+		return m.viewport.AtTop()
+	case tea.MouseWheelDown:
+		return m.viewport.AtBottom()
+	}
+	return false
+}
+
 func (m MetricsPanel) SetResource(name, namespace string, metrics *k8smetrics.ResourceMetrics) MetricsPanel {
 	m.name = name
 	m.namespace = namespace

@@ -74,8 +74,12 @@ func (c TableController) HandleKey(k tea.KeyPressMsg) (Controller, tea.Cmd, bool
 func (c TableController) FilterActive() bool   { return c.panel.FilterActive() }
 func (c TableController) HasFilter() bool      { return c.panel.HasFilter() }
 func (c TableController) HasHScroll() bool     { return c.panel.HasHScroll() }
+func (c TableController) WrapActive() bool     { return c.panel.WrapActive() }
 func (c TableController) IsDragging() bool     { return c.panel.IsDragging() }
 func (c TableController) SelectionCount() int  { return c.panel.SelectionCount() }
+func (c TableController) WheelAtBoundary(button tea.MouseButton) bool {
+	return c.panel.WheelAtBoundary(button)
+}
 func (c TableController) SelectedRow() *k8s.ResourceRow {
 	return c.panel.SelectedRow()
 }
@@ -102,6 +106,27 @@ func (c TableController) SetSyncing(s bool) TableController {
 func (c TableController) SetKind(kind string) TableController {
 	c.panel = c.panel.SetKind(kind)
 	return c
+}
+
+func (c TableController) SetWrapColumn(idx int) TableController {
+	c.panel = c.panel.SetWrapColumn(idx)
+	return c
+}
+
+func (c TableController) ClearWrapColumn() TableController {
+	c.panel = c.panel.ClearWrapColumn()
+	return c
+}
+
+func (c TableController) SetTitleBadge(s string) TableController {
+	c.panel = c.panel.SetTitleBadge(s)
+	return c
+}
+
+func (c TableController) CursorToName(name string) (TableController, bool) {
+	p, ok := c.panel.CursorToName(name)
+	c.panel = p
+	return c, ok
 }
 
 func (c TableController) WithRows(rows []k8s.ResourceRow) TableController {

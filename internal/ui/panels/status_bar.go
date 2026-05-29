@@ -44,6 +44,11 @@ func (s StatusBar) SetMessage(msg string) StatusBar {
 	return s
 }
 
+// Message returns the current transient status-bar message. Empty when no
+// message is set. Exposed so tests can assert on the message text without
+// rendering the bar.
+func (s StatusBar) Message() string { return s.message }
+
 func (s StatusBar) SetHelp(items []HelpItem) StatusBar {
 	s.help = items
 	return s

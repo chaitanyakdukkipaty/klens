@@ -3,6 +3,8 @@ package kinds
 import (
 	"strings"
 	"sync"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Registry holds the set of Kinds known to klens. There is one process-global
@@ -63,3 +65,29 @@ func Lookup(name string) (Kind, bool) { return Default.Resolve(name) }
 
 // All returns every Kind in the default registry.
 func All() []Kind { return Default.All() }
+
+// ResolveByGVK returns the Kind whose Meta matches gvk's Group, Version, and
+// Kind. The Kind name lookup is the primary key (every registered Kind has a
+// unique Meta.Kind); when gvk.Group / gvk.Version are non-empty they
+// additionally have to match the Kind's GVR. APIVersion-less references
+// (common for stripped-down Events) match by Kind name alone.
+func (r *Registry) ResolveByGVK(gvk schema.GroupVersionKind) (Kind, bool) {
+	if gvk.Kind == "" {
+		return nil, false
+	}
+	k, ok := r.Resolve(gvk.Kind)
+	if !ok {
+		return nil, false
+	}
+	m := k.Meta()
+	if gvk.Group != "" && gvk.Group != m.GVR.Group {
+		return nil, false
+	}
+	if gvk.Version != "" && gvk.Version != m.GVR.Version {
+		return nil, false
+	}
+	return k, true
+}
+
+// LookupByGVK is a convenience wrapper around Default.ResolveByGVK.
+func LookupByGVK(gvk schema.GroupVersionKind) (Kind, bool) { return Default.ResolveByGVK(gvk) }

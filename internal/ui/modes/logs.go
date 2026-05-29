@@ -47,6 +47,9 @@ func (c LogsController) SetPodGroups(groups []k8s.LogGroup) LogsController {
 }
 
 func (c LogsController) IsDragging() bool { return c.panel.IsDragging() }
+func (c LogsController) WheelAtBoundary(button tea.MouseButton) bool {
+	return c.panel.WheelAtBoundary(button)
+}
 
 func (c LogsController) AutoScrollStep() LogsController {
 	c.panel = c.panel.AutoScrollStep()

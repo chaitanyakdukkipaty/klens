@@ -101,7 +101,7 @@ internal/ui/
 | `ctrl+r` | reconnect / refresh (stops watcher, reruns full connect) |
 | `ctrl+n` | namespace picker |
 | `ctrl+o` | cluster context picker |
-| `ctrl+z` | rollback last YAML apply (in YAML view) |
+| `ctrl+z` | rollback last YAML apply (in YAML view); toggle faults filter (in Events table) |
 | `ctrl+s` | YAML diff preview / save (in YAML editor) |
 | `ctrl+v` | paste into filter / search / editor inputs |
 | `←/→` | scroll horizontally on columns marked `Scrollable` (e.g. Event MESSAGE); horizontal trackpad wheel does the same |
@@ -145,6 +145,24 @@ internal/ui/
 | `F` | fullscreen |
 | `esc` | peel state: drag → search input → filter input → pod-solo → search query → filter query → split layout → exit logs |
 
+### Events view
+
+The events table swaps the global help footer for an events-specific one
+that drops the bindings the kind can't satisfy (`ctrl+d` / `e` / `a` — no
+`Deleter` / `Applier` / `Attacher`) and adds three events-only keys. The
+state these keys touch is event-only: it survives namespace switch but
+resets on cluster switch and on kind switch (leaving Event).
+
+| Key | Action |
+|---|---|
+| `ctrl+z` | toggle faults-only filter (rows whose `Type` ∈ {`Warning`, `Error`}); composes with `/` |
+| `w` | toggle MESSAGE-column wrap (multi-line cells; disables `←/→` while on) |
+| `o` | open the row's `InvolvedObject` in its own kind table; jumps cursor to the matching row |
+
+Pressing `ctrl+d`, `e`, or `a` on an event row sets the status bar to
+"not supported on Event" — explicit feedback in place of the silent no-op
+that would otherwise reach the dispatch helpers.
+
 ## Adding a New Resource Type
 
 Create `internal/k8s/kinds/<kind>.go`. Implement `Meta()`, `Columns()` (with a
@@ -159,9 +177,14 @@ that bypasses `Lister`. Implement any capability interfaces the kind supports
 (currently just Pod); for everything else, `KillCmd` falls back to
 `DeleteCmd`. Implement the optional `RowStatuser` /
 `RowSortByTimer` / `RowNamer` interfaces when the row's color key, sort order,
-or display name should diverge from the object's metadata. Register in the
-package `init()` via `register(k)`; the shim in `kinds/shim.go` builds the
-legacy `k8s.ResourceDescriptor` from the Kind and its capability satisfaction.
+or display name should diverge from the object's metadata. Two further
+event-shaped optional interfaces — `FaultRowMarker` (opt into the table's
+`ctrl+z` faults filter) and `InvolvedObjectResolver` (opt into the `o`
+jump-to-target action) — exist for kinds whose rows have a fault/non-fault
+predicate or reference another resource; today only Event implements them.
+Register in the package `init()` via `register(k)`; the shim in
+`kinds/shim.go` builds the legacy `k8s.ResourceDescriptor` from the Kind
+and its capability satisfaction.
 
 ### Adding a Column
 

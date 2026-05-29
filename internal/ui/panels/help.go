@@ -70,6 +70,12 @@ func renderHelpParts(items []HelpItem) []string {
 // rune in key matches it (case-insensitive). Handles compound keys like
 // `ctrl+r` + `refresh` → `efresh`, `ctrl+c/q` + `quit` → `uit`. Keys with
 // no letter rune matching desc's first letter leave desc untouched.
+//
+// For compound keys, only the segment after the final `+` is considered —
+// the modifier prefix (`ctrl`, `shift`, `alt`) is not the letter the user
+// types, so it must not match against desc. Without this, e.g.
+// `[ctrl+o]ctx` would incorrectly trim to `tx` because `c` appears in
+// `ctrl`.
 func trimKeyPrefix(key, desc string) string {
 	if desc == "" {
 		return desc
@@ -79,7 +85,11 @@ func trimKeyPrefix(key, desc string) string {
 	if !unicode.IsLetter(first) {
 		return desc
 	}
-	for _, r := range key {
+	keyMatch := key
+	if i := strings.LastIndex(key, "+"); i >= 0 {
+		keyMatch = key[i+1:]
+	}
+	for _, r := range keyMatch {
 		if unicode.IsLetter(r) && unicode.ToLower(r) == first {
 			return string(descRunes[1:])
 		}

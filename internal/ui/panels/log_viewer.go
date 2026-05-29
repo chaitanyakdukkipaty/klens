@@ -252,6 +252,29 @@ func (v *LogViewer) applySizes() {
 
 func (v LogViewer) SetFocused(f bool) LogViewer { v.focused = f; return v }
 
+// WheelAtBoundary reports whether a wheel event would be a pure no-op against
+// the focused group's viewport AND would not toggle autoScroll. Used by the
+// root model's tea.WithFilter to drop boundary-spam wheel events that would
+// otherwise pile up View() renders during trackpad momentum scroll.
+//
+// The autoScroll check matters because the existing handler treats wheel-down
+// at the bottom as "user wants to resume tailing" (sets autoScroll=true) and
+// wheel-up anywhere as "stop tailing" (sets autoScroll=false). Filtering must
+// not swallow events that would flip that flag.
+func (v LogViewer) WheelAtBoundary(button tea.MouseButton) bool {
+	if len(v.groups) == 0 {
+		return false
+	}
+	g := &v.groups[v.focusedGroup]
+	switch button {
+	case tea.MouseWheelUp:
+		return g.viewport.AtTop() && !v.autoScroll
+	case tea.MouseWheelDown:
+		return g.viewport.AtBottom() && v.autoScroll
+	}
+	return false
+}
+
 // StatusMsg returns and clears any transient message (e.g. split-mode rejection).
 func (v *LogViewer) ConsumeStatusMsg() string {
 	msg := v.statusMsg

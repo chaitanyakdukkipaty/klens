@@ -35,6 +35,18 @@ func (t XRayPanel) SetSize(w, h int) XRayPanel {
 
 func (t XRayPanel) SetFocused(f bool) XRayPanel { t.focused = f; return t }
 
+// WheelAtBoundary reports whether the viewport is already at the edge the
+// wheel event would scroll toward.
+func (t XRayPanel) WheelAtBoundary(button tea.MouseButton) bool {
+	switch button {
+	case tea.MouseWheelUp:
+		return t.viewport.AtTop()
+	case tea.MouseWheelDown:
+		return t.viewport.AtBottom()
+	}
+	return false
+}
+
 func (t XRayPanel) SetTree(kind, name string, root *k8s.TreeNode) XRayPanel {
 	t.kind = kind
 	t.name = name

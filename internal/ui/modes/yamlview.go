@@ -28,6 +28,9 @@ func (c YAMLViewController) SetSize(w, h int) Controller {
 }
 
 func (c YAMLViewController) IsDragging() bool { return c.panel.IsDragging() }
+func (c YAMLViewController) WheelAtBoundary(button tea.MouseButton) bool {
+	return c.panel.WheelAtBoundary(button)
+}
 func (c YAMLViewController) AutoScrollStep() YAMLViewController {
 	c.panel = c.panel.AutoScrollStep()
 	return c

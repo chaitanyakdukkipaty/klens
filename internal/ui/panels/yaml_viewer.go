@@ -79,6 +79,19 @@ func (v YAMLViewer) SetSize(w, h int) YAMLViewer {
 	return v
 }
 func (v YAMLViewer) SetFocused(f bool) YAMLViewer { v.focused = f; return v }
+
+// WheelAtBoundary reports whether the viewport is already pinned at the edge
+// the wheel event would scroll toward. The root filter uses this to skip the
+// per-event View() cost when boundary-spam wheel events pile up.
+func (v YAMLViewer) WheelAtBoundary(button tea.MouseButton) bool {
+	switch button {
+	case tea.MouseWheelUp:
+		return v.viewport.AtTop()
+	case tea.MouseWheelDown:
+		return v.viewport.AtBottom()
+	}
+	return false
+}
 func (v YAMLViewer) RawYAML() string               { return v.raw }
 func (v YAMLViewer) ResourceInfo() (kind, name, ns string) {
 	return v.kind, v.name, v.namespace

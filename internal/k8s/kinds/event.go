@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // event is namespaced. Column shape mirrors `kubectl get events`: LAST SEEN
@@ -43,11 +44,6 @@ func (event) Columns() []k8s.Column {
 
 func (e event) List(c Context) ([]k8s.ResourceRow, error) { return listVia(e, c) }
 
-// RowName overrides the default metadata-name with the involved object's
-// name so multi-select and filter operate on what the user sees in the
-// OBJECT column.
-func (event) RowName(o runtime.Object) string { return o.(*corev1.Event).InvolvedObject.Name }
-
 // RowStatus drives the colored TYPE column via the Status color key.
 func (event) RowStatus(o runtime.Object) string { return o.(*corev1.Event).Type }
 
@@ -55,6 +51,32 @@ func (event) RowStatus(o runtime.Object) string { return o.(*corev1.Event).Type 
 // lastSeenAge so a Series-driven event sorts on its most recent observation.
 func (event) RowSortByTime(o runtime.Object) time.Time {
 	return lastSeenTime(o.(*corev1.Event))
+}
+
+// IsFaultRow opts into the table's ctrl+z faults-only toggle. corev1 declares
+// only Normal and Warning; "Error" is included as a string literal because
+// some operators emit it in the wild.
+func (event) IsFaultRow(o runtime.Object) bool {
+	t := o.(*corev1.Event).Type
+	return t == corev1.EventTypeWarning || t == "Error"
+}
+
+// InvolvedObject is the events-specific "o" key target. Returns the GVK +
+// (namespace, name) of the referenced resource, or ok=false when the event
+// has no usable reference. Events without an explicit InvolvedObject.Namespace
+// inherit the event's own namespace.
+func (event) InvolvedObject(o runtime.Object) (schema.GroupVersionKind, string, string, bool) {
+	e := o.(*corev1.Event)
+	io := e.InvolvedObject
+	if io.Name == "" || io.Kind == "" {
+		return schema.GroupVersionKind{}, "", "", false
+	}
+	gvk := schema.FromAPIVersionAndKind(io.APIVersion, io.Kind)
+	ns := io.Namespace
+	if ns == "" {
+		ns = e.Namespace
+	}
+	return gvk, ns, io.Name, true
 }
 
 // safeCell neutralizes terminal control bytes that could escape the table

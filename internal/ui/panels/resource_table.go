@@ -11,6 +11,7 @@ import (
 	"github.com/atotto/clipboard"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	xansi "github.com/charmbracelet/x/ansi"
 	k8sres "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/k8s/kinds"
 	"github.com/chaitanyak/klens/internal/ui/styles"
@@ -66,6 +67,18 @@ type ResourceTable struct {
 	// adjust it; SetKind, applyFilter, and WithRows reclamp it.
 	hScroll int
 
+	// wrapColIdx, when ≥0, names the column whose value is rendered as
+	// multi-line wrapped text at its allotted width. Mutually exclusive with
+	// hScroll: SetWrapColumn zeroes hScroll, and the ←/→ keys early-return
+	// when wrap is on. Reset to -1 on SetKind so wrap is per-kind state.
+	wrapColIdx int
+
+	// titleBadge appends a small "· badge" tag to the title row when set.
+	// Used by the model to surface state that isn't otherwise visible — e.g.
+	// the events-view faults filter, which removes rows but doesn't otherwise
+	// announce itself once the toggle's transient feedback fades.
+	titleBadge string
+
 	// drag holds drag-to-copy lifecycle state (indices into t.filtered).
 	// See DragSelection in drag.go.
 	drag DragSelection
@@ -73,9 +86,10 @@ type ResourceTable struct {
 
 func NewResourceTable(w, h int) ResourceTable {
 	return ResourceTable{
-		width:    w,
-		height:   h,
-		selected: make(map[string]bool),
+		width:      w,
+		height:     h,
+		selected:   make(map[string]bool),
+		wrapColIdx: -1,
 	}
 }
 
@@ -90,8 +104,71 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.filterInput = ""
 		t.filterOn = false
 		t.hScroll = 0
+		t.wrapColIdx = -1
+		t.titleBadge = ""
 	}
 	t.kind = kind
+	return t
+}
+
+// SetWrapColumn opts the table into multi-line rendering for `idx`. Subsequent
+// rows render the named column wrapped at its allotted width; other columns
+// pad blank rows to keep the row band aligned. Mutually exclusive with hScroll
+// — calling this zeroes the horizontal offset because both modes can't share
+// the same column. Negative idx is treated as "off".
+func (t ResourceTable) SetWrapColumn(idx int) ResourceTable {
+	if idx < 0 {
+		return t.ClearWrapColumn()
+	}
+	t.wrapColIdx = idx
+	t.hScroll = 0
+	return t
+}
+
+// ClearWrapColumn turns wrap rendering off.
+func (t ResourceTable) ClearWrapColumn() ResourceTable {
+	t.wrapColIdx = -1
+	return t
+}
+
+// CursorToName moves the cursor to the first filtered row whose Name matches.
+// Returns ok=true on a successful move. No-op when the target isn't in the
+// current filter window (the caller decides whether to retry).
+func (t ResourceTable) CursorToName(name string) (ResourceTable, bool) {
+	if name == "" {
+		return t, false
+	}
+	for i, r := range t.filtered {
+		if r.Name == name {
+			t.cursor = i
+			return t, true
+		}
+	}
+	return t, false
+}
+
+// WrapActive reports whether the table is currently rendering one of its
+// columns as wrapped multi-line text.
+func (t ResourceTable) WrapActive() bool { return t.wrapColIdx >= 0 }
+
+// WheelAtBoundary reports whether a wheel event in `button`'s direction would
+// be a pure no-op against the table's current state. The root model uses this
+// to drop boundary-spam wheel events via tea.WithFilter, skipping the per-msg
+// View() cost that would otherwise pile up during trackpad momentum scroll.
+func (t ResourceTable) WheelAtBoundary(button tea.MouseButton) bool {
+	switch button {
+	case tea.MouseWheelUp:
+		return t.cursor <= 0
+	case tea.MouseWheelDown:
+		return len(t.filtered) == 0 || t.cursor >= len(t.filtered)-1
+	}
+	return false
+}
+
+// SetTitleBadge sets the badge text rendered next to the kind name in the
+// title row. Pass "" to clear. Cleared automatically on kind change.
+func (t ResourceTable) SetTitleBadge(s string) ResourceTable {
+	t.titleBadge = s
 	return t
 }
 
@@ -199,8 +276,10 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		// Horizontal wheel ticks (trackpad horizontal swipe, tilt-wheel) scroll
 		// the resource's Scrollable column. Mirrors the bubbles viewport
-		// convention used by the log panel — no modifier required.
-		if t.scrollableColIdx() >= 0 {
+		// convention used by the log panel — no modifier required. Wrap mode
+		// is mutually exclusive with horizontal scroll, so the wheel ticks are
+		// inert there.
+		if t.scrollableColIdx() >= 0 && !t.WrapActive() {
 			switch msg.Button {
 			case tea.MouseWheelLeft:
 				t.scrollLeft()
@@ -279,11 +358,11 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 			t.filterInput = ""
 			t.applyFilter()
 		case "right":
-			if t.scrollableColIdx() >= 0 {
+			if t.scrollableColIdx() >= 0 && !t.WrapActive() {
 				t.scrollRight()
 			}
 		case "left":
-			if t.scrollableColIdx() >= 0 {
+			if t.scrollableColIdx() >= 0 && !t.WrapActive() {
 				t.scrollLeft()
 			}
 		case "space":
@@ -331,17 +410,112 @@ func (t ResourceTable) firstVisibleRowY() int {
 
 // rowAtInnerY converts an inner-Y coordinate to an index into t.filtered.
 // Returns ok=false for clicks above the first row or below the last visible
-// row.
+// row. In wrap mode, rows have variable terminal-line height — the search
+// walks from the wrap-aware start summing per-row heights.
 func (t ResourceTable) rowAtInnerY(innerY int) (int, bool) {
 	firstY := t.firstVisibleRowY()
 	if innerY < firstY {
 		return 0, false
 	}
-	rowIdx := (innerY - firstY) + t.scrollStart()
-	if rowIdx < 0 || rowIdx >= len(t.filtered) {
+	target := innerY - firstY
+	if !t.WrapActive() {
+		rowIdx := target + t.scrollStart()
+		if rowIdx < 0 || rowIdx >= len(t.filtered) {
+			return 0, false
+		}
+		return rowIdx, true
+	}
+	wrapColW := t.wrapColumnWidth()
+	if wrapColW <= 0 {
 		return 0, false
 	}
-	return rowIdx, true
+	budget := t.visibleRowCount()
+	start := t.scrollStartWrap(budget, wrapColW)
+	consumed := 0
+	for i := start; i < len(t.filtered); i++ {
+		h := t.rowLineCount(i, wrapColW)
+		if target < consumed+h {
+			return i, true
+		}
+		consumed += h
+		if consumed >= budget {
+			break
+		}
+	}
+	return 0, false
+}
+
+// wrapColumnWidth returns the rendered width of the wrap column, or 0 when
+// wrap is off / the column index doesn't fit the active kind.
+func (t ResourceTable) wrapColumnWidth() int {
+	if t.wrapColIdx < 0 {
+		return 0
+	}
+	desc, ok := k8sres.Resolve(t.kind)
+	if !ok {
+		return 0
+	}
+	if t.wrapColIdx >= len(desc.Columns) {
+		return 0
+	}
+	innerW := max(1, t.width-2)
+	dataW := max(1, innerW-1)
+	colWidths := computeColWidths(desc.Columns, dataW)
+	if t.wrapColIdx >= len(colWidths) {
+		return 0
+	}
+	return colWidths[t.wrapColIdx]
+}
+
+// rowLineCount returns the number of terminal lines row i will occupy in
+// wrap mode at the given wrap-column width. Returns 1 in non-wrap mode.
+func (t ResourceTable) rowLineCount(i, wrapColW int) int {
+	if t.wrapColIdx < 0 || wrapColW <= 0 {
+		return 1
+	}
+	if i < 0 || i >= len(t.filtered) {
+		return 1
+	}
+	val := ""
+	if t.wrapColIdx < len(t.filtered[i].Values) {
+		val = t.filtered[i].Values[t.wrapColIdx]
+	}
+	if val == "" {
+		return 1
+	}
+	wrapped := xansi.Wrap(val, wrapColW, "")
+	return strings.Count(wrapped, "\n") + 1
+}
+
+// scrollStartWrap is the wrap-aware analogue of scrollStart: it anchors the
+// cursor row at the bottom of the budget and walks backward until adding the
+// next row would exceed the line budget. If the cursor row alone already
+// exceeds the budget, returns cursor — that row is shown clamped at top.
+func (t ResourceTable) scrollStartWrap(budget, wrapColW int) int {
+	if len(t.filtered) == 0 {
+		return 0
+	}
+	cursor := t.cursor
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(t.filtered) {
+		cursor = len(t.filtered) - 1
+	}
+	used := t.rowLineCount(cursor, wrapColW)
+	if used >= budget {
+		return cursor
+	}
+	start := cursor
+	for s := cursor - 1; s >= 0; s-- {
+		h := t.rowLineCount(s, wrapColW)
+		if used+h > budget {
+			break
+		}
+		used += h
+		start = s
+	}
+	return start
 }
 
 // IsDragging reports whether a drag-select is in progress.
@@ -455,15 +629,8 @@ func (t ResourceTable) AutoScrollStep() ResourceTable {
 // also toggles multi-select on that row (same as pressing space).
 // Returns true if the click landed on a real row (not title / header / filter / empty area).
 func (t ResourceTable) HandleClickAt(innerY int, leftClick bool) (ResourceTable, bool) {
-	firstRowY := 2 // title (line 0) + header (line 1)
-	if t.filterOn || t.filter != "" {
-		firstRowY = 3 // + filter bar
-	}
-	if innerY < firstRowY {
-		return t, false
-	}
-	rowIdx := (innerY - firstRowY) + t.scrollStart()
-	if rowIdx < 0 || rowIdx >= len(t.filtered) {
+	rowIdx, ok := t.rowAtInnerY(innerY)
+	if !ok {
 		return t, false
 	}
 	t.cursor = rowIdx
@@ -584,6 +751,9 @@ func (t ResourceTable) View() string {
 		countInfo = fmt.Sprintf(" %d/%d", len(t.filtered), len(t.rows))
 	}
 	title := styles.Title.Render(t.kind) + styles.Muted.Render(countInfo)
+	if t.titleBadge != "" {
+		title += styles.Warning.Render("  ·  " + t.titleBadge)
+	}
 	if n := t.SelectionCount(); n > 0 {
 		title += styles.Primary.Render(fmt.Sprintf("  ·  %d selected", n))
 	}
@@ -603,32 +773,66 @@ func (t ResourceTable) View() string {
 	colWidths := computeColWidths(desc.Columns, dataW)
 	header := buildHeader(desc, colWidths)
 	scrollIdx := t.scrollableColIdx()
-	if scrollIdx >= 0 && t.hScroll > 0 {
+	if !t.WrapActive() && scrollIdx >= 0 && t.hScroll > 0 {
 		header = buildHeaderWithHScroll(desc, colWidths, scrollIdx, t.hScroll)
 	}
 
 	// Rows
-	visibleRows := t.visibleRowCount()
-	start := t.scrollStart()
+	budget := t.visibleRowCount()
+	var start int
+	var rowLines []string
+	visibleRowsShown := 0
 
 	dragLo, dragHi := -1, -1
 	if t.drag.Active {
 		dragLo, dragHi = t.drag.Range()
 	}
 
-	var rowLines []string
-	for i := start; i < len(t.filtered) && i < start+visibleRows; i++ {
-		row := t.filtered[i]
-		sel := t.selected[row.Name]
-		inDrag := dragLo >= 0 && i >= dragLo && i <= dragHi
-		isCursor := i == t.cursor || inDrag
-
-		if scrollIdx >= 0 && t.hScroll > 0 && scrollIdx < len(row.Values) {
-			row = applyHScroll(row, scrollIdx, t.hScroll)
+	if t.WrapActive() {
+		wrapColW := 0
+		if t.wrapColIdx < len(colWidths) {
+			wrapColW = colWidths[t.wrapColIdx]
 		}
+		start = t.scrollStartWrap(budget, wrapColW)
+		used := 0
+		for i := start; i < len(t.filtered); i++ {
+			row := t.filtered[i]
+			sel := t.selected[row.Name]
+			inDrag := dragLo >= 0 && i >= dragLo && i <= dragHi
+			isCursor := i == t.cursor || inDrag
+			block := buildWrappedRow(row, desc, dataW, colWidths, sel, isCursor, t.wrapColIdx)
+			if used+len(block) > budget {
+				if used == 0 {
+					// Cursor row alone exceeds budget — show as much as fits so
+					// the user can still see they're on the right line.
+					if len(block) > budget {
+						block = block[:budget]
+					}
+					rowLines = append(rowLines, block...)
+					visibleRowsShown++
+				}
+				break
+			}
+			rowLines = append(rowLines, block...)
+			used += len(block)
+			visibleRowsShown++
+		}
+	} else {
+		start = t.scrollStart()
+		for i := start; i < len(t.filtered) && i < start+budget; i++ {
+			row := t.filtered[i]
+			sel := t.selected[row.Name]
+			inDrag := dragLo >= 0 && i >= dragLo && i <= dragHi
+			isCursor := i == t.cursor || inDrag
 
-		line := buildRow(row, desc, dataW, colWidths, sel, isCursor)
-		rowLines = append(rowLines, line)
+			if scrollIdx >= 0 && t.hScroll > 0 && scrollIdx < len(row.Values) {
+				row = applyHScroll(row, scrollIdx, t.hScroll)
+			}
+
+			line := buildRow(row, desc, dataW, colWidths, sel, isCursor)
+			rowLines = append(rowLines, line)
+			visibleRowsShown++
+		}
 	}
 
 	if len(t.filtered) == 0 {
@@ -643,7 +847,7 @@ func (t ResourceTable) View() string {
 	// the thumb so both key navigation and mouse-wheel cursor moves update it.
 	rowsBlock := strings.Join(rowLines, "\n")
 	if len(t.filtered) > 0 {
-		sb := renderScrollbar(len(rowLines), visibleRows, len(t.filtered), start, t.focused)
+		sb := renderScrollbar(len(rowLines), max(1, visibleRowsShown), len(t.filtered), start, t.focused)
 		rowsBlock = joinScrollbar(rowsBlock, sb)
 	}
 
@@ -803,6 +1007,83 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 		return tableRowCursorBase.Width(width).Render(ansiEscape.ReplaceAllString(line, ""))
 	}
 	return tableRowBase.Width(width).Render(line)
+}
+
+// buildWrappedRow renders a single row across multiple terminal lines, with
+// the column at wrapIdx wrapped at its allotted width. Non-wrap columns
+// render their value on the first line and pad to blank on continuation
+// lines, keeping the row band aligned. Cursor highlight spans every line in
+// the block.
+func buildWrappedRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor bool, wrapIdx int) []string {
+	if wrapIdx < 0 || wrapIdx >= len(colWidths) {
+		return []string{buildRow(row, desc, width, colWidths, selected, cursor)}
+	}
+	cols := desc.Columns
+	values := row.Values
+	if len(values) == 0 {
+		values = append([]string{row.Name}, append([]string{row.Status, row.Age}, row.Extra...)...)
+	}
+	wrapW := colWidths[wrapIdx]
+	if wrapW <= 0 {
+		return []string{buildRow(row, desc, width, colWidths, selected, cursor)}
+	}
+	wrapVal := ""
+	if wrapIdx < len(values) {
+		wrapVal = values[wrapIdx]
+	}
+	wrapped := xansi.Wrap(wrapVal, wrapW, "")
+	segs := strings.Split(wrapped, "\n")
+	if len(segs) == 0 {
+		segs = []string{""}
+	}
+
+	out := make([]string, 0, len(segs))
+	prefix := "  "
+	if selected {
+		prefix = "✓ "
+	}
+	for li, seg := range segs {
+		parts := make([]string, 0, len(cols))
+		for i := range cols {
+			w := colWidths[i]
+			if i == wrapIdx {
+				parts = append(parts, padOrTrunc(seg, w))
+				continue
+			}
+			if li == 0 {
+				val := ""
+				if i < len(values) {
+					val = values[i]
+				}
+				if row.Status != "" && val == row.Status {
+					parts = append(parts, styles.StatusStyle(row.Status).Render(padOrTrunc(val, w)))
+				} else {
+					parts = append(parts, padOrTrunc(val, w))
+				}
+			} else {
+				parts = append(parts, strings.Repeat(" ", w))
+			}
+		}
+		linePrefix := prefix
+		if li > 0 {
+			linePrefix = "  "
+		}
+		line := linePrefix + strings.Join(parts, " ")
+		if lipgloss.Width(line) > width {
+			plain := ansiEscape.ReplaceAllString(line, "")
+			if len(plain) > width-1 {
+				line = plain[:width-1] + "…"
+			} else {
+				line = plain
+			}
+		}
+		if cursor {
+			out = append(out, tableRowCursorBase.Width(width).Render(ansiEscape.ReplaceAllString(line, "")))
+		} else {
+			out = append(out, tableRowBase.Width(width).Render(line))
+		}
+	}
+	return out
 }
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)

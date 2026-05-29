@@ -7,6 +7,7 @@ import (
 	k8s "github.com/chaitanyak/klens/internal/k8s"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // RowStatuser is the optional interface a Kind implements to populate
@@ -34,11 +35,28 @@ type RowSortByTimer interface {
 }
 
 // RowNamer is the optional interface a Kind implements when the row's
-// display Name should differ from the object's metadata Name. Event uses
-// this to surface InvolvedObject.Name instead of the synthetic event name.
+// display Name should differ from the object's metadata Name. No kind
+// uses this today; it remains for future use.
 type RowNamer interface {
 	Kind
 	RowName(obj runtime.Object) string
+}
+
+// FaultRowMarker is the events-style "is this row a fault" predicate. A
+// kind that implements it opts the table into the ctrl+z faults toggle
+// (today: Event only — Type ∈ {Warning, Error}). Returning false from
+// IsFaultRow filters the row out when faults mode is on.
+type FaultRowMarker interface {
+	Kind
+	IsFaultRow(obj runtime.Object) bool
+}
+
+// InvolvedObjectResolver is the events-style "this row points to another
+// resource" hook. Today only Event satisfies it; if a future kind references
+// another (e.g. PVC → PV) the same hook generalizes.
+type InvolvedObjectResolver interface {
+	Kind
+	InvolvedObject(obj runtime.Object) (gvk schema.GroupVersionKind, namespace, name string, ok bool)
 }
 
 // RenderRows turns a slice of typed objects into Rows by walking each kind's

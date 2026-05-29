@@ -56,8 +56,8 @@ func (d ScaleDialog) Update(msg tea.Msg) (ScaleDialog, tea.Cmd) {
 	case "enter":
 		var replicas int32
 		fmt.Sscanf(d.input, "%d", &replicas)
-		if replicas < 1 {
-			d.validationMsg = "minimum 1 replica"
+		if replicas < 0 {
+			d.validationMsg = "minimum 0 replicas"
 			return d, nil
 		}
 		if replicas > scaleMax {
@@ -94,7 +94,7 @@ func (d ScaleDialog) View() string {
 	title := appstyles.Warning.Bold(true).Render(fmt.Sprintf("  Scale %s/%s", d.kind, d.name))
 	current := appstyles.Muted.Render(fmt.Sprintf("  Current replicas: %d", d.current))
 	inputLine := appstyles.Primary.Render(fmt.Sprintf("  New replicas: %s█", d.input))
-	hint := appstyles.Muted.Render(fmt.Sprintf("  1–%d replicas  [enter] confirm  [esc] cancel", scaleMax))
+	hint := appstyles.Muted.Render(fmt.Sprintf("  0–%d replicas  [enter] confirm  [esc] cancel", scaleMax))
 	body := title + "\n" + current + "\n" + inputLine + "\n"
 	if d.validationMsg != "" {
 		body += appstyles.Error.Render("  "+d.validationMsg) + "\n"

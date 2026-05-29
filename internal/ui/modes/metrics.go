@@ -22,6 +22,10 @@ func NewMetricsController(p panels.MetricsPanel) MetricsController {
 // (e.g. testing). Mutations go through the controller's own setters.
 func (c MetricsController) Panel() panels.MetricsPanel { return c.panel }
 
+func (c MetricsController) WheelAtBoundary(button tea.MouseButton) bool {
+	return c.panel.WheelAtBoundary(button)
+}
+
 func (c MetricsController) Update(msg tea.Msg) (Controller, tea.Cmd) {
 	p, cmd := c.panel.Update(msg)
 	c.panel = p

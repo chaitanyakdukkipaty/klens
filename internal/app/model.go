@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	unstructuredpkg "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 )
@@ -115,6 +116,21 @@ type Model struct {
 	rollbackKind string
 	rollbackName string
 	rollbackNS   string
+
+	// Events view state. Both flags are events-only and reset on kind switch
+	// (leaving Event) and on cluster switch; they survive namespace switch.
+	// eventFaultsOnly drives the ctrl+z faults-only filter; eventWrapMessage
+	// drives the `w` MESSAGE-wrap toggle.
+	eventFaultsOnly  bool
+	eventWrapMessage bool
+
+	// pendingJumpName, when non-empty after a switchKind triggered by `o` on
+	// an Event row, asks the next buildTableCmd/refresh cycle to move the
+	// table cursor to the row whose Name matches. Cleared on successful
+	// match or after two refresh cycles have passed.
+	pendingJumpName  string
+	pendingJumpKind  string
+	pendingJumpTries int
 }
 
 // internal messages
@@ -305,7 +321,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshMsg:
 		rows := m.listRows(m.nav.ActiveKind())
+		rows = m.maybeFaultsFilter(rows)
 		m.tableCtrl = m.tableCtrl.WithRows(rows)
+		m = m.maybeApplyPendingJump()
 		// Show access-denied when navigating to a forbidden resource; restore
 		// the last operation status when navigating to an accessible one.
 		if m.watcher != nil && m.watcher.IsAccessDenied(m.nav.ActiveKind()) {
@@ -833,6 +851,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd := m.metricsCtrl.Update(msg)
 			m.metricsCtrl = next.(modes.MetricsController)
 			return m, cmd
+		case ModeDescribe:
+			next, cmd := m.describeCtrl.Update(msg)
+			m.describeCtrl = next.(modes.DescribeViewController)
+			return m, cmd
 		}
 	}
 
@@ -1011,6 +1033,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "l", "x", "m", "d", "a", "s", "f", "F", "ctrl+d", "ctrl+k":
 				return m.handleTableKeys(msg)
+			case "ctrl+z", "w", "o", "e":
+				if m.isEventsTable() {
+					return m.handleTableKeys(msg)
+				}
 			}
 		}
 	}
@@ -1146,9 +1172,30 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "d":
 		return m.actionDescribe()
 	case "ctrl+d":
+		if m.isEventsTable() {
+			m.statusBar = m.statusBar.SetMessage("not supported on Event")
+			return m, nil
+		}
 		return m.actionDelete()
 	case "ctrl+k":
 		return m.actionKill()
+	case "ctrl+z":
+		if m.isEventsTable() {
+			return m.actionEventToggleFaults()
+		}
+	case "w":
+		if m.isEventsTable() {
+			return m.actionEventToggleWrap()
+		}
+	case "o":
+		if m.isEventsTable() {
+			return m.actionEventJumpToInvolvedObject()
+		}
+	case "e":
+		if m.isEventsTable() {
+			m.statusBar = m.statusBar.SetMessage("not supported on Event")
+			return m, nil
+		}
 	case "s":
 		if m.nav.ActiveKind() == "HelmRelease" {
 			return m.actionSuspendHelm()
@@ -1157,6 +1204,10 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "r":
 		return m.actionResumeHelm()
 	case "a":
+		if m.isEventsTable() {
+			m.statusBar = m.statusBar.SetMessage("not supported on Event")
+			return m, nil
+		}
 		return m.actionAttach()
 	case "f", "F":
 		return m.actionPortForward()
@@ -1165,6 +1216,177 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 	return m, cmd
+}
+
+// isEventsTable reports whether the Events kind is currently displayed in
+// the resource table. Gates the events-only keybindings (ctrl+z, w, o) and
+// the suppression messages for ctrl+d / e / a.
+func (m Model) isEventsTable() bool {
+	return m.mode == ModeTable && m.nav.ActiveKind() == "Event"
+}
+
+// actionEventToggleFaults flips the faults-only filter and refreshes the
+// table so the post-filter pass runs immediately. Sets a title-row badge
+// ("· faults") so the user has a persistent cue that filtering is active
+// — a status-bar message would permanently hide the help footer.
+func (m Model) actionEventToggleFaults() (Model, tea.Cmd) {
+	m.eventFaultsOnly = !m.eventFaultsOnly
+	if m.eventFaultsOnly {
+		m.tableCtrl = m.tableCtrl.SetTitleBadge("faults")
+	} else {
+		m.tableCtrl = m.tableCtrl.SetTitleBadge("")
+	}
+	return m, m.buildTableCmd()
+}
+
+// actionEventToggleWrap flips MESSAGE-column wrap. SetWrapColumn picks the
+// first Scrollable column on the active kind (today only MESSAGE on Event),
+// matching the existing horizontal-scroll opt-in flag. The visual change
+// (cells wrapping vs truncating) is feedback enough — a persistent
+// status-bar message would permanently hide the help footer.
+func (m Model) actionEventToggleWrap() (Model, tea.Cmd) {
+	m.eventWrapMessage = !m.eventWrapMessage
+	if !m.eventWrapMessage {
+		m.tableCtrl = m.tableCtrl.ClearWrapColumn()
+		return m, nil
+	}
+	k, ok := kinds.Lookup("Event")
+	if !ok {
+		m.eventWrapMessage = false
+		return m, nil
+	}
+	idx := -1
+	for i, c := range k.Columns() {
+		if c.Scrollable {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		m.eventWrapMessage = false
+		return m, nil
+	}
+	m.tableCtrl = m.tableCtrl.SetWrapColumn(idx)
+	return m, nil
+}
+
+// actionEventJumpToInvolvedObject resolves the selected event row's
+// InvolvedObject and switches the nav panel to that kind. If the involved
+// object's kind isn't registered, surfaces the kind name via the status bar
+// and stays put.
+func (m Model) actionEventJumpToInvolvedObject() (Model, tea.Cmd) {
+	row := m.tableCtrl.SelectedRow()
+	if row == nil {
+		return m, nil
+	}
+	k, ok := kinds.Lookup("Event")
+	if !ok {
+		return m, nil
+	}
+	resolver, ok := any(k).(kinds.InvolvedObjectResolver)
+	if !ok {
+		return m, nil
+	}
+	obj, ok := row.Raw.(runtime.Object)
+	if !ok {
+		return m, nil
+	}
+	gvk, ns, name, ok := resolver.InvolvedObject(obj)
+	if !ok {
+		m.statusBar = m.statusBar.SetMessage("event has no involved object")
+		return m, nil
+	}
+	target, ok := kinds.LookupByGVK(gvk)
+	if !ok {
+		m.statusBar = m.statusBar.SetMessage("unknown kind: " + gvk.Kind)
+		return m, nil
+	}
+	prevKind := m.nav.ActiveKind()
+	targetKind := target.Meta().Kind
+	if targetKind != prevKind {
+		m.nav = m.nav.SetActiveKind(targetKind)
+		m.tableCtrl = m.setKindAndSync(targetKind)
+		m.setStatusBarKind(targetKind)
+	}
+	// Schedule the cursor to land on the target row once the new kind's
+	// informer cache has emitted into the table. The next refreshMsg picks
+	// it up; while the informer is still syncing the retry counter is held
+	// at zero so the jump survives the warm-up.
+	m.pendingJumpName = name
+	m.pendingJumpKind = targetKind
+	m.pendingJumpTries = 0
+
+	// Namespace switch when the involved object lives elsewhere. Without
+	// this the user would land on the target kind's table but in the wrong
+	// namespace — pendingJumpName would never find a match. switchNamespace
+	// resets focus to nav as part of its "reset to table" pass; restore
+	// content focus afterwards so the user lands ready to scroll.
+	var cmd tea.Cmd
+	if ns != "" && ns != m.namespace {
+		m, cmd = m.switchNamespace(ns)
+	} else {
+		cmd = m.buildTableCmd()
+	}
+	m.focus = FocusContent
+	m.nav = m.nav.SetFocused(false)
+	m.tableCtrl = m.tableCtrl.SetFocused(true)
+	return m, cmd
+}
+
+// maybeFaultsFilter returns rows pared down to fault rows when the toggle is
+// on and the active kind is Event with a FaultRowMarker. Allocates a fresh
+// backing slice so we never mutate the informer's owned memory.
+func (m Model) maybeFaultsFilter(rows []k8sops.ResourceRow) []k8sops.ResourceRow {
+	if !m.eventFaultsOnly || m.nav.ActiveKind() != "Event" || len(rows) == 0 {
+		return rows
+	}
+	k, ok := kinds.Lookup("Event")
+	if !ok {
+		return rows
+	}
+	fm, ok := any(k).(kinds.FaultRowMarker)
+	if !ok {
+		return rows
+	}
+	out := make([]k8sops.ResourceRow, 0, len(rows))
+	for _, r := range rows {
+		obj, ok := r.Raw.(runtime.Object)
+		if !ok {
+			continue
+		}
+		if fm.IsFaultRow(obj) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// maybeApplyPendingJump moves the cursor onto pendingJumpName after a fresh
+// refresh. While the watcher is still syncing the retry counter is held at
+// zero — the row may simply not have been populated yet. After two
+// post-sync misses we give up: the user is in the right view, just without
+// an exact cursor position.
+func (m Model) maybeApplyPendingJump() Model {
+	if m.pendingJumpName == "" || m.pendingJumpKind != m.nav.ActiveKind() {
+		return m
+	}
+	if next, ok := m.tableCtrl.CursorToName(m.pendingJumpName); ok {
+		m.tableCtrl = next
+		m.pendingJumpName = ""
+		m.pendingJumpKind = ""
+		m.pendingJumpTries = 0
+		return m
+	}
+	if m.syncing {
+		return m
+	}
+	m.pendingJumpTries++
+	if m.pendingJumpTries >= 2 {
+		m.pendingJumpName = ""
+		m.pendingJumpKind = ""
+		m.pendingJumpTries = 0
+	}
+	return m
 }
 
 // dispatchTableAction routes a context-menu pick to the same helpers used by handleTableKeys.
@@ -1941,6 +2163,7 @@ func (m Model) switchContext(ctx string) (Model, tea.Cmd) {
 		m.pfManager.StopAll()
 	}
 	m = m.resetToTable()
+	m.clearEventsViewState()
 
 	if err := m.clusterMgr.SwitchContext(ctx); err != nil {
 		m.statusBar = m.statusBar.SetMessage("context switch: " + err.Error())
@@ -1997,13 +2220,34 @@ func (m Model) kindSyncing(kind string) bool {
 }
 
 // setKindAndSync swaps the resource table's active kind and updates its
-// syncing badge to match whether that informer has data ready yet.
-func (m Model) setKindAndSync(kind string) modes.TableController {
+// syncing badge to match whether that informer has data ready yet. Events-
+// view state lives on the model rather than the panel, so this is the seam
+// where leaving the Event kind clears the faults / wrap flags. Re-entering
+// Event starts clean, matching the lifetime of every other events-only
+// piece of state.
+func (m *Model) clearEventsViewState() {
+	m.eventFaultsOnly = false
+	m.eventWrapMessage = false
+	m.tableCtrl = m.tableCtrl.ClearWrapColumn()
+	m.tableCtrl = m.tableCtrl.SetTitleBadge("")
+	m.pendingJumpName = ""
+	m.pendingJumpKind = ""
+	m.pendingJumpTries = 0
+}
+
+func (m *Model) setKindAndSync(kind string) modes.TableController {
+	if kind != "Event" {
+		m.clearEventsViewState()
+	}
 	return m.tableCtrl.SetKind(kind).SetSyncing(m.kindSyncing(kind))
 }
 
 func (m *Model) setStatusBarKind(kind string) {
 	m.statusBar = m.statusBar.SetActiveKind(kind)
+	if kind == "Event" {
+		m.statusBar = m.statusBar.SetHelp(eventsHelp())
+		return
+	}
 	help := []panels.HelpItem{
 		{Key: "↑↓/jk", Desc: "navigate"},
 		{Key: "enter", Desc: "focus"},
@@ -2065,6 +2309,22 @@ func (m *Model) setStatusBarKind(kind string) {
 	m.statusBar = m.statusBar.SetHelp(help)
 }
 
+// eventsHelp returns the events-view help footer. The hidden keys are
+// ctrl+d / e / a (event has no Deleter / Applier / Attacher); their
+// suppression is mirrored by status-bar feedback in handleTableKeys.
+func eventsHelp() []panels.HelpItem {
+	return []panels.HelpItem{
+		{Key: "↑↓/jk", Desc: "navigate"},
+		{Key: "/", Desc: "filter"},
+		{Key: "ctrl+z", Desc: "faults"},
+		{Key: "w", Desc: "wrap"},
+		{Key: "o", Desc: "object"},
+		{Key: "y", Desc: "yaml"},
+		{Key: "d", Desc: "describe"},
+		{Key: "esc", Desc: "back"},
+	}
+}
+
 // currentReplicas extracts the replica count from a ResourceRow's raw object
 // via the Scaler.CurrentReplicas method on the matching kind. Defaults to 1
 // when no kind (or no Scaler) is found.
@@ -2086,6 +2346,51 @@ func (m Model) View() tea.View {
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
+}
+
+// WheelAtBoundary reports whether a wheel event in `button`'s direction would
+// be a pure no-op against whichever panel currently owns scroll. The Bubbletea
+// program is configured with tea.WithFilter to drop these events before Update
+// runs, which also skips the full TUI View() that would otherwise fire per
+// event. Without this, trackpad momentum scroll at a boundary makes the app
+// feel unresponsive while queued wheel events drain through render.
+//
+// Returns false during loading, when any modal is up (modals have their own
+// scroll), in ModeEditor (textarea cursor — different notion of boundary),
+// and when nav has focus (nav cycles, no boundary).
+func (m Model) WheelAtBoundary(button tea.MouseButton) bool {
+	if m.loading {
+		return false
+	}
+	if m.namespacePicker.IsVisible() ||
+		m.clusterPicker.IsVisible() ||
+		m.containerPicker.IsVisible() ||
+		m.confirm.IsVisible() ||
+		m.scaleDialog.IsVisible() ||
+		m.sanitizeDialog.IsVisible() ||
+		m.contextMenu.IsVisible() ||
+		m.pfDialog.IsVisible() ||
+		m.pfList.IsVisible() {
+		return false
+	}
+	if m.focus == FocusNav {
+		return false
+	}
+	switch m.mode {
+	case ModeTable:
+		return m.tableCtrl.WheelAtBoundary(button)
+	case ModeYAML:
+		return m.yamlViewCtrl.WheelAtBoundary(button)
+	case ModeLogs:
+		return m.logsCtrl.WheelAtBoundary(button)
+	case ModeXRay:
+		return m.xrayCtrl.WheelAtBoundary(button)
+	case ModeMetrics:
+		return m.metricsCtrl.WheelAtBoundary(button)
+	case ModeDescribe:
+		return m.describeCtrl.WheelAtBoundary(button)
+	}
+	return false
 }
 
 // renderContent builds the textual content of the View. When a modal is open,

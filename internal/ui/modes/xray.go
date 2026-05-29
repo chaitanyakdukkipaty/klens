@@ -17,6 +17,10 @@ func NewXRayController(p panels.XRayPanel) XRayController {
 
 func (c XRayController) Panel() panels.XRayPanel { return c.panel }
 
+func (c XRayController) WheelAtBoundary(button tea.MouseButton) bool {
+	return c.panel.WheelAtBoundary(button)
+}
+
 func (c XRayController) Update(msg tea.Msg) (Controller, tea.Cmd) {
 	p, cmd := c.panel.Update(msg)
 	c.panel = p

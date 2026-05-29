@@ -79,6 +79,19 @@ func (v DescribeViewer) SetSize(w, h int) DescribeViewer {
 
 func (v DescribeViewer) SetFocused(f bool) DescribeViewer { v.focused = f; return v }
 
+// WheelAtBoundary reports whether the viewport is already at the edge the
+// wheel event would scroll toward. Lets the root drop boundary-spam events
+// before they trigger an Update/View cycle.
+func (v DescribeViewer) WheelAtBoundary(button tea.MouseButton) bool {
+	switch button {
+	case tea.MouseWheelUp:
+		return v.viewport.AtTop()
+	case tea.MouseWheelDown:
+		return v.viewport.AtBottom()
+	}
+	return false
+}
+
 // HasActiveState reports whether ESC has a layer to peel before exiting the
 // mode (open filter input, or a non-empty applied filter).
 func (v DescribeViewer) HasActiveState() bool { return v.filterOn || v.filter != "" }
