@@ -37,14 +37,14 @@ func (pod) Columns() []k8s.Column {
 		{Header: "PF", Width: 3, Render: podPF},
 		{Header: "READY", Width: 6, Render: podReady},
 		{Header: "STATUS", Width: 15, Render: podStatusCell},
-		{Header: "RESTARTS", Width: 9, Render: podRestarts},
-		{Header: "AGE", Width: 6, Render: podAge},
-		{Header: "CPU", Width: 6, Render: podCPU},
-		{Header: "%CPU/R", Width: 7, Render: podCPUPctRequest},
-		{Header: "%CPU/L", Width: 7, Render: podCPUPctLimit},
-		{Header: "MEM", Width: 7, Render: podMEM},
-		{Header: "%MEM/R", Width: 7, Render: podMEMPctRequest},
-		{Header: "%MEM/L", Width: 7, Render: podMEMPctLimit},
+		{Header: "RESTARTS", Width: 9, SortType: k8s.SortNumber, Render: podRestarts},
+		{Header: "AGE", Width: 6, SortType: k8s.SortTime, Render: podAge},
+		{Header: "CPU", Width: 6, SortType: k8s.SortNumber, Render: podCPU},
+		{Header: "%CPU/R", Width: 7, SortType: k8s.SortNumber, Render: podCPUPctRequest},
+		{Header: "%CPU/L", Width: 7, SortType: k8s.SortNumber, Render: podCPUPctLimit},
+		{Header: "MEM", Width: 7, SortType: k8s.SortNumber, Render: podMEM},
+		{Header: "%MEM/R", Width: 7, SortType: k8s.SortNumber, Render: podMEMPctRequest},
+		{Header: "%MEM/L", Width: 7, SortType: k8s.SortNumber, Render: podMEMPctLimit},
 	}
 }
 
@@ -193,6 +193,17 @@ func podPctColored(num, denom int64) string {
 
 // podReadyCounts returns (ready, total, restarts) over the pod's container
 // statuses. Shared by the READY and RESTARTS column renderers.
+// isSidecar reports whether an init container is a native sidecar
+// (restartPolicy: Always). Sidecars run for the pod's whole lifetime, so —
+// like kubectl and k9s — they count toward READY/RESTARTS and participate in
+// the STATUS phase, unlike ordinary run-once init containers.
+func isSidecar(rp *corev1.ContainerRestartPolicy) bool {
+	return rp != nil && *rp == corev1.ContainerRestartPolicyAlways
+}
+
+// podReadyCounts returns ready/total container counts and total restarts,
+// counting regular containers plus restartable (sidecar) init containers —
+// the same set kubectl and k9s show in READY and RESTARTS.
 func podReadyCounts(p *corev1.Pod) (ready, total, restarts int) {
 	total = len(p.Spec.Containers)
 	for _, cs := range p.Status.ContainerStatuses {
@@ -201,23 +212,124 @@ func podReadyCounts(p *corev1.Pod) (ready, total, restarts int) {
 		}
 		restarts += int(cs.RestartCount)
 	}
+	sidecar := make(map[string]bool, len(p.Spec.InitContainers))
+	for i := range p.Spec.InitContainers {
+		if isSidecar(p.Spec.InitContainers[i].RestartPolicy) {
+			sidecar[p.Spec.InitContainers[i].Name] = true
+		}
+	}
+	for _, cs := range p.Status.InitContainerStatuses {
+		if !sidecar[cs.Name] {
+			continue
+		}
+		total++
+		if cs.Ready {
+			ready++
+		}
+		restarts += int(cs.RestartCount)
+	}
 	return
 }
 
-// podStatus computes the STATUS column text: Phase by default, the first
-// waiting reason if any container is waiting, "Terminating" if the pod is
-// being deleted.
+// nodeUnreachablePodReason is the status.reason kubelet sets when a node goes
+// unreachable; combined with a deletion timestamp it renders as "Unknown".
+const nodeUnreachablePodReason = "NodeLost"
+
+// podStatus computes the STATUS column, mirroring k9s's Pod.Phase (a port of
+// kubectl's printPod): reason override, init-container phases, container
+// terminated/waiting reasons, the Completed→Running rescue, and a Terminating
+// override when the pod is being deleted.
 func podStatus(p *corev1.Pod) string {
-	if p.DeletionTimestamp != nil {
-		return "Terminating"
+	st := &p.Status
+	status := string(st.Phase)
+	if st.Reason != "" {
+		if p.DeletionTimestamp != nil && st.Reason == nodeUnreachablePodReason {
+			return "Unknown"
+		}
+		status = st.Reason
 	}
-	status := string(p.Status.Phase)
-	for _, cs := range p.Status.ContainerStatuses {
-		if cs.State.Waiting != nil {
-			return cs.State.Waiting.Reason
+
+	if s, ok := initContainerPhase(&p.Spec, st, status); ok {
+		return s
+	}
+
+	status, running := containerPhase(st, status)
+	if running && status == "Completed" {
+		status = "Running"
+	}
+	if p.DeletionTimestamp == nil {
+		return status
+	}
+	return "Terminating"
+}
+
+// containerPhase scans regular containers (last to first, matching k9s) for a
+// waiting/terminated reason and reports whether any container is ready+running.
+func containerPhase(st *corev1.PodStatus, status string) (string, bool) {
+	var running bool
+	for i := len(st.ContainerStatuses) - 1; i >= 0; i-- {
+		cs := st.ContainerStatuses[i]
+		switch {
+		case cs.State.Waiting != nil && cs.State.Waiting.Reason != "":
+			status = cs.State.Waiting.Reason
+		case cs.State.Terminated != nil && cs.State.Terminated.Reason != "":
+			status = cs.State.Terminated.Reason
+		case cs.State.Terminated != nil:
+			if cs.State.Terminated.Signal != 0 {
+				status = fmt.Sprintf("Signal:%d", cs.State.Terminated.Signal)
+			} else {
+				status = fmt.Sprintf("ExitCode:%d", cs.State.Terminated.ExitCode)
+			}
+		case cs.Ready && cs.State.Running != nil:
+			running = true
 		}
 	}
-	return status
+	return status, running
+}
+
+// initContainerPhase returns the first non-empty Init:* status across init
+// containers (sidecars excepted), or ok=false when init is complete.
+func initContainerPhase(spec *corev1.PodSpec, st *corev1.PodStatus, status string) (string, bool) {
+	count := len(spec.InitContainers)
+	sidecar := make(map[string]bool, count)
+	for i := range spec.InitContainers {
+		if isSidecar(spec.InitContainers[i].RestartPolicy) {
+			sidecar[spec.InitContainers[i].Name] = true
+		}
+	}
+	for i := range st.InitContainerStatuses {
+		cs := &st.InitContainerStatuses[i]
+		if s := checkInitContainerStatus(cs, i, count, sidecar[cs.Name]); s != "" {
+			return s, true
+		}
+	}
+	return status, false
+}
+
+func checkInitContainerStatus(cs *corev1.ContainerStatus, idx, initCount int, restartable bool) string {
+	switch {
+	case cs.State.Terminated != nil:
+		if cs.State.Terminated.ExitCode == 0 {
+			return ""
+		}
+		if restartable { // sidecars are expected to terminate on pod completion
+			return ""
+		}
+		if cs.State.Terminated.Reason != "" {
+			return "Init:" + cs.State.Terminated.Reason
+		}
+		if cs.State.Terminated.Signal != 0 {
+			return fmt.Sprintf("Init:Signal:%d", cs.State.Terminated.Signal)
+		}
+		return fmt.Sprintf("Init:ExitCode:%d", cs.State.Terminated.ExitCode)
+	case restartable && cs.Started != nil && *cs.Started:
+		if cs.Ready {
+			return ""
+		}
+	case cs.State.Waiting != nil && cs.State.Waiting.Reason != "" && cs.State.Waiting.Reason != "PodInitializing":
+		return "Init:" + cs.State.Waiting.Reason
+	}
+	return fmt.Sprintf("Init:%d/%d", idx, initCount)
 }
 
 func podName(o runtime.Object, _ k8s.RowContext) string { return o.(*corev1.Pod).Name }

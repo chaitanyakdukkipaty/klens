@@ -2,9 +2,12 @@ package k8s
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -83,7 +86,115 @@ type Column struct {
 	Width      int
 	Flex       bool
 	Scrollable bool
-	Render     func(obj runtime.Object, ctx RowContext) string
+	// SortType selects the comparator used when this column is the active
+	// interactive sort key (see CellCompare). The zero value (SortString)
+	// gives natural human ordering and is correct for most text columns.
+	SortType SortType
+	Render   func(obj runtime.Object, ctx RowContext) string
+}
+
+// SortType selects the comparator used when a column is the active sort key.
+// The zero value, SortString, means natural human ordering; the others parse
+// each cell into a comparable scalar so AGE sorts by elapsed time, RESTARTS by
+// number, and CPU/MEM by quantity rather than by raw display text.
+type SortType int
+
+const (
+	SortString   SortType = iota // natural string order ("pod-2" < "pod-10")
+	SortTime                     // duration string ("5d", "2h3m"); blank/"n/a" sort last
+	SortNumber                   // integer/float; thousands separators ignored
+	SortCapacity                 // resource.Quantity ("256Mi", "1Gi") by byte value
+)
+
+// CellCompare returns -1, 0, or +1 comparing two rendered cell values under
+// the given SortType. ANSI styling is stripped first so colored cells (%CPU,
+// STATUS) compare on their plain text. Mirrors k9s's model1.Less branches; a
+// 0 result lets callers fall back to a stable tie-break (e.g. RowLess).
+func CellCompare(st SortType, a, b string) int {
+	a = strings.TrimSpace(ansi.Strip(a))
+	b = strings.TrimSpace(ansi.Strip(b))
+	switch st {
+	case SortTime:
+		return cmpInt64(durationToSeconds(a), durationToSeconds(b))
+	case SortNumber:
+		return cmpNatural(strings.ReplaceAll(a, ",", ""), strings.ReplaceAll(b, ",", ""))
+	case SortCapacity:
+		return cmpInt64(capacityToNumber(a), capacityToNumber(b))
+	default:
+		return cmpNatural(a, b)
+	}
+}
+
+// cmpNatural is a symmetric three-way wrapper over naturalLess: values that
+// are naturally equal but textually distinct (e.g. "a1" vs "a01") return 0 so
+// the caller's tie-break decides, keeping the ordering antisymmetric.
+func cmpNatural(a, b string) int {
+	switch {
+	case naturalLess(a, b):
+		return -1
+	case naturalLess(b, a):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func cmpInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// durationToSeconds parses a Kubernetes human duration ("5d", "2h3m", "47s")
+// into seconds. Empty/unknown values map to MaxInt64 so they sort last on an
+// ascending sort, matching k9s.
+func durationToSeconds(d string) int64 {
+	if d == "" || d == "n/a" || d == "<unknown>" {
+		return math.MaxInt64
+	}
+	var total, n int64
+	for _, r := range d {
+		switch r {
+		case 'y':
+			total += n * 365 * 24 * 3600
+			n = 0
+		case 'd':
+			total += n * 24 * 3600
+			n = 0
+		case 'h':
+			total += n * 3600
+			n = 0
+		case 'm':
+			total += n * 60
+			n = 0
+		case 's':
+			total += n
+			n = 0
+		default:
+			if r >= '0' && r <= '9' {
+				n = n*10 + int64(r-'0')
+			}
+		}
+	}
+	return total
+}
+
+// capacityToNumber parses a resource.Quantity ("256Mi", "1Gi", "500m") into
+// its integer value. Unparseable or blank cells sort as 0.
+func capacityToNumber(s string) int64 {
+	if strings.TrimSpace(s) == "" {
+		return 0
+	}
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		return 0
+	}
+	return q.Value()
 }
 
 // ResourceRow is a single row in the resource table.
@@ -96,6 +207,58 @@ type ResourceRow struct {
 	Values     []string    // ordered display values matching column layout; when set, buildRow uses these
 	Extra      []string    // additional column values (legacy)
 	Raw        interface{} // underlying k8s object
+}
+
+// RowLess orders two rows by (namespace, name) using natural ordering, so
+// "pod-2" sorts before "pod-10" instead of after it. This mirrors k9s's
+// default comparator (model1.Less → sortorder.NaturalLess) and its fqn
+// tie-break: rows are uniquely identified by namespace/name, so the order is
+// total and sort.Slice stays deterministic across refreshes. Namespace is the
+// primary key for forward-compatibility with an all-namespaces view; in the
+// current single-namespace view it is constant and the comparison degrades to
+// name ordering.
+func RowLess(a, b ResourceRow) bool {
+	if a.Namespace != b.Namespace {
+		return naturalLess(a.Namespace, b.Namespace)
+	}
+	return naturalLess(a.Name, b.Name)
+}
+
+// naturalLess reports whether a < b under natural (human) ordering: maximal
+// runs of digits compare by numeric value (ignoring leading zeros), all other
+// bytes compare bytewise. Kept dependency-free; swap in
+// github.com/fvbommel/sortorder.NaturalLess for byte-exact k9s parity.
+func naturalLess(a, b string) bool {
+	ia, ib := 0, 0
+	for ia < len(a) && ib < len(b) {
+		ca, cb := a[ia], b[ib]
+		da := ca >= '0' && ca <= '9'
+		db := cb >= '0' && cb <= '9'
+		if da && db {
+			na, nb := ia, ib
+			for ia < len(a) && a[ia] >= '0' && a[ia] <= '9' {
+				ia++
+			}
+			for ib < len(b) && b[ib] >= '0' && b[ib] <= '9' {
+				ib++
+			}
+			sa := strings.TrimLeft(a[na:ia], "0")
+			sb := strings.TrimLeft(b[nb:ib], "0")
+			if len(sa) != len(sb) {
+				return len(sa) < len(sb)
+			}
+			if sa != sb {
+				return sa < sb
+			}
+			continue // equal numeric run; keep scanning
+		}
+		if ca != cb {
+			return ca < cb
+		}
+		ia++
+		ib++
+	}
+	return len(a)-ia < len(b)-ib
 }
 
 // Registry is the static list of all known resource types.

@@ -168,3 +168,9 @@ func (c TableController) HandleClickAt(y int, leftClick bool) (TableController, 
 	c.panel = p
 	return c, hit
 }
+
+func (c TableController) HandleHeaderClickAt(x, y int) (TableController, bool) {
+	p, sorted := c.panel.HandleHeaderClickAt(x, y)
+	c.panel = p
+	return c, sorted
+}

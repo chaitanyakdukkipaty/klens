@@ -73,6 +73,15 @@ type ResourceTable struct {
 	// when wrap is on. Reset to -1 on SetKind so wrap is per-kind state.
 	wrapColIdx int
 
+	// sortColIdx is the column index used as the active interactive sort key,
+	// or -1 for the kind's default order (newest-first for time-stamped kinds
+	// like Event, else natural namespace/name). sortAsc flips direction. '>'
+	// cycles the sort column, '<' reverses direction; both reset on kind
+	// switch. The actual sort runs in sortRows, called from WithRows and the
+	// sort keys.
+	sortColIdx int
+	sortAsc    bool
+
 	// titleBadge appends a small "· badge" tag to the title row when set.
 	// Used by the model to surface state that isn't otherwise visible — e.g.
 	// the events-view faults filter, which removes rows but doesn't otherwise
@@ -90,6 +99,8 @@ func NewResourceTable(w, h int) ResourceTable {
 		height:     h,
 		selected:   make(map[string]bool),
 		wrapColIdx: -1,
+		sortColIdx: -1,
+		sortAsc:    true,
 	}
 }
 
@@ -106,6 +117,8 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.hScroll = 0
 		t.wrapColIdx = -1
 		t.titleBadge = ""
+		t.sortColIdx = -1
+		t.sortAsc = true
 	}
 	t.kind = kind
 	return t
@@ -371,6 +384,16 @@ func (t ResourceTable) Update(msg tea.Msg) (ResourceTable, tea.Cmd) {
 					t.selected[row.Name] = !t.selected[row.Name]
 				}
 			}
+		case ">", "shift+right":
+			t.cycleSortColumn()
+		case "shift+left":
+			t.cycleSortColumnBack()
+		case "<":
+			t.toggleSortDir()
+		case "shift+up":
+			t.setSortDir(true)
+		case "shift+down":
+			t.setSortDir(false)
 		}
 	}
 	return t, nil
@@ -642,6 +665,75 @@ func (t ResourceTable) HandleClickAt(innerY int, leftClick bool) (ResourceTable,
 	return t, true
 }
 
+// headerColTextOffset is the inner-X at which the first column header's text
+// begins: 1 for the panel's left border + 1 for styles.TableHeader's left
+// padding. Clicks left of this (border / padding) don't map to a column.
+const headerColTextOffset = 2
+
+// headerRowInnerY returns the inner-Y of the column-header row. The header sits
+// one line above the first data row (after the title and the optional filter
+// bar), so it tracks firstVisibleRowY.
+func (t ResourceTable) headerRowInnerY() int {
+	return t.firstVisibleRowY() - 1
+}
+
+// columnAtX maps an inner-X coordinate on the header row to a column index,
+// mirroring buildHeader's geometry (headerColTextOffset leading cells, then
+// each column padded to its computed width and joined by a single separator
+// space). The trailing separator is folded into the preceding column's
+// hit-area so there are no dead gaps between headers. Returns ok=false for
+// clicks left of the first column or past the last (e.g. the reserved
+// scrollbar column).
+func (t ResourceTable) columnAtX(innerX int) (int, bool) {
+	desc, ok := k8sres.Resolve(t.kind)
+	if !ok {
+		return 0, false
+	}
+	innerW := max(1, t.width-2)
+	dataW := max(1, innerW-1)
+	colWidths := computeColWidths(desc.Columns, dataW)
+	adjusted := innerX - headerColTextOffset
+	if adjusted < 0 {
+		return 0, false
+	}
+	acc := 0
+	for i, w := range colWidths {
+		span := w
+		if i < len(colWidths)-1 {
+			span = w + 1 // fold the trailing separator into this column
+		}
+		if adjusted < acc+span {
+			return i, true
+		}
+		acc += span
+	}
+	return 0, false
+}
+
+// HandleHeaderClickAt sorts by the column under (innerX, innerY) when the click
+// lands on the column-header row. Clicking the already-active sort column
+// toggles its direction; clicking a different column makes it the active sort
+// key, ascending — matching the mouse semantics of typical GUI tables. Returns
+// ok=false (state untouched) for clicks that aren't on the header row or don't
+// map to a column, so the caller can fall through to row drag-select.
+func (t ResourceTable) HandleHeaderClickAt(innerX, innerY int) (ResourceTable, bool) {
+	if innerY != t.headerRowInnerY() {
+		return t, false
+	}
+	idx, ok := t.columnAtX(innerX)
+	if !ok {
+		return t, false
+	}
+	if idx == t.sortColIdx {
+		t.sortAsc = !t.sortAsc
+	} else {
+		t.sortColIdx = idx
+		t.sortAsc = true
+	}
+	t.applySort()
+	return t, true
+}
+
 func (t *ResourceTable) applyFilter() {
 	if t.filterInput == "" {
 		t.filtered = t.rows
@@ -757,6 +849,9 @@ func (t ResourceTable) View() string {
 	if n := t.SelectionCount(); n > 0 {
 		title += styles.Primary.Render(fmt.Sprintf("  ·  %d selected", n))
 	}
+	if sl := t.SortLabel(); sl != "" {
+		title += styles.Muted.Render("  ·  sort " + sl)
+	}
 	if pos := t.cursorPositionLabel(); pos != "" {
 		title += styles.Muted.Render("  " + pos)
 	}
@@ -771,10 +866,10 @@ func (t ResourceTable) View() string {
 
 	// Header
 	colWidths := computeColWidths(desc.Columns, dataW)
-	header := buildHeader(desc, colWidths)
+	header := buildHeader(desc, colWidths, t.sortColIdx, t.sortAsc)
 	scrollIdx := t.scrollableColIdx()
 	if !t.WrapActive() && scrollIdx >= 0 && t.hScroll > 0 {
-		header = buildHeaderWithHScroll(desc, colWidths, scrollIdx, t.hScroll)
+		header = buildHeaderWithHScroll(desc, colWidths, scrollIdx, t.hScroll, t.sortColIdx, t.sortAsc)
 	}
 
 	// Rows
@@ -943,7 +1038,7 @@ func applyHScroll(row k8sres.ResourceRow, colIdx, scroll int) k8sres.ResourceRow
 
 // buildHeaderWithHScroll annotates the Scrollable column header with the
 // active rune offset so users can see how far they've scrolled.
-func buildHeaderWithHScroll(desc k8sres.ResourceDescriptor, colWidths []int, scrollIdx, scroll int) string {
+func buildHeaderWithHScroll(desc k8sres.ResourceDescriptor, colWidths []int, scrollIdx, scroll, sortIdx int, sortAsc bool) string {
 	cols := desc.Columns
 	parts := make([]string, len(cols))
 	for i, c := range cols {
@@ -951,19 +1046,30 @@ func buildHeaderWithHScroll(desc k8sres.ResourceDescriptor, colWidths []int, scr
 		if i == scrollIdx {
 			text = fmt.Sprintf("%s +%d", c.Header, scroll)
 		}
-		parts[i] = padOrTrunc(text, colWidths[i])
+		parts[i] = padOrTrunc(headerSortText(text, i == sortIdx, sortAsc), colWidths[i])
 	}
 	return styles.TableHeader.Render(strings.Join(parts, " "))
 }
 
-func buildHeader(desc k8sres.ResourceDescriptor, colWidths []int) string {
+func buildHeader(desc k8sres.ResourceDescriptor, colWidths []int, sortIdx int, sortAsc bool) string {
 	cols := desc.Columns
 	var parts []string
 	for i, c := range cols {
-		parts = append(parts, padOrTrunc(c.Header, colWidths[i]))
+		parts = append(parts, padOrTrunc(headerSortText(c.Header, i == sortIdx, sortAsc), colWidths[i]))
 	}
 	line := strings.Join(parts, " ")
 	return styles.TableHeader.Render(line)
+}
+
+// headerSortText appends a direction arrow to the active sort column's header.
+func headerSortText(header string, active, asc bool) string {
+	if !active {
+		return header
+	}
+	if asc {
+		return header + " ▲"
+	}
+	return header + " ▼"
 }
 
 func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor bool) string {
@@ -1138,12 +1244,7 @@ func (t ResourceTable) PatchValuesByName(rows []k8sres.ResourceRow) ResourceTabl
 // PopulateRows converts raw k8s objects into ResourceRows for the given kind.
 func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 	t.rows = rows
-	sort.Slice(t.rows, func(i, j int) bool {
-		if !t.rows[i].SortByTime.IsZero() {
-			return t.rows[i].SortByTime.After(t.rows[j].SortByTime)
-		}
-		return t.rows[i].Name < t.rows[j].Name
-	})
+	t.sortRows()
 	// Reapply filter — use filterInput so in-progress (uncommitted) filters survive refreshes.
 	if t.filterInput != "" {
 		t.applyFilter()
@@ -1155,6 +1256,130 @@ func (t ResourceTable) WithRows(rows []k8sres.ResourceRow) ResourceTable {
 	}
 	t.clampHScroll()
 	return t
+}
+
+// columns returns the current kind's column layout, or nil when the kind is
+// unknown (passthrough/YAML-only kinds the table never renders).
+func (t ResourceTable) columns() []k8sres.Column {
+	if desc, ok := k8sres.Resolve(t.kind); ok {
+		return desc.Columns
+	}
+	return nil
+}
+
+// sortRows orders t.rows in place. When a column sort is active (sortColIdx >=
+// 0) it compares that column's rendered cells via CellCompare under the
+// column's SortType, honoring sortAsc, and tie-breaks equal cells by the
+// natural namespace/name order (RowLess) so the result is a deterministic
+// total order. Otherwise it falls back to the kind's default: newest-first for
+// time-stamped kinds (Event), else natural namespace/name.
+func (t *ResourceTable) sortRows() {
+	cols := t.columns()
+	sort.SliceStable(t.rows, func(i, j int) bool {
+		ri, rj := t.rows[i], t.rows[j]
+		if t.sortColIdx >= 0 && t.sortColIdx < len(cols) &&
+			t.sortColIdx < len(ri.Values) && t.sortColIdx < len(rj.Values) {
+			if c := k8sres.CellCompare(cols[t.sortColIdx].SortType, ri.Values[t.sortColIdx], rj.Values[t.sortColIdx]); c != 0 {
+				if !t.sortAsc {
+					c = -c
+				}
+				return c < 0
+			}
+			return k8sres.RowLess(ri, rj)
+		}
+		// Default order: time-stamped kinds render newest-first, with the
+		// natural (ns, name) comparator as a deterministic tie-break so equal
+		// timestamps don't reorder on every refresh.
+		if !ri.SortByTime.IsZero() && !ri.SortByTime.Equal(rj.SortByTime) {
+			return ri.SortByTime.After(rj.SortByTime)
+		}
+		return k8sres.RowLess(ri, rj)
+	})
+}
+
+// cycleSortColumn advances the active sort column ('>' key): default → col 0 →
+// col 1 → … → last → default. Switching column resets direction to ascending.
+func (t *ResourceTable) cycleSortColumn() {
+	n := len(t.columns())
+	if n == 0 {
+		return
+	}
+	t.sortColIdx++
+	if t.sortColIdx >= n {
+		t.sortColIdx = -1
+	}
+	t.sortAsc = true
+	t.applySort()
+}
+
+// cycleSortColumnBack steps the active sort column backward (ctrl+left):
+// default → last → … → col 0 → default. Mirror image of cycleSortColumn so
+// the two arrow keys walk the columns in opposite directions. Switching
+// column resets direction to ascending.
+func (t *ResourceTable) cycleSortColumnBack() {
+	n := len(t.columns())
+	if n == 0 {
+		return
+	}
+	if t.sortColIdx < 0 {
+		t.sortColIdx = n - 1
+	} else {
+		// 0 → -1 lands back on the default order; otherwise step left.
+		t.sortColIdx--
+	}
+	t.sortAsc = true
+	t.applySort()
+}
+
+// toggleSortDir reverses the active column's direction ('<' key). No-op in the
+// default (no column) order.
+func (t *ResourceTable) toggleSortDir() {
+	if t.sortColIdx < 0 {
+		return
+	}
+	t.sortAsc = !t.sortAsc
+	t.applySort()
+}
+
+// setSortDir forces the active column's direction to ascending (ctrl+up) or
+// descending (ctrl+down), unlike toggleSortDir's flip. No-op in the default
+// (no column) order — there's no active key to direct — and no-op when the
+// direction already matches so we skip a redundant re-sort.
+func (t *ResourceTable) setSortDir(asc bool) {
+	if t.sortColIdx < 0 || t.sortAsc == asc {
+		return
+	}
+	t.sortAsc = asc
+	t.applySort()
+}
+
+// applySort re-sorts and re-derives the filtered subslice + cursor after a
+// sort-state change, mirroring WithRows' post-sort bookkeeping.
+func (t *ResourceTable) applySort() {
+	t.sortRows()
+	if t.filterInput != "" || t.filter != "" {
+		t.applyFilter()
+	} else {
+		t.filtered = t.rows
+	}
+	if t.cursor >= len(t.filtered) {
+		t.cursor = max(0, len(t.filtered)-1)
+	}
+}
+
+// SortLabel returns a short "· COL ▲" descriptor for the active sort column,
+// or "" when in default order. Surfaced in the table title so the sort state
+// stays visible after the keypress feedback fades.
+func (t ResourceTable) SortLabel() string {
+	cols := t.columns()
+	if t.sortColIdx < 0 || t.sortColIdx >= len(cols) {
+		return ""
+	}
+	arrow := "▲"
+	if !t.sortAsc {
+		arrow = "▼"
+	}
+	return cols[t.sortColIdx].Header + " " + arrow
 }
 
 // PodResourceTotals sums the per-container request/limit values across all

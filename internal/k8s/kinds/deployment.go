@@ -31,9 +31,9 @@ func (deployment) Columns() []k8s.Column {
 	return []k8s.Column{
 		{Header: "NAME", Width: 40, Flex: true, Render: deploymentName},
 		{Header: "READY", Width: 10, Render: deploymentReady},
-		{Header: "UP-TO-DATE", Width: 12, Render: deploymentUpToDate},
-		{Header: "AVAILABLE", Width: 12, Render: deploymentAvailable},
-		{Header: "AGE", Width: 10, Render: deploymentAge},
+		{Header: "UP-TO-DATE", Width: 12, SortType: k8s.SortNumber, Render: deploymentUpToDate},
+		{Header: "AVAILABLE", Width: 12, SortType: k8s.SortNumber, Render: deploymentAvailable},
+		{Header: "AGE", Width: 10, SortType: k8s.SortTime, Render: deploymentAge},
 	}
 }
 

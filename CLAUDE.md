@@ -75,6 +75,7 @@ internal/ui/
 - **JSON colorization**: `tryColorizeJSON` in `log_viewer.go` Chroma-highlights lines that are valid JSON (dracula theme, terminal256 formatter); colorCache is a parallel slice to `lines` so re-colorizing on `J` toggle only re-renders lines, not restreams data.
 - **Scrollable columns**: `k8s.Column.Scrollable` is a per-column opt-in (parallel to `Flex`). At most one column per resource sets it; `ResourceTable` reads it through `scrollableColIdx()` and exposes `←/→`, horizontal-wheel ticks, and an `esc`-peel layer on `hScroll`. Adding the flag to any new resource's column is the only step required to enable horizontal scrolling.
 - **Resource table scrollbar**: `ResourceTable.View()` reserves the rightmost inner column for a `renderScrollbar` thumb driven by `scrollStart()` over `len(t.filtered)` — works for both key navigation and mouse-wheel cursor moves. The title also appends a `i/N · P%` muted label via `cursorPositionLabel()`.
+- **Row ordering & sort**: `ResourceTable.sortRows()` (called by `WithRows` and the sort keys) is the single sort site. Default order is k9s-parity: newest-first for time-stamped kinds (`ResourceRow.SortByTime`, only Event today), else natural `(namespace, name)` via `k8s.RowLess` — natural so `pod-2` precedes `pod-10`, with the fqn as a total-order tie-break so refreshes don't reorder. Interactive column sort: `shift+→` (alias `>`) cycles `sortColIdx` forward (−1 = default), `shift+←` cycles it backward (`cycleSortColumnBack`); `shift+↑` / `shift+↓` force ascending / descending on the active column (`setSortDir`), while `<` flips it (`toggleSortDir`); all reset on kind switch. (Shift, not ctrl: macOS reserves ctrl+arrows for Spaces / Mission Control, so they never reach the terminal.) Clicking a column header (`HandleHeaderClickAt`, routed from the left-click handler in `model.go` before drag-select) sorts by that column — a click on the already-active column toggles direction, a click on another column selects it ascending. `columnAtX` maps the click's inner-X to a column using `headerColTextOffset` (1 border + 1 `TableHeader` left-pad) and `computeColWidths`, folding each trailing separator into the preceding column's hit-area. The active column compares via `k8s.CellCompare(col.SortType, a, b)` (ANSI-stripped), tie-breaking back to `RowLess`. `k8s.Column.SortType` (`SortString` default / `SortTime` / `SortNumber` / `SortCapacity`) is a per-column opt-in — set it on a column to make the sort compare that column by duration/number/quantity instead of raw text; the header shows a `▲`/`▼` arrow and the title a `· sort COL ▲` label.
 - **klog suppression**: klog is silenced at startup via `klog.SetOutput(io.Discard)` — suppress before any client-go initialization to avoid noisy stderr.
 
 ## Keyboard Shortcuts
@@ -105,6 +106,9 @@ internal/ui/
 | `ctrl+s` | YAML diff preview / save (in YAML editor) |
 | `ctrl+v` | paste into filter / search / editor inputs |
 | `←/→` | scroll horizontally on columns marked `Scrollable` (e.g. Event MESSAGE); horizontal trackpad wheel does the same |
+| `shift+→` / `shift+←` | cycle the table sort column forward / backward (default → col 0 → … → last → default); `>` is a fallback alias for `shift+→` |
+| `shift+↑` / `shift+↓` | sort the active column ascending / descending (no-op in default order); `<` flips direction |
+| click column header | sort by that column; click again to toggle asc/desc |
 | `:` | command palette (TODO) |
 | `esc` | back to table (or peel log viewer state) |
 | `q` | quit |
@@ -194,7 +198,9 @@ type-assert to the kind's typed Go shape inside. `RowContext.Metrics` and
 `RowContext.PortForwardActive` are the only cross-cutting state available to
 cells — add a field to `k8s.RowContext` only when a concrete column needs it.
 Nothing else changes; `listVia` fills `Row.Values` positionally from each
-Render closure.
+Render closure. Set `SortType` (`SortTime` / `SortNumber` / `SortCapacity`) on
+the column when its values aren't plain text — that's all interactive `>` sort
+needs to compare it correctly; leaving it unset gives natural string order.
 
 ## Adding XRay to a Resource
 

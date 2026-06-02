@@ -696,6 +696,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch click.Button {
 					case tea.MouseLeft:
 						innerX := mouse.X - navW
+						// A click on the column-header row sorts by that column
+						// (toggling asc/desc on repeat clicks). Try this before
+						// drag-select so the header click never begins a drag.
+						var sorted bool
+						m.tableCtrl, sorted = m.tableCtrl.HandleHeaderClickAt(innerX, innerY)
+						if sorted {
+							return m, nil
+						}
 						var started bool
 						m.tableCtrl, started = m.tableCtrl.HandleMouseDown(innerX, innerY)
 						if started {
