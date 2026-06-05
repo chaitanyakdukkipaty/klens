@@ -125,6 +125,9 @@ type Model struct {
 	eventFaultsOnly  bool
 	eventWrapMessage bool
 
+	// hover is the currently rendered hover target set (see hoverState).
+	hover hoverState
+
 	// pendingJumpName, when non-empty after a switchKind triggered by `o` on
 	// an Event row, asks the next buildTableCmd/refresh cycle to move the
 	// table cursor to the row whose Name matches. Cleared on successful
@@ -199,6 +202,7 @@ func New(readOnly bool) Model {
 		statusBar:       panels.NewStatusBar(80),
 		focus:           FocusNav,
 		mode:            ModeTable,
+		hover:           noHover,
 		msgCh:           ch,
 		namespace:       "default",
 		loading:         true,
@@ -638,6 +642,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mp := click.Mouse()
 				m.statusBar = m.statusBar.SetMessage(fmt.Sprintf(
 					"mouse click: button=%d (%s) X=%d Y=%d", mp.Button, mp.Button, mp.X, mp.Y))
+			}
+		}
+		// Pure hover motion (no button held): update hover targets and stop.
+		// Button-held motion falls through to the drag routing below. The
+		// program filter has already dropped motions whose target set is
+		// unchanged, so reaching here means a re-render is warranted.
+		if motion, ok := msg.(tea.MouseMotionMsg); ok {
+			if mp := motion.Mouse(); mp.Button == tea.MouseNone {
+				return m.applyHover(m.resolveHover(mp.X, mp.Y)), nil
 			}
 		}
 		// Click handling routes through the hit-region map: resolve the screen
@@ -1316,6 +1329,7 @@ func (m Model) buildTabBar() panels.TabBar {
 		Editing:       m.mode == ModeEditor,
 		Enabled:       enabled,
 		CanFullscreen: m.mode != ModeTable && !m.fullScreen,
+		Hover:         m.hover.tab,
 	}
 }
 
@@ -2539,7 +2553,9 @@ func currentReplicas(kind string, row *k8sops.ResourceRow) int32 {
 func (m Model) View() tea.View {
 	v := tea.NewView(m.renderContent())
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// AllMotion delivers button-less motion for hover; the program filter
+	// in main.go drops motions whose hover target hasn't changed.
+	v.MouseMode = tea.MouseModeAllMotion
 	return v
 }
 
@@ -2557,15 +2573,7 @@ func (m Model) WheelAtBoundary(button tea.MouseButton) bool {
 	if m.loading {
 		return false
 	}
-	if m.namespacePicker.IsVisible() ||
-		m.clusterPicker.IsVisible() ||
-		m.containerPicker.IsVisible() ||
-		m.confirm.IsVisible() ||
-		m.scaleDialog.IsVisible() ||
-		m.sanitizeDialog.IsVisible() ||
-		m.contextMenu.IsVisible() ||
-		m.pfDialog.IsVisible() ||
-		m.pfList.IsVisible() {
+	if m.anyModalVisible() {
 		return false
 	}
 	if m.focus == FocusNav {
@@ -2592,6 +2600,20 @@ func (m Model) WheelAtBoundary(button tea.MouseButton) bool {
 // it is centered on the full terminal so it remains visible (the base view fills
 // the entire terminal height after the lipgloss v2 width/height fix, so simply
 // appending the modal below would push it off-screen).
+// anyModalVisible reports whether any modal overlay is up (modals own input
+// and render centered over everything, so hover and boundary checks bail).
+func (m Model) anyModalVisible() bool {
+	return m.namespacePicker.IsVisible() ||
+		m.clusterPicker.IsVisible() ||
+		m.containerPicker.IsVisible() ||
+		m.confirm.IsVisible() ||
+		m.scaleDialog.IsVisible() ||
+		m.sanitizeDialog.IsVisible() ||
+		m.contextMenu.IsVisible() ||
+		m.pfDialog.IsVisible() ||
+		m.pfList.IsVisible()
+}
+
 // hitMap builds the screen hit-region registry for the current layout state.
 // Rebuilt per mouse event — a handful of rect appends — so regions can never
 // go stale relative to the layout (herdr's recompute-per-frame pattern,
@@ -2608,6 +2630,63 @@ func (m Model) hitMap() hit.Map {
 	zones.Add(hit.ZoneContent, m.layout.Content())
 	zones.Add(hit.ZoneStatus, m.layout.Status())
 	return zones
+}
+
+// hoverState identifies what's under the mouse pointer across every
+// hoverable surface. Comparable, so the program filter can drop motion
+// events that wouldn't change anything before they cost an Update+View.
+type hoverState struct {
+	chip     panels.HeaderChip
+	tab      panels.TabID
+	navRow   int
+	tableRow int
+}
+
+var noHover = hoverState{chip: panels.ChipNone, tab: panels.TabNone, navRow: -1, tableRow: -1}
+
+// resolveHover hit-tests the pointer against the current layout and returns
+// the hover target set (noHover during loading or under a modal).
+func (m Model) resolveHover(x, y int) hoverState {
+	h := noHover
+	if m.loading || m.anyModalVisible() {
+		return h
+	}
+	zone, lx, ly := m.hitMap().At(x, y)
+	switch zone {
+	case hit.ZoneHeader:
+		if chip, ok := m.header.ChipAt(lx); ok {
+			h.chip = chip
+		}
+	case hit.ZoneTabBar:
+		if id, ok := m.buildTabBar().TabAt(lx); ok {
+			h.tab = id
+		}
+	case hit.ZoneNav:
+		h.navRow = m.nav.RowIndexAt(ly - 1)
+	case hit.ZoneContent:
+		if m.mode == ModeTable && !m.tableCtrl.WrapActive() {
+			if idx, ok := m.tableCtrl.RowIndexAt(ly - 1); ok {
+				h.tableRow = idx
+			}
+		}
+	}
+	return h
+}
+
+// HoverChanged reports whether the pointer at (x, y) targets something other
+// than what's currently hover-rendered. Used by the tea.WithFilter in
+// main.go to drop no-op motion events (same trick as WheelAtBoundary).
+func (m Model) HoverChanged(x, y int) bool {
+	return m.resolveHover(x, y) != m.hover
+}
+
+// applyHover pushes a resolved hover target set into the panels.
+func (m Model) applyHover(h hoverState) Model {
+	m.hover = h
+	m.header = m.header.SetHover(h.chip)
+	m.nav = m.nav.SetHoverRow(h.navRow)
+	m.tableCtrl = m.tableCtrl.SetHoverRow(h.tableRow)
+	return m
 }
 
 // contentRect is the content panel's outer screen rect honoring fullscreen.

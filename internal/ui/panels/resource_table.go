@@ -32,6 +32,7 @@ func TableAutoScrollTickCmd() tea.Cmd {
 
 var (
 	tableRowCursorBase = lipgloss.NewStyle().Background(styles.ColorSelection).Foreground(styles.ColorWhite)
+	tableRowHoverBase  = lipgloss.NewStyle().Background(styles.ColorHover)
 	tableRowBase       = lipgloss.NewStyle()
 )
 
@@ -91,6 +92,10 @@ type ResourceTable struct {
 	// drag holds drag-to-copy lifecycle state (indices into t.filtered).
 	// See DragSelection in drag.go.
 	drag DragSelection
+
+	// hoverIdx is the t.filtered index under the mouse pointer (-1 none).
+	// Render-only: never affects cursor, selection, or scroll.
+	hoverIdx int
 }
 
 func NewResourceTable(w, h int) ResourceTable {
@@ -101,6 +106,7 @@ func NewResourceTable(w, h int) ResourceTable {
 		wrapColIdx: -1,
 		sortColIdx: -1,
 		sortAsc:    true,
+		hoverIdx:   -1,
 	}
 }
 
@@ -119,9 +125,22 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.titleBadge = ""
 		t.sortColIdx = -1
 		t.sortAsc = true
+		t.hoverIdx = -1
 	}
 	t.kind = kind
 	return t
+}
+
+// SetHoverRow marks the filtered-row index under the mouse (-1 clears).
+func (t ResourceTable) SetHoverRow(idx int) ResourceTable {
+	t.hoverIdx = idx
+	return t
+}
+
+// RowIndexAt maps a panel-inner Y to an index into the filtered rows, for
+// hover hit-testing (clicks use HandleClickAt, which also moves the cursor).
+func (t ResourceTable) RowIndexAt(innerY int) (int, bool) {
+	return t.rowAtInnerY(innerY)
 }
 
 // SetWrapColumn opts the table into multi-line rendering for `idx`. Subsequent
@@ -924,7 +943,8 @@ func (t ResourceTable) View() string {
 				row = applyHScroll(row, scrollIdx, t.hScroll)
 			}
 
-			line := buildRow(row, desc, dataW, colWidths, sel, isCursor)
+			hov := i == t.hoverIdx && !isCursor && !sel
+			line := buildRow(row, desc, dataW, colWidths, sel, isCursor, hov)
 			rowLines = append(rowLines, line)
 			visibleRowsShown++
 		}
@@ -1072,7 +1092,7 @@ func headerSortText(header string, active, asc bool) string {
 	return header + " ▼"
 }
 
-func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor bool) string {
+func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor, hovered bool) string {
 	prefix := "  "
 	if selected {
 		prefix = "✓ "
@@ -1112,6 +1132,9 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 	if cursor {
 		return tableRowCursorBase.Width(width).Render(ansiEscape.ReplaceAllString(line, ""))
 	}
+	if hovered {
+		return tableRowHoverBase.Width(width).Render(line)
+	}
 	return tableRowBase.Width(width).Render(line)
 }
 
@@ -1122,7 +1145,7 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 // the block.
 func buildWrappedRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor bool, wrapIdx int) []string {
 	if wrapIdx < 0 || wrapIdx >= len(colWidths) {
-		return []string{buildRow(row, desc, width, colWidths, selected, cursor)}
+		return []string{buildRow(row, desc, width, colWidths, selected, cursor, false)}
 	}
 	cols := desc.Columns
 	values := row.Values
@@ -1131,7 +1154,7 @@ func buildWrappedRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, wid
 	}
 	wrapW := colWidths[wrapIdx]
 	if wrapW <= 0 {
-		return []string{buildRow(row, desc, width, colWidths, selected, cursor)}
+		return []string{buildRow(row, desc, width, colWidths, selected, cursor, false)}
 	}
 	wrapVal := ""
 	if wrapIdx < len(values) {

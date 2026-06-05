@@ -118,6 +118,17 @@ func (c TableController) ClearWrapColumn() TableController {
 	return c
 }
 
+// SetHoverRow marks the filtered-row index under the mouse (-1 clears).
+func (c TableController) SetHoverRow(idx int) TableController {
+	c.panel = c.panel.SetHoverRow(idx)
+	return c
+}
+
+// RowIndexAt maps a panel-inner Y to a filtered-row index (hover hit-test).
+func (c TableController) RowIndexAt(innerY int) (int, bool) {
+	return c.panel.RowIndexAt(innerY)
+}
+
 func (c TableController) SetTitleBadge(s string) TableController {
 	c.panel = c.panel.SetTitleBadge(s)
 	return c

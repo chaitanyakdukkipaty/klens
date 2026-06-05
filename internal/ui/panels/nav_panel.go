@@ -415,6 +415,9 @@ func (n NavPanel) rowIndexAt(innerY int) int {
 	return idx
 }
 
+// RowIndexAt is the exported row hit-test (hover); -1 when no row is there.
+func (n NavPanel) RowIndexAt(innerY int) int { return n.rowIndexAt(innerY) }
+
 // HandleClickAt handles a click at panel-inner Y. Returns the clicked kind
 // ("" when none) and whether the click toggled a group header — toggles are
 // self-contained and must not move focus or leave the current mode.

@@ -68,26 +68,32 @@ func main() {
 	}
 
 	m := app.New(readOnly)
-	// Drop mouse-wheel events when the focused scroll surface is already pinned
-	// at the boundary the wheel would scroll toward. Returning nil from a
-	// tea.WithFilter skips both Update AND the per-event View() render, so
-	// trackpad momentum scroll at the edge drains instantly instead of piling
-	// up a backlog of no-op renders that make the TUI feel unresponsive.
-	wheelFilter := func(model tea.Model, msg tea.Msg) tea.Msg {
-		wheel, ok := msg.(tea.MouseWheelMsg)
-		if !ok {
-			return msg
-		}
+	// Drop no-op mouse events before they cost an Update + full View render.
+	// Returning nil from a tea.WithFilter skips both, so event storms drain
+	// instantly instead of piling up a backlog of no-op renders that make the
+	// TUI feel unresponsive. Two cases:
+	//   - wheel events at the boundary they would scroll toward (trackpad
+	//     momentum scroll at an edge);
+	//   - hover motion (AllMotion mode) whose hover target set is unchanged —
+	//     the overwhelming majority of motion events.
+	mouseFilter := func(model tea.Model, msg tea.Msg) tea.Msg {
 		am, ok := model.(app.Model)
 		if !ok {
 			return msg
 		}
-		if am.WheelAtBoundary(wheel.Button) {
-			return nil
+		switch ev := msg.(type) {
+		case tea.MouseWheelMsg:
+			if am.WheelAtBoundary(ev.Button) {
+				return nil
+			}
+		case tea.MouseMotionMsg:
+			if mp := ev.Mouse(); mp.Button == tea.MouseNone && !am.HoverChanged(mp.X, mp.Y) {
+				return nil
+			}
 		}
 		return msg
 	}
-	p := tea.NewProgram(m, tea.WithFilter(wheelFilter))
+	p := tea.NewProgram(m, tea.WithFilter(mouseFilter))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
