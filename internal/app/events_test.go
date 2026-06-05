@@ -114,14 +114,16 @@ func TestEventsHelpAdvertisesNewKeys(t *testing.T) {
 	for _, h := range eventsHelp() {
 		have[h.Key] = true
 	}
-	for _, want := range []string{"ctrl+z", "w", "o", "y", "d", "/"} {
+	for _, want := range []string{"ctrl+z", "w", "o", "/"} {
 		if !have[want] {
 			t.Errorf("eventsHelp missing %q", want)
 		}
 	}
-	for _, banned := range []string{"ctrl+d", "a", "e", "l", "x", "m"} {
+	// ctrl+d/a/e: no matching capability on Event. y/d/l/x/m: view-mode
+	// actions live in the tab bar above the content, never in footers.
+	for _, banned := range []string{"ctrl+d", "a", "e", "y", "d", "l", "x", "m"} {
 		if have[banned] {
-			t.Errorf("eventsHelp advertises %q (event has no matching capability)", banned)
+			t.Errorf("eventsHelp advertises %q (tab-bar action or unsupported capability)", banned)
 		}
 	}
 }

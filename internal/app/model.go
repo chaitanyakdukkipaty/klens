@@ -2467,18 +2467,9 @@ func (m *Model) setStatusBarKind(kind string) {
 		m.statusBar = m.statusBar.SetHelp(help)
 		return
 	}
-	// Every Kind implements Fetch — YAML view + Describe are always available.
-	help = append(help, panels.HelpItem{Key: "y", Desc: "yaml"})
-	help = append(help, panels.HelpItem{Key: "d", Desc: "describe"})
-	if _, ok := any(k).(kinds.Logger); ok {
-		help = append(help, panels.HelpItem{Key: "l", Desc: "logs"})
-	}
-	if _, ok := any(k).(kinds.XRayer); ok {
-		help = append(help, panels.HelpItem{Key: "x", Desc: "xray"})
-	}
-	if _, ok := any(k).(kinds.MetricsSupporter); ok {
-		help = append(help, panels.HelpItem{Key: "m", Desc: "metrics"})
-	}
+	// View-mode actions (y/d/l/x/m) are deliberately absent: the tab bar
+	// above the content shows each view with its key, so the footer only
+	// carries the operations that have no other visible surface.
 	if _, ok := any(k).(kinds.PortForwarder); ok {
 		help = append(help, panels.HelpItem{Key: "shift+f", Desc: "port-forward"})
 	}
@@ -2521,6 +2512,7 @@ func (m *Model) setStatusBarKind(kind string) {
 // eventsHelp returns the events-view help footer. The hidden keys are
 // ctrl+d / e / a (event has no Deleter / Applier / Attacher); their
 // suppression is mirrored by status-bar feedback in handleTableKeys.
+// View-mode actions (y/d) live in the tab bar, not here.
 func eventsHelp() []panels.HelpItem {
 	return []panels.HelpItem{
 		{Key: "↑↓/jk", Desc: "navigate"},
@@ -2528,8 +2520,6 @@ func eventsHelp() []panels.HelpItem {
 		{Key: "ctrl+z", Desc: "faults"},
 		{Key: "w", Desc: "wrap"},
 		{Key: "o", Desc: "object"},
-		{Key: "y", Desc: "yaml"},
-		{Key: "d", Desc: "describe"},
 		{Key: "esc", Desc: "back"},
 	}
 }

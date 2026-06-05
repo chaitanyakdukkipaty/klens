@@ -19,14 +19,13 @@ type HelpItem struct {
 	Desc string
 }
 
+// defaultHelp is the pre-cluster-ready footer. View-mode actions (y/l/x/m/d)
+// are not listed here or in any footer — the tab bar shows them with their
+// keys.
 var defaultHelp = []HelpItem{
 	{Key: "↑↓/jk", Desc: "navigate"},
 	{Key: "enter", Desc: "focus"},
 	{Key: "/", Desc: "filter"},
-	{Key: "y", Desc: "yaml"},
-	{Key: "l", Desc: "logs"},
-	{Key: "x", Desc: "xray"},
-	{Key: "m", Desc: "metrics"},
 	{Key: "q", Desc: "quit"},
 }
 
