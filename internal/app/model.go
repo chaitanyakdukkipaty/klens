@@ -168,6 +168,12 @@ func clearStatusAfterDelay(d time.Duration) tea.Cmd {
 // New creates the initial app model. readOnly mirrors the --readonly CLI flag;
 // the effective readonly state may also be set by the persisted config.
 func New(readOnly bool) Model {
+	// Activate the configured theme before the first render. The config is
+	// re-loaded during connect (clusterReadyMsg) for cluster prefs; reading it
+	// here too keeps theming independent of cluster connectivity.
+	if cfg, err := appcfg.Load(); err == nil {
+		styles.Apply(styles.PresetByName(cfg.Theme))
+	}
 	ch := make(chan tea.Msg, 128)
 	return Model{
 		layout:          layout.New(80, 24),

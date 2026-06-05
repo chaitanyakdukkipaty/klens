@@ -11,6 +11,9 @@ type Config struct {
 	// ReadOnly prevents all cluster-mutating operations when true. The
 	// --readonly CLI flag overrides this (forces true) but never forces false.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// Theme selects the color palette by preset name (see styles.Presets).
+	// Empty or unknown names fall back to the default theme.
+	Theme string `json:"theme,omitempty"`
 	// Namespaces maps cluster context name → manually saved namespace list.
 	Namespaces map[string][]string `json:"namespaces"`
 	// LastNamespace maps cluster context name → last active namespace.
