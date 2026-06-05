@@ -141,9 +141,10 @@ func (c TableController) HandleScrollbarUp() (TableController, bool) {
 // ScrollbarDragging reports an in-flight scrollbar thumb drag.
 func (c TableController) ScrollbarDragging() bool { return c.panel.ScrollbarDragging() }
 
-// SetHoverRow marks the filtered-row index under the mouse (-1 clears).
-func (c TableController) SetHoverRow(idx int) TableController {
-	c.panel = c.panel.SetHoverRow(idx)
+// SetCursorVisible moves the cursor to a visible row without scrolling
+// (pointer hover/click path — one highlight for mouse and keyboard).
+func (c TableController) SetCursorVisible(idx int) TableController {
+	c.panel = c.panel.SetCursorVisible(idx)
 	return c
 }
 

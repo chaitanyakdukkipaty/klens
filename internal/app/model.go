@@ -2790,12 +2790,17 @@ func (m Model) HoverChanged(x, y int) bool {
 	return m.resolveHover(x, y) != m.hover
 }
 
-// applyHover pushes a resolved hover target set into the panels.
+// applyHover pushes a resolved hover target set into the panels. Chrome
+// (header chips, tabs, nav rows) gets a render-only tint; a table row moves
+// the actual cursor — mouse and keyboard drive the same single highlight
+// (SetCursorVisible freezes the window so hover never scrolls the view).
 func (m Model) applyHover(h hoverState) Model {
 	m.hover = h
 	m.header = m.header.SetHover(h.chip)
 	m.nav = m.nav.SetHoverRow(h.navRow)
-	m.tableCtrl = m.tableCtrl.SetHoverRow(h.tableRow)
+	if h.tableRow >= 0 {
+		m.tableCtrl = m.tableCtrl.SetCursorVisible(h.tableRow)
+	}
 	return m
 }
 

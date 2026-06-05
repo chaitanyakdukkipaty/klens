@@ -33,14 +33,12 @@ func TableAutoScrollTickCmd() tea.Cmd {
 // Pre-built row styles, rebuilt on theme switch via styles.RegisterOnApply.
 var (
 	tableRowCursorBase lipgloss.Style
-	tableRowHoverBase  lipgloss.Style
 	tableRowBase       lipgloss.Style
 )
 
 func init() {
 	styles.RegisterOnApply(func() {
 		tableRowCursorBase = lipgloss.NewStyle().Background(styles.ColorSelection).Foreground(styles.ColorWhite)
-		tableRowHoverBase = lipgloss.NewStyle().Background(styles.ColorHover)
 		tableRowBase = lipgloss.NewStyle()
 	})
 }
@@ -102,9 +100,11 @@ type ResourceTable struct {
 	// See DragSelection in drag.go.
 	drag DragSelection
 
-	// hoverIdx is the t.filtered index under the mouse pointer (-1 none).
-	// Render-only: never affects cursor, selection, or scroll.
-	hoverIdx int
+	// scrollOff is the first visible row. Sticky state — not derived from the
+	// cursor — so pointer-driven cursor moves (hover, click) inside the
+	// window don't re-anchor the view. scrollStart() clamps it to keep the
+	// cursor visible; key navigation outside the window scrolls as before.
+	scrollOff int
 
 	// sbDragActive marks an in-flight scrollbar thumb drag; sbDragGrab is the
 	// row offset inside the thumb where it was grabbed, so the thumb tracks
@@ -121,7 +121,6 @@ func NewResourceTable(w, h int) ResourceTable {
 		wrapColIdx: -1,
 		sortColIdx: -1,
 		sortAsc:    true,
-		hoverIdx:   -1,
 	}
 }
 
@@ -140,7 +139,7 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.titleBadge = ""
 		t.sortColIdx = -1
 		t.sortAsc = true
-		t.hoverIdx = -1
+		t.scrollOff = 0
 		t.sbDragActive = false
 	}
 	t.kind = kind
@@ -177,10 +176,9 @@ func (t ResourceTable) scrollbarGeometry() (sbX, topY, height, thumbPos, thumbSi
 	return sbX, topY, height, thumbPos, thumbSize, true
 }
 
-// scrollToThumbPos moves the cursor so the scroll window matches thumb
-// position p. The table has no independent scroll state — scrollStart()
-// derives from the cursor — so the drag drives the cursor to the bottom of
-// the target window (offset+shown-1), which makes scrollStart() == offset.
+// scrollToThumbPos sets the scroll window to match thumb position p and
+// clamps the cursor into it (the cursor keeps the single highlight; the
+// window no longer re-anchors around it).
 func (t ResourceTable) scrollToThumbPos(p int) ResourceTable {
 	_, _, height, _, thumbSize, ok := t.scrollbarGeometry()
 	if !ok || height <= thumbSize {
@@ -195,14 +193,16 @@ func (t ResourceTable) scrollToThumbPos(p int) ResourceTable {
 	shown := height
 	total := len(t.filtered)
 	offset := int(float64(p)/float64(height-thumbSize)*float64(total-shown) + 0.5)
-	cursor := offset + shown - 1
-	if cursor >= total {
-		cursor = total - 1
+	t.scrollOff = offset
+	if t.cursor < offset {
+		t.cursor = offset
 	}
-	if cursor < 0 {
-		cursor = 0
+	if t.cursor >= offset+shown {
+		t.cursor = offset + shown - 1
 	}
-	t.cursor = cursor
+	if t.cursor >= total {
+		t.cursor = total - 1
+	}
 	return t
 }
 
@@ -255,9 +255,16 @@ func (t ResourceTable) HandleScrollbarUp() (ResourceTable, bool) {
 // ScrollbarDragging reports an in-flight scrollbar thumb drag.
 func (t ResourceTable) ScrollbarDragging() bool { return t.sbDragActive }
 
-// SetHoverRow marks the filtered-row index under the mouse (-1 clears).
-func (t ResourceTable) SetHoverRow(idx int) ResourceTable {
-	t.hoverIdx = idx
+// SetCursorVisible moves the cursor to a row already inside the visible
+// window without scrolling: the current window is frozen into scrollOff
+// first. This is the pointer path (hover, click) — keyboard and mouse drive
+// the same single cursor highlight.
+func (t ResourceTable) SetCursorVisible(idx int) ResourceTable {
+	if idx < 0 || idx >= len(t.filtered) {
+		return t
+	}
+	t.scrollOff = t.scrollStart()
+	t.cursor = idx
 	return t
 }
 
@@ -555,13 +562,27 @@ func (t ResourceTable) visibleRowCount() int {
 	return v
 }
 
-// scrollStart returns the index of the first visible row (kept in sync with View()).
+// scrollStart returns the index of the first visible row: the sticky
+// scrollOff clamped to the data and adjusted to keep the cursor visible.
+// Key navigation past either window edge scrolls exactly as the old
+// cursor-derived behavior did; pointer-driven cursor moves inside the
+// window (hover, click) leave the view still.
 func (t ResourceTable) scrollStart() int {
 	visible := t.visibleRowCount()
-	if t.cursor >= visible {
-		return t.cursor - visible + 1
+	off := t.scrollOff
+	if m := len(t.filtered) - visible; off > m {
+		off = m
 	}
-	return 0
+	if off < 0 {
+		off = 0
+	}
+	if t.cursor < off {
+		off = t.cursor
+	}
+	if t.cursor >= off+visible {
+		off = t.cursor - visible + 1
+	}
+	return off
 }
 
 // firstVisibleRowY returns the inner-Y of the first data row. Title (0),
@@ -799,7 +820,7 @@ func (t ResourceTable) HandleClickAt(innerY int, leftClick bool) (ResourceTable,
 	if !ok {
 		return t, false
 	}
-	t.cursor = rowIdx
+	t = t.SetCursorVisible(rowIdx)
 	if leftClick && t.supportsMultiSelect() {
 		if row := t.SelectedRow(); row != nil {
 			t.selected[row.Name] = !t.selected[row.Name]
@@ -1067,8 +1088,7 @@ func (t ResourceTable) View() string {
 				row = applyHScroll(row, scrollIdx, t.hScroll)
 			}
 
-			hov := i == t.hoverIdx && !isCursor && !sel
-			line := buildRow(row, desc, dataW, colWidths, sel, isCursor, hov)
+			line := buildRow(row, desc, dataW, colWidths, sel, isCursor)
 			rowLines = append(rowLines, line)
 			visibleRowsShown++
 		}
@@ -1216,7 +1236,7 @@ func headerSortText(header string, active, asc bool) string {
 	return header + " ▼"
 }
 
-func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor, hovered bool) string {
+func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor bool) string {
 	prefix := "  "
 	if selected {
 		prefix = "✓ "
@@ -1256,9 +1276,6 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 	if cursor {
 		return tableRowCursorBase.Width(width).Render(ansiEscape.ReplaceAllString(line, ""))
 	}
-	if hovered {
-		return tableRowHoverBase.Width(width).Render(line)
-	}
 	return tableRowBase.Width(width).Render(line)
 }
 
@@ -1269,7 +1286,7 @@ func buildRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int,
 // the block.
 func buildWrappedRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, width int, colWidths []int, selected, cursor bool, wrapIdx int) []string {
 	if wrapIdx < 0 || wrapIdx >= len(colWidths) {
-		return []string{buildRow(row, desc, width, colWidths, selected, cursor, false)}
+		return []string{buildRow(row, desc, width, colWidths, selected, cursor)}
 	}
 	cols := desc.Columns
 	values := row.Values
@@ -1278,7 +1295,7 @@ func buildWrappedRow(row k8sres.ResourceRow, desc k8sres.ResourceDescriptor, wid
 	}
 	wrapW := colWidths[wrapIdx]
 	if wrapW <= 0 {
-		return []string{buildRow(row, desc, width, colWidths, selected, cursor, false)}
+		return []string{buildRow(row, desc, width, colWidths, selected, cursor)}
 	}
 	wrapVal := ""
 	if wrapIdx < len(values) {

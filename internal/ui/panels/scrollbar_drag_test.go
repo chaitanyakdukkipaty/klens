@@ -50,12 +50,17 @@ func TestScrollbarThumbDragScrolls(t *testing.T) {
 	if !hit || !tb.ScrollbarDragging() {
 		t.Fatal("thumb grab not registered")
 	}
-	// Drag to the bottom of the track → cursor at the last row.
+	// Drag to the bottom of the track → window at the end, cursor clamped
+	// into it (the drag moves the window; the cursor keeps one highlight).
 	tb = tb.HandleScrollbarDrag(topY + height - thumbSize)
-	if tb.cursor != 99 {
-		t.Errorf("cursor after drag to bottom = %d, want 99", tb.cursor)
+	wantOff := 100 - tb.visibleRowCount()
+	if got := tb.scrollStart(); got != wantOff {
+		t.Errorf("scrollStart after drag to bottom = %d, want %d", got, wantOff)
 	}
-	// Drag back to the top → first window (cursor at its bottom row).
+	if tb.cursor < wantOff || tb.cursor >= wantOff+tb.visibleRowCount() {
+		t.Errorf("cursor %d outside window [%d,%d)", tb.cursor, wantOff, wantOff+tb.visibleRowCount())
+	}
+	// Drag back to the top → first window.
 	tb = tb.HandleScrollbarDrag(topY)
 	if got := tb.scrollStart(); got != 0 {
 		t.Errorf("scrollStart after drag to top = %d, want 0", got)
