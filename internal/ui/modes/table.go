@@ -118,6 +118,29 @@ func (c TableController) ClearWrapColumn() TableController {
 	return c
 }
 
+// HandleScrollbarDown claims a left-click on the scrollbar column.
+func (c TableController) HandleScrollbarDown(x, y int) (TableController, bool) {
+	p, hit := c.panel.HandleScrollbarDown(x, y)
+	c.panel = p
+	return c, hit
+}
+
+// HandleScrollbarDrag tracks an in-flight scrollbar thumb drag.
+func (c TableController) HandleScrollbarDrag(y int) TableController {
+	c.panel = c.panel.HandleScrollbarDrag(y)
+	return c
+}
+
+// HandleScrollbarUp ends a thumb drag; reports whether one was in flight.
+func (c TableController) HandleScrollbarUp() (TableController, bool) {
+	p, was := c.panel.HandleScrollbarUp()
+	c.panel = p
+	return c, was
+}
+
+// ScrollbarDragging reports an in-flight scrollbar thumb drag.
+func (c TableController) ScrollbarDragging() bool { return c.panel.ScrollbarDragging() }
+
 // SetHoverRow marks the filtered-row index under the mouse (-1 clears).
 func (c TableController) SetHoverRow(idx int) TableController {
 	c.panel = c.panel.SetHoverRow(idx)

@@ -96,6 +96,12 @@ type ResourceTable struct {
 	// hoverIdx is the t.filtered index under the mouse pointer (-1 none).
 	// Render-only: never affects cursor, selection, or scroll.
 	hoverIdx int
+
+	// sbDragActive marks an in-flight scrollbar thumb drag; sbDragGrab is the
+	// row offset inside the thumb where it was grabbed, so the thumb tracks
+	// the pointer without jumping (herdr's grab_row_offset pattern).
+	sbDragActive bool
+	sbDragGrab   int
 }
 
 func NewResourceTable(w, h int) ResourceTable {
@@ -126,10 +132,119 @@ func (t ResourceTable) SetKind(kind string) ResourceTable {
 		t.sortColIdx = -1
 		t.sortAsc = true
 		t.hoverIdx = -1
+		t.sbDragActive = false
 	}
 	t.kind = kind
 	return t
 }
+
+// scrollbarGeometry mirrors View()'s renderScrollbar call: the scrollbar
+// column's outer-relative X, the rows-area top (border-inner Y), the rendered
+// track height, and the thumb extent. ok=false when no scrollbar is shown
+// (wrap mode, empty table).
+func (t ResourceTable) scrollbarGeometry() (sbX, topY, height, thumbPos, thumbSize int, ok bool) {
+	if t.WrapActive() || len(t.filtered) == 0 {
+		return 0, 0, 0, 0, 0, false
+	}
+	innerW := max(1, t.width-2)
+	dataW := max(1, innerW-1)
+	sbX = 1 + dataW // 1 = left border; rows render from outer X 1, width dataW
+	topY = t.firstVisibleRowY()
+	start := t.scrollStart()
+	shown := t.visibleRowCount()
+	if rest := len(t.filtered) - start; rest < shown {
+		shown = rest
+	}
+	if shown < 1 {
+		shown = 1
+	}
+	height = shown
+	total := len(t.filtered)
+	if total <= shown {
+		return sbX, topY, height, 0, height, true // full-track thumb, nothing to drag
+	}
+	thumbSize = max(1, height*shown/total)
+	thumbPos = int(float64(start) / float64(max(1, total-shown)) * float64(height-thumbSize))
+	return sbX, topY, height, thumbPos, thumbSize, true
+}
+
+// scrollToThumbPos moves the cursor so the scroll window matches thumb
+// position p. The table has no independent scroll state — scrollStart()
+// derives from the cursor — so the drag drives the cursor to the bottom of
+// the target window (offset+shown-1), which makes scrollStart() == offset.
+func (t ResourceTable) scrollToThumbPos(p int) ResourceTable {
+	_, _, height, _, thumbSize, ok := t.scrollbarGeometry()
+	if !ok || height <= thumbSize {
+		return t
+	}
+	if p < 0 {
+		p = 0
+	}
+	if p > height-thumbSize {
+		p = height - thumbSize
+	}
+	shown := height
+	total := len(t.filtered)
+	offset := int(float64(p)/float64(height-thumbSize)*float64(total-shown) + 0.5)
+	cursor := offset + shown - 1
+	if cursor >= total {
+		cursor = total - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	t.cursor = cursor
+	return t
+}
+
+// HandleScrollbarDown claims a left-click on the scrollbar column: a click
+// on the thumb starts a drag; a click on the track jumps there and keeps
+// dragging (the thumb re-centers under the pointer).
+func (t ResourceTable) HandleScrollbarDown(x, y int) (ResourceTable, bool) {
+	sbX, topY, height, thumbPos, thumbSize, ok := t.scrollbarGeometry()
+	if !ok || x != sbX {
+		return t, false
+	}
+	ry := y - topY
+	if ry < 0 || ry >= height {
+		return t, false
+	}
+	if height <= thumbSize {
+		return t, true // full-track thumb: claim the click, nothing to scroll
+	}
+	if ry >= thumbPos && ry < thumbPos+thumbSize {
+		t.sbDragActive = true
+		t.sbDragGrab = ry - thumbPos
+		return t, true
+	}
+	t = t.scrollToThumbPos(ry - thumbSize/2)
+	t.sbDragActive = true
+	t.sbDragGrab = thumbSize / 2
+	return t, true
+}
+
+// HandleScrollbarDrag tracks an in-flight thumb drag at border-inner Y.
+func (t ResourceTable) HandleScrollbarDrag(y int) ResourceTable {
+	if !t.sbDragActive {
+		return t
+	}
+	_, topY, _, _, _, ok := t.scrollbarGeometry()
+	if !ok {
+		t.sbDragActive = false
+		return t
+	}
+	return t.scrollToThumbPos(y - topY - t.sbDragGrab)
+}
+
+// HandleScrollbarUp ends a thumb drag. Reports whether one was in flight.
+func (t ResourceTable) HandleScrollbarUp() (ResourceTable, bool) {
+	was := t.sbDragActive
+	t.sbDragActive = false
+	return t, was
+}
+
+// ScrollbarDragging reports an in-flight scrollbar thumb drag.
+func (t ResourceTable) ScrollbarDragging() bool { return t.sbDragActive }
 
 // SetHoverRow marks the filtered-row index under the mouse (-1 clears).
 func (t ResourceTable) SetHoverRow(idx int) ResourceTable {
