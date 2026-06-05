@@ -13,6 +13,7 @@ import (
 	appcfg "github.com/chaitanyak/klens/internal/config"
 	k8sops "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/k8s/kinds"
+	"github.com/chaitanyak/klens/internal/ui/hit"
 	"github.com/chaitanyak/klens/internal/ui/layout"
 	"github.com/chaitanyak/klens/internal/ui/modes"
 	"github.com/chaitanyak/klens/internal/ui/panels"
@@ -631,59 +632,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					"mouse click: button=%d (%s) X=%d Y=%d", mp.Button, mp.Button, mp.X, mp.Y))
 			}
 		}
-		// Click handling: nav clicks work in every mode (clicking a nav item
+		// Click handling routes through the hit-region map: resolve the screen
+		// point to a zone once, then hand the panel coordinates relative to its
+		// own outer rect. Nav clicks work in every mode (clicking a nav item
 		// while viewing logs / yaml / etc. escapes back to the table). Content
-		// clicks are only interpreted as row selection in ModeTable.
+		// clicks are only interpreted as row selection in ModeTable. In
+		// fullscreen the map contains a single ZoneContent region covering the
+		// whole terminal, so nav misrouting cannot happen by construction.
 		if click, ok := msg.(tea.MouseClickMsg); ok {
 			mouse := click.Mouse()
-			_, termH := m.layout.TermSize()
-			// In fullscreen the nav panel is hidden; clicks in its old X-band must
-			// not be misrouted to nav (which would force-exit fullscreen). The
-			// content panel fills the terminal — let the click reach the panel's
-			// own Update at the bottom of this block, which handles tab/stripe
-			// selection (logs) or wheel-equivalent gestures.
-			if !m.fullScreen && mouse.Y > 0 && mouse.Y < termH-1 {
-				navW := m.layout.Nav().Width
-				innerY := mouse.Y - 2 // header (1) + panel border top (1)
-				if mouse.X < navW {
-					// Nav click. If an item was clicked, select it; if we were
-					// in a non-table mode, return to the table view.
-					prevKind := m.nav.ActiveKind()
-					var newKind string
-					m.nav, newKind = m.nav.HandleClickAt(innerY)
-					switchedMode := m.mode != ModeTable
-					if switchedMode {
-						if m.mode == ModeLogs && m.logStreamer != nil {
-							m.logStreamer.Stop()
-							m.logStreamer = nil
-						}
-						m.mode = ModeTable
-						m.fullScreen = false
+			zone, lx, ly := m.hitMap().At(mouse.X, mouse.Y)
+			switch zone {
+			case hit.ZoneNav:
+				// Nav click. If an item was clicked, select it; if we were
+				// in a non-table mode, return to the table view.
+				// ly-1 skips the nav panel's top border.
+				prevKind := m.nav.ActiveKind()
+				var newKind string
+				m.nav, newKind = m.nav.HandleClickAt(ly - 1)
+				switchedMode := m.mode != ModeTable
+				if switchedMode {
+					if m.mode == ModeLogs && m.logStreamer != nil {
+						m.logStreamer.Stop()
+						m.logStreamer = nil
 					}
-					if newKind == "" {
-						if m.focus != FocusNav {
-							m.focus = FocusNav
-							m.nav = m.nav.SetFocused(true)
-							m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
-						}
-						if switchedMode {
-							return m, m.buildTableCmd()
-						}
-						return m, nil
-					}
-					m.focus = FocusContent
-					m.nav = m.nav.SetFocused(false)
-					m.tableCtrl = m.tableCtrl.SetFocused(true)
-					if newKind != prevKind {
-						m.tableCtrl = m.setKindAndSync(newKind)
-						m.setStatusBarKind(newKind)
-						return m, m.buildTableCmd()
+					m.mode = ModeTable
+					m.fullScreen = false
+				}
+				if newKind == "" {
+					if m.focus != FocusNav {
+						m.focus = FocusNav
+						m.nav = m.nav.SetFocused(true)
+						m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
 					}
 					if switchedMode {
 						return m, m.buildTableCmd()
 					}
 					return m, nil
 				}
+				m.focus = FocusContent
+				m.nav = m.nav.SetFocused(false)
+				m.tableCtrl = m.tableCtrl.SetFocused(true)
+				if newKind != prevKind {
+					m.tableCtrl = m.setKindAndSync(newKind)
+					m.setStatusBarKind(newKind)
+					return m, m.buildTableCmd()
+				}
+				if switchedMode {
+					return m, m.buildTableCmd()
+				}
+				return m, nil
+
+			case hit.ZoneContent:
 				// Content area click. Only the table interprets these as row
 				// selection; in other modes fall through to the panel's own
 				// mouse handling (scroll etc.).
@@ -693,27 +693,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.nav = m.nav.SetFocused(false)
 						m.tableCtrl = m.tableCtrl.SetFocused(true)
 					}
+					// ly-1 skips the table panel's top border (table hit
+					// methods take border-inner Y, outer-relative X).
 					switch click.Button {
 					case tea.MouseLeft:
-						innerX := mouse.X - navW
 						// A click on the column-header row sorts by that column
 						// (toggling asc/desc on repeat clicks). Try this before
 						// drag-select so the header click never begins a drag.
 						var sorted bool
-						m.tableCtrl, sorted = m.tableCtrl.HandleHeaderClickAt(innerX, innerY)
+						m.tableCtrl, sorted = m.tableCtrl.HandleHeaderClickAt(lx, ly-1)
 						if sorted {
 							return m, nil
 						}
 						var started bool
-						m.tableCtrl, started = m.tableCtrl.HandleMouseDown(innerX, innerY)
+						m.tableCtrl, started = m.tableCtrl.HandleMouseDown(lx, ly-1)
 						if started {
 							return m, panels.TableAutoScrollTickCmd()
 						}
 						return m, nil
 					case tea.MouseRight:
-						var hit bool
-						m.tableCtrl, hit = m.tableCtrl.HandleClickAt(innerY, false)
-						if hit {
+						var hitRow bool
+						m.tableCtrl, hitRow = m.tableCtrl.HandleClickAt(ly-1, false)
+						if hitRow {
 							m = m.openContextMenu()
 						}
 						return m, nil
@@ -721,74 +722,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// YAML viewer click — start drag-select if it lands on a YAML line.
 				if m.mode == ModeYAML && click.Button == tea.MouseLeft {
-					var ox, oy int
-					if !m.fullScreen {
-						ox = m.layout.Nav().Width
-						oy = 1
-					}
-					localX := mouse.X - ox
-					localY := mouse.Y - oy
 					var started bool
-					m.yamlViewCtrl, started = m.yamlViewCtrl.HandleMouseDown(localX, localY)
+					m.yamlViewCtrl, started = m.yamlViewCtrl.HandleMouseDown(lx, ly)
 					if started {
 						return m, panels.YAMLAutoScrollTickCmd()
 					}
 				}
-			}
-			// Logs panel click routing. Try drag-select first: HandleMouseDown
-			// only succeeds when the click lands on viewport content (auto-
-			// switches focus across stripes in split mode), so chrome clicks
-			// (tab bar, stripe borders/titles) fall through to HandleClickAt.
-			// Origin is (navW, 1) in normal layout; (0, 0) in fullscreen.
-			if click.Button == tea.MouseLeft && m.mode == ModeLogs {
-				var ox, oy int
-				if !m.fullScreen {
-					ox = m.layout.Nav().Width
-					oy = 1
-				}
-				localX := mouse.X - ox
-				localY := mouse.Y - oy
-				var started bool
-				m.logsCtrl, started = m.logsCtrl.HandleMouseDown(localX, localY)
-				if started {
-					if m.focus != FocusContent {
-						m.focus = FocusContent
-						m.nav = m.nav.SetFocused(false)
+				// Logs panel click routing. Try drag-select first: HandleMouseDown
+				// only succeeds when the click lands on viewport content (auto-
+				// switches focus across stripes in split mode), so chrome clicks
+				// (tab bar, stripe borders/titles) fall through to HandleClickAt.
+				if m.mode == ModeLogs && click.Button == tea.MouseLeft {
+					var started bool
+					m.logsCtrl, started = m.logsCtrl.HandleMouseDown(lx, ly)
+					if started {
+						if m.focus != FocusContent {
+							m.focus = FocusContent
+							m.nav = m.nav.SetFocused(false)
+						}
+						return m, panels.LogAutoScrollTickCmd()
 					}
-					return m, panels.LogAutoScrollTickCmd()
-				}
-				var hit bool
-				m.logsCtrl, hit = m.logsCtrl.HandleClickAt(localX, localY)
-				if hit {
-					if m.focus != FocusContent {
-						m.focus = FocusContent
-						m.nav = m.nav.SetFocused(false)
+					var hitChrome bool
+					m.logsCtrl, hitChrome = m.logsCtrl.HandleClickAt(lx, ly)
+					if hitChrome {
+						if m.focus != FocusContent {
+							m.focus = FocusContent
+							m.nav = m.nav.SetFocused(false)
+						}
+						return m, nil
 					}
-					return m, nil
 				}
 			}
 		}
-		// Drag/release routing for in-app drag-to-copy. HandleMouseDrag/Up are
-		// no-ops when no selection is in flight, so stray motion/release events
-		// from other contexts are harmless.
+		// Drag/release routing for in-app drag-to-copy. Coordinates are always
+		// relative to the content rect — deliberately not zone-gated, because a
+		// drag in flight must keep receiving motion outside the panel bounds to
+		// drive edge auto-scroll. HandleMouseDrag/Up are no-ops when no
+		// selection is in flight, so stray motion/release events are harmless.
 		{
-			var ox, oy int
-			if !m.fullScreen {
-				ox = m.layout.Nav().Width
-				oy = 1
-			}
-			navW := m.layout.Nav().Width
+			cr := m.contentRect()
 			switch m.mode {
 			case ModeLogs:
 				if motion, ok := msg.(tea.MouseMotionMsg); ok {
 					mp := motion.Mouse()
-					m.logsCtrl = m.logsCtrl.HandleMouseDrag(mp.X-ox, mp.Y-oy)
+					lx, ly := cr.Local(mp.X, mp.Y)
+					m.logsCtrl = m.logsCtrl.HandleMouseDrag(lx, ly)
 					return m, nil
 				}
 				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
 					mp := release.Mouse()
+					lx, ly := cr.Local(mp.X, mp.Y)
 					var status string
-					m.logsCtrl, status = m.logsCtrl.HandleMouseUp(mp.X-ox, mp.Y-oy)
+					m.logsCtrl, status = m.logsCtrl.HandleMouseUp(lx, ly)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -797,13 +782,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ModeYAML:
 				if motion, ok := msg.(tea.MouseMotionMsg); ok {
 					mp := motion.Mouse()
-					m.yamlViewCtrl = m.yamlViewCtrl.HandleMouseDrag(mp.X-ox, mp.Y-oy)
+					lx, ly := cr.Local(mp.X, mp.Y)
+					m.yamlViewCtrl = m.yamlViewCtrl.HandleMouseDrag(lx, ly)
 					return m, nil
 				}
 				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
 					mp := release.Mouse()
+					lx, ly := cr.Local(mp.X, mp.Y)
 					var status string
-					m.yamlViewCtrl, status = m.yamlViewCtrl.HandleMouseUp(mp.X-ox, mp.Y-oy)
+					m.yamlViewCtrl, status = m.yamlViewCtrl.HandleMouseUp(lx, ly)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -812,17 +799,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ModeTable:
 				if motion, ok := msg.(tea.MouseMotionMsg); ok {
 					mp := motion.Mouse()
-					innerY := mp.Y - 2
-					innerX := mp.X - navW
-					m.tableCtrl = m.tableCtrl.HandleMouseDrag(innerX, innerY)
+					lx, ly := cr.Local(mp.X, mp.Y)
+					m.tableCtrl = m.tableCtrl.HandleMouseDrag(lx, ly-1)
 					return m, nil
 				}
 				if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
 					mp := release.Mouse()
-					innerY := mp.Y - 2
-					innerX := mp.X - navW
+					lx, ly := cr.Local(mp.X, mp.Y)
 					var status string
-					m.tableCtrl, status = m.tableCtrl.HandleMouseUp(innerX, innerY)
+					m.tableCtrl, status = m.tableCtrl.HandleMouseUp(lx, ly-1)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -2405,6 +2390,33 @@ func (m Model) WheelAtBoundary(button tea.MouseButton) bool {
 // it is centered on the full terminal so it remains visible (the base view fills
 // the entire terminal height after the lipgloss v2 width/height fix, so simply
 // appending the modal below would push it off-screen).
+// hitMap builds the screen hit-region registry for the current layout state.
+// Rebuilt per mouse event — a handful of rect appends — so regions can never
+// go stale relative to the layout (herdr's recompute-per-frame pattern,
+// adapted to Bubbletea's event loop).
+func (m Model) hitMap() hit.Map {
+	var zones hit.Map
+	if m.fullScreen {
+		zones.Add(hit.ZoneContent, m.layout.Fullscreen())
+		return zones
+	}
+	zones.Add(hit.ZoneHeader, m.layout.Header())
+	zones.Add(hit.ZoneNav, m.layout.Nav())
+	zones.Add(hit.ZoneContent, m.layout.Content())
+	zones.Add(hit.ZoneStatus, m.layout.Status())
+	return zones
+}
+
+// contentRect is the content panel's outer screen rect honoring fullscreen.
+// Drag handlers use it directly (not via hitMap) because in-flight drags must
+// keep translating coordinates even when the pointer leaves the panel.
+func (m Model) contentRect() layout.Rect {
+	if m.fullScreen {
+		return m.layout.Fullscreen()
+	}
+	return m.layout.Content()
+}
+
 func (m Model) renderContent() string {
 	if m.layout.TooSmall() {
 		return renderTooSmall(m.layout)

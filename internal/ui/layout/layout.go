@@ -12,13 +12,34 @@ const (
 	PanelStatus
 )
 
-// Dimensions holds computed width/height for a panel.
-type Dimensions struct {
+// Rect is a positioned panel rectangle in absolute screen coordinates.
+// X/Y are the top-left cell; Width/Height the panel's full outer size
+// (borders included). Rect is the unit of mouse hit-testing: every
+// clickable surface resolves a screen point to a panel via Contains and
+// then works in panel-local coordinates via Local.
+type Rect struct {
+	X      int
+	Y      int
 	Width  int
 	Height int
 }
 
-// Layout computes panel dimensions from the terminal size.
+// Contains reports whether the screen point (x, y) falls inside r.
+func (r Rect) Contains(x, y int) bool {
+	return r.Width > 0 && r.Height > 0 &&
+		x >= r.X && x < r.X+r.Width &&
+		y >= r.Y && y < r.Y+r.Height
+}
+
+// Local translates the screen point (x, y) to coordinates relative to r's
+// top-left corner. Callers should check Contains first when the point must
+// be inside; drag handlers intentionally call Local on outside points to
+// drive edge auto-scroll.
+func (r Rect) Local(x, y int) (int, int) {
+	return x - r.X, y - r.Y
+}
+
+// Layout computes positioned panel rectangles from the terminal size.
 type Layout struct {
 	termW int
 	termH int
@@ -44,17 +65,23 @@ func (l Layout) Update(w, h int) Layout {
 	return l
 }
 
-func (l Layout) Nav() Dimensions {
+func (l Layout) Nav() Rect {
 	w := max(l.termW*navWidthPct/100, 18)
 	h := max(1, l.termH-headerHeight-statusHeight)
-	return Dimensions{Width: w, Height: h}
+	return Rect{X: 0, Y: headerHeight, Width: w, Height: h}
 }
 
-func (l Layout) Content() Dimensions {
+func (l Layout) Content() Rect {
 	navW := l.Nav().Width
 	w := l.termW - navW
 	h := max(1, l.termH-headerHeight-statusHeight)
-	return Dimensions{Width: w, Height: h}
+	return Rect{X: navW, Y: headerHeight, Width: w, Height: h}
+}
+
+// Fullscreen is the content rectangle when fullscreen mode hides all chrome:
+// the entire terminal.
+func (l Layout) Fullscreen() Rect {
+	return Rect{X: 0, Y: 0, Width: l.termW, Height: l.termH}
 }
 
 // TooSmall reports whether the terminal is below the minimum usable size.
@@ -67,17 +94,17 @@ func (l Layout) TermSize() (w, h int) {
 	return l.termW, l.termH
 }
 
-func (l Layout) Header() Dimensions {
-	return Dimensions{Width: l.termW, Height: headerHeight}
+func (l Layout) Header() Rect {
+	return Rect{X: 0, Y: 0, Width: l.termW, Height: headerHeight}
 }
 
-func (l Layout) Status() Dimensions {
-	return Dimensions{Width: l.termW, Height: statusHeight}
+func (l Layout) Status() Rect {
+	return Rect{X: 0, Y: max(0, l.termH-statusHeight), Width: l.termW, Height: statusHeight}
 }
 
 // InnerSize returns the usable inner dimensions of a bordered panel.
-func InnerSize(d Dimensions) (w, h int) {
-	return max(d.Width-borderPadding, 0), max(d.Height-borderPadding, 0)
+func InnerSize(r Rect) (w, h int) {
+	return max(r.Width-borderPadding, 0), max(r.Height-borderPadding, 0)
 }
 
 // JoinPanels combines left nav and right content side by side.
