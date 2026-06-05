@@ -689,6 +689,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
+			case hit.ZoneTabBar:
+				if click.Button == tea.MouseLeft {
+					return m.handleTabClick(lx)
+				}
+				return m, nil
+
 			case hit.ZoneContent:
 				// Content area click. Only the table interprets these as row
 				// selection; in other modes fall through to the panel's own
@@ -960,13 +966,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.mode != ModeTable {
-			m.mode = ModeTable
-			m.fullScreen = false
-			if m.logStreamer != nil {
-				m.logStreamer.Stop()
-				m.logStreamer = nil
-			}
-			return m, nil
+			return m.exitToTable(), nil
 		}
 		if m.focus == FocusContent {
 			m.focus = FocusNav
@@ -1215,6 +1215,132 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 	return m, cmd
+}
+
+// exitToTable leaves any detail mode and returns to the resource table,
+// stopping log streams and peeling fullscreen. Shared by esc, the Table tab,
+// and cross-mode tab jumps.
+func (m Model) exitToTable() Model {
+	m.mode = ModeTable
+	m.fullScreen = false
+	if m.logStreamer != nil {
+		m.logStreamer.Stop()
+		m.logStreamer = nil
+	}
+	return m
+}
+
+// buildTabBar assembles the mode-tab strip from current state. Called per
+// render and per hit-test — TabBar is a pure value, so strip and click
+// targets always agree.
+func (m Model) buildTabBar() panels.TabBar {
+	enabled := map[panels.TabID]bool{
+		panels.TabYAML:     true,
+		panels.TabDescribe: true,
+	}
+	if k, ok := kinds.Lookup(m.nav.ActiveKind()); ok {
+		_, enabled[panels.TabLogs] = k.(kinds.Logger)
+		_, enabled[panels.TabXRay] = k.(kinds.XRayer)
+		_, enabled[panels.TabMetrics] = k.(kinds.MetricsSupporter)
+	}
+	var active panels.TabID
+	switch m.mode {
+	case ModeYAML, ModeEditor:
+		active = panels.TabYAML
+	case ModeLogs:
+		active = panels.TabLogs
+	case ModeXRay:
+		active = panels.TabXRay
+	case ModeMetrics:
+		active = panels.TabMetrics
+	case ModeDescribe:
+		active = panels.TabDescribe
+	default:
+		active = panels.TabTable
+	}
+	return panels.TabBar{
+		Width:         m.layout.TabBar().Width,
+		Active:        active,
+		Editing:       m.mode == ModeEditor,
+		Enabled:       enabled,
+		CanFullscreen: m.mode != ModeTable && !m.fullScreen,
+	}
+}
+
+// handleTabClick routes a left-click at strip-local x. Disabled tabs give
+// explicit status-bar feedback (mirroring the Events-table pattern) instead
+// of a silent no-op; unsaved editor state routes through the confirm dialog.
+func (m Model) handleTabClick(x int) (Model, tea.Cmd) {
+	tb := m.buildTabBar()
+	id, ok := tb.TabAt(x)
+	if !ok {
+		return m, nil
+	}
+	if id == panels.TabFullscreen {
+		if m.mode != ModeTable {
+			m = m.toggleFullScreen()
+			m = m.resizePanels()
+		}
+		return m, nil
+	}
+	if !tb.IsEnabled(id) {
+		m.statusBar = m.statusBar.SetMessage(
+			panels.TabName(id) + " not supported on " + m.nav.ActiveKind())
+		return m, nil
+	}
+	if m.mode == ModeEditor {
+		if m.yamlEditCtrl.Panel().Modified() != m.yamlEditCtrl.Original() {
+			m.confirm = m.confirm.Show("Discard edits, switch to", panels.TabName(id))
+			m.pendingOp = pendingOpData{op: "discard-edits", tabTarget: id}
+			return m, nil
+		}
+	}
+	return m.jumpToTab(id)
+}
+
+// jumpToTab activates a mode tab: the existing action key applied to the
+// selected table row. Clicking the already-active tab is a no-op; jumping
+// across detail modes goes through exitToTable so streams stop and the
+// action sees the same state a key press from the table would.
+func (m Model) jumpToTab(id panels.TabID) (Model, tea.Cmd) {
+	switch id {
+	case panels.TabTable:
+		if m.mode == ModeTable {
+			return m, nil
+		}
+		return m.exitToTable(), nil
+	case panels.TabYAML:
+		if m.mode == ModeYAML {
+			return m, nil
+		}
+		m = m.exitToTable()
+		return m.actionViewYAML()
+	case panels.TabLogs:
+		if m.mode == ModeLogs {
+			return m, nil
+		}
+		m = m.exitToTable()
+		return m.actionLogs()
+	case panels.TabXRay:
+		if m.mode == ModeXRay {
+			return m, nil
+		}
+		m = m.exitToTable()
+		return m.actionXRay()
+	case panels.TabMetrics:
+		if m.mode == ModeMetrics {
+			return m, nil
+		}
+		m = m.exitToTable()
+		return m.actionMetrics()
+	case panels.TabDescribe:
+		if m.mode == ModeDescribe {
+			return m, nil
+		}
+		m = m.exitToTable()
+		return m.actionDescribe()
+	}
+	return m, nil
 }
 
 // isEventsTable reports whether the Events kind is currently displayed in
@@ -2059,9 +2185,15 @@ type pendingOpData struct {
 	name      string // single-resource ops (scale, suspend, etc.)
 	namespace string
 	targets   []deleteTarget // multi-delete
+	tabTarget panels.TabID   // discard-edits: tab to jump to after discarding
 }
 
 func (m Model) executeConfirmedOp(result widgets.ConfirmResult) (Model, tea.Cmd) {
+	// Tab-switch discard is a pure UI op — no cluster client involved.
+	if m.pendingOp.op == "discard-edits" {
+		m = m.exitToTable()
+		return m.jumpToTab(m.pendingOp.tabTarget)
+	}
 	cs, err := m.clusterMgr.ActiveClientset()
 	if err != nil {
 		m.statusBar = m.statusBar.SetMessage("no client: " + err.Error())
@@ -2408,6 +2540,7 @@ func (m Model) hitMap() hit.Map {
 	}
 	zones.Add(hit.ZoneHeader, m.layout.Header())
 	zones.Add(hit.ZoneNav, m.layout.Nav())
+	zones.Add(hit.ZoneTabBar, m.layout.TabBar())
 	zones.Add(hit.ZoneContent, m.layout.Content())
 	zones.Add(hit.ZoneStatus, m.layout.Status())
 	return zones
@@ -2484,8 +2617,11 @@ func (m Model) baseView() string {
 		return m.contentView()
 	}
 	navView := m.nav.View()
-	contentView := m.contentView()
-	middle := layout.JoinPanels(navView, contentView)
+	right := lipgloss.JoinVertical(lipgloss.Left,
+		m.buildTabBar().View(),
+		m.contentView(),
+	)
+	middle := layout.JoinPanels(navView, right)
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.header.View(),
 		middle,

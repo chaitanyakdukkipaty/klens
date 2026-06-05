@@ -48,6 +48,7 @@ type Layout struct {
 const (
 	navWidthPct   = 22 // percent of terminal width for nav
 	headerHeight  = 1  // rows
+	tabBarHeight  = 1  // rows — mode-tab strip above the content panel
 	statusHeight  = 1  // rows
 	borderPadding = 2  // lipgloss rounded border = 2 extra rows/cols
 
@@ -71,11 +72,18 @@ func (l Layout) Nav() Rect {
 	return Rect{X: 0, Y: headerHeight, Width: w, Height: h}
 }
 
+// TabBar is the one-row mode-tab strip sitting above the content panel,
+// spanning the content column (the nav keeps the full side column).
+func (l Layout) TabBar() Rect {
+	navW := l.Nav().Width
+	return Rect{X: navW, Y: headerHeight, Width: l.termW - navW, Height: tabBarHeight}
+}
+
 func (l Layout) Content() Rect {
 	navW := l.Nav().Width
 	w := l.termW - navW
-	h := max(1, l.termH-headerHeight-statusHeight)
-	return Rect{X: navW, Y: headerHeight, Width: w, Height: h}
+	h := max(1, l.termH-headerHeight-tabBarHeight-statusHeight)
+	return Rect{X: navW, Y: headerHeight + tabBarHeight, Width: w, Height: h}
 }
 
 // Fullscreen is the content rectangle when fullscreen mode hides all chrome:

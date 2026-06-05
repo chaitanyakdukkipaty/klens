@@ -7,12 +7,14 @@ import (
 )
 
 // Mirror of the app's non-fullscreen hit map at 100×40: header row 0,
-// nav 22 cols below it, content to the right, status on the last row.
+// nav 22 cols below it, tab bar row 1 right of nav, content below the tab
+// bar, status on the last row.
 func appMap() Map {
 	l := layout.New(100, 40)
 	var m Map
 	m.Add(ZoneHeader, l.Header())
 	m.Add(ZoneNav, l.Nav())
+	m.Add(ZoneTabBar, l.TabBar())
 	m.Add(ZoneContent, l.Content())
 	m.Add(ZoneStatus, l.Status())
 	return m
@@ -31,9 +33,11 @@ func TestAtResolvesZonesAndLocalCoords(t *testing.T) {
 		{"nav first cell", 0, 1, ZoneNav, 0, 0},
 		{"nav body", 5, 10, ZoneNav, 5, 9},
 		{"nav right edge", 21, 10, ZoneNav, 21, 9},
-		{"content first cell", 22, 1, ZoneContent, 0, 0},
-		{"content body", 60, 20, ZoneContent, 38, 19},
-		{"content last row above status", 60, 38, ZoneContent, 38, 37},
+		{"tab bar first cell", 22, 1, ZoneTabBar, 0, 0},
+		{"tab bar right edge", 99, 1, ZoneTabBar, 77, 0},
+		{"content first cell", 22, 2, ZoneContent, 0, 0},
+		{"content body", 60, 20, ZoneContent, 38, 18},
+		{"content last row above status", 60, 38, ZoneContent, 38, 36},
 		{"status row", 50, 39, ZoneStatus, 50, 0},
 	}
 	for _, tt := range tests {
@@ -79,7 +83,7 @@ func TestRectOf(t *testing.T) {
 	if nav.X != 0 || nav.Y != 1 || nav.Width != 22 {
 		t.Errorf("RectOf(ZoneNav) = %+v", nav)
 	}
-	if got := m.RectOf(ZoneTabBar); got != (layout.Rect{}) {
+	if got := m.RectOf(ZoneNone); got != (layout.Rect{}) {
 		t.Errorf("RectOf(absent) = %+v, want zero", got)
 	}
 }
