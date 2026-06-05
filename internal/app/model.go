@@ -70,6 +70,9 @@ type Model struct {
 	contextMenu     widgets.ContextMenu
 	pfDialog        widgets.PortForwardDialog
 	pfList          widgets.PortForwardList
+	appMenu         widgets.AppMenu
+	keysOverlay     widgets.KeybindingsOverlay
+	settings        widgets.SettingsOverlay
 	statusBar       panels.StatusBar
 	focus           FocusTarget
 	mode            ContentMode
@@ -127,6 +130,8 @@ type Model struct {
 
 	// hover is the currently rendered hover target set (see hoverState).
 	hover hoverState
+	// hoverDisabled mirrors config.DisableHover.
+	hoverDisabled bool
 
 	// pendingJumpName, when non-empty after a switchKind triggered by `o` on
 	// an Event row, asks the next buildTableCmd/refresh cycle to move the
@@ -171,11 +176,14 @@ func clearStatusAfterDelay(d time.Duration) tea.Cmd {
 // New creates the initial app model. readOnly mirrors the --readonly CLI flag;
 // the effective readonly state may also be set by the persisted config.
 func New(readOnly bool) Model {
-	// Activate the configured theme before the first render. The config is
-	// re-loaded during connect (clusterReadyMsg) for cluster prefs; reading it
-	// here too keeps theming independent of cluster connectivity.
+	// Activate the configured theme (and hover preference) before the first
+	// render. The config is re-loaded during connect (clusterReadyMsg) for
+	// cluster prefs; reading it here too keeps theming independent of
+	// cluster connectivity.
+	hoverDisabled := false
 	if cfg, err := appcfg.Load(); err == nil {
 		styles.Apply(styles.PresetByName(cfg.Theme))
+		hoverDisabled = cfg.DisableHover
 	}
 	ch := make(chan tea.Msg, 128)
 	return Model{
@@ -198,11 +206,15 @@ func New(readOnly bool) Model {
 		contextMenu:     widgets.NewContextMenu(),
 		pfDialog:        widgets.NewPortForwardDialog(),
 		pfList:          widgets.NewPortForwardList(),
+		appMenu:         widgets.NewAppMenu(),
+		keysOverlay:     widgets.NewKeybindingsOverlay(),
+		settings:        widgets.NewSettingsOverlay(),
 		pfManager:       k8sops.NewPortForwardManager(),
 		statusBar:       panels.NewStatusBar(80),
 		focus:           FocusNav,
 		mode:            ModeTable,
 		hover:           noHover,
+		hoverDisabled:   hoverDisabled,
 		msgCh:           ch,
 		namespace:       "default",
 		loading:         true,
@@ -243,6 +255,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clusterNamespaces = msg.clusterNamespaces
 		m.appConfig = msg.appConfig
 		m.readOnly = m.readOnlyFlag || msg.appConfig.ReadOnly
+		m.hoverDisabled = msg.appConfig.DisableHover
 		m.syncing = true
 		m.header = m.header.SetCluster(msg.ctx).SetNamespace(msg.ns).SetVersion(msg.version).SetReadOnly(m.readOnly)
 		m.nav = m.nav.SetFocused(true)
@@ -518,6 +531,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case widgets.AppMenuAction:
+		if msg.Picked {
+			switch msg.Item {
+			case widgets.MenuKeybindings:
+				m.keysOverlay = m.keysOverlay.Show()
+			case widgets.MenuSettings:
+				m = m.openSettings()
+			}
+		}
+		return m, nil
+
+	case widgets.SettingsChanged:
+		styles.Apply(styles.PresetByName(msg.Theme))
+		m.readOnly = m.readOnlyFlag || msg.ReadOnly
+		m.header = m.header.SetReadOnly(m.readOnly)
+		m.hoverDisabled = msg.DisableHover
+		if m.hoverDisabled {
+			m = m.applyHover(noHover)
+		}
+		m.setStatusBarKind(m.nav.ActiveKind())
+		cfg := m.appConfig
+		if cfg == nil {
+			cfg, _ = appcfg.Load()
+		}
+		if cfg != nil {
+			cfg.Theme = msg.Theme
+			cfg.ReadOnly = msg.ReadOnly
+			cfg.DisableHover = msg.DisableHover
+			if err := cfg.Save(); err != nil {
+				m.statusBar = m.statusBar.SetMessage("settings: " + err.Error())
+			}
+			m.appConfig = cfg
+		}
+		return m, nil
+
 	case widgets.SanitizeRequest:
 		if !msg.Confirmed {
 			return m, nil
@@ -725,9 +773,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						case panels.ChipNamespace:
 							return m.openNamespacePicker(), nil
 						case panels.ChipMenu:
-							// Wired to the app menu overlay (see menu task);
-							// placeholder feedback until then.
-							m.statusBar = m.statusBar.SetMessage("menu: coming soon")
+							m.appMenu = m.appMenu.Show()
 							return m, nil
 						}
 					}
@@ -1013,6 +1059,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
 			return m, nil
 		}
+	case "?":
+		// Only from the table with no filter input open — every other mode
+		// owns its printable keys. The ☰ menu reaches this overlay anywhere.
+		if m.mode == ModeTable && !m.tableCtrl.FilterActive() && !m.nav.FilterActive() {
+			m.keysOverlay = m.keysOverlay.Show()
+			return m, nil
+		}
 	case "ctrl+n":
 		return m.openNamespacePicker(), nil
 	case "ctrl+o":
@@ -1295,6 +1348,22 @@ func (m Model) openClusterPicker() Model {
 		return m
 	}
 	m.clusterPicker = m.clusterPicker.Show(m.clusterMgr.Contexts(), m.clusterMgr.ActiveContext())
+	return m
+}
+
+// openSettings shows the settings overlay with current values. The
+// read-only row edits the persisted config value; the --readonly flag
+// forces the effective state and renders the row inert.
+func (m Model) openSettings() Model {
+	names := make([]string, 0, len(styles.Presets))
+	for _, p := range styles.Presets {
+		names = append(names, p.Name)
+	}
+	cfgRO := false
+	if m.appConfig != nil {
+		cfgRO = m.appConfig.ReadOnly
+	}
+	m.settings = m.settings.Show(names, styles.Current.Name, cfgRO, m.readOnlyFlag, m.hoverDisabled)
 	return m
 }
 
@@ -2644,7 +2713,10 @@ func (m Model) anyModalVisible() bool {
 		m.sanitizeDialog.IsVisible() ||
 		m.contextMenu.IsVisible() ||
 		m.pfDialog.IsVisible() ||
-		m.pfList.IsVisible()
+		m.pfList.IsVisible() ||
+		m.appMenu.IsVisible() ||
+		m.keysOverlay.IsVisible() ||
+		m.settings.IsVisible()
 }
 
 // hitMap builds the screen hit-region registry for the current layout state.
@@ -2681,7 +2753,7 @@ var noHover = hoverState{chip: panels.ChipNone, tab: panels.TabNone, navRow: -1,
 // the hover target set (noHover during loading or under a modal).
 func (m Model) resolveHover(x, y int) hoverState {
 	h := noHover
-	if m.loading || m.anyModalVisible() {
+	if m.hoverDisabled || m.loading || m.anyModalVisible() {
 		return h
 	}
 	zone, lx, ly := m.hitMap().At(x, y)
@@ -2710,6 +2782,11 @@ func (m Model) resolveHover(x, y int) hoverState {
 // than what's currently hover-rendered. Used by the tea.WithFilter in
 // main.go to drop no-op motion events (same trick as WheelAtBoundary).
 func (m Model) HoverChanged(x, y int) bool {
+	// While an overlay is up, motion must flow so the overlay's own hover
+	// (menu/settings row follow) keeps working.
+	if m.anyModalVisible() {
+		return true
+	}
 	return m.resolveHover(x, y) != m.hover
 }
 
@@ -2775,6 +2852,18 @@ func (m Model) renderContent() string {
 
 	if m.pfList.IsVisible() {
 		return m.modalOverlay(m.pfList.View())
+	}
+
+	if m.appMenu.IsVisible() {
+		return m.modalOverlay(m.appMenu.View())
+	}
+
+	if m.keysOverlay.IsVisible() {
+		return m.modalOverlay(m.keysOverlay.View())
+	}
+
+	if m.settings.IsVisible() {
+		return m.modalOverlay(m.settings.View())
 	}
 
 	return m.baseView()
@@ -2864,6 +2953,9 @@ func (m Model) resizePanels() Model {
 
 	m.contextMenu = m.contextMenu.SetSize(termW, termH)
 	m.confirm = m.confirm.SetSize(termW, termH)
+	m.appMenu = m.appMenu.SetSize(termW, termH)
+	m.keysOverlay = m.keysOverlay.SetSize(termW, termH)
+	m.settings = m.settings.SetSize(termW, termH)
 	return m
 }
 

@@ -9,12 +9,22 @@ import (
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 )
 
+// Diff styles, rebuilt on theme switch via styles.RegisterOnApply.
 var (
-	addLine    = lipgloss.NewStyle().Foreground(appstyles.ColorRunning)
-	removeLine = lipgloss.NewStyle().Foreground(appstyles.ColorFailed)
-	ctxLine    = lipgloss.NewStyle().Foreground(appstyles.ColorDiffContext)
-	hunkHeader = lipgloss.NewStyle().Foreground(appstyles.ColorSucceeded).Bold(true)
+	addLine    lipgloss.Style
+	removeLine lipgloss.Style
+	ctxLine    lipgloss.Style
+	hunkHeader lipgloss.Style
 )
+
+func init() {
+	appstyles.RegisterOnApply(func() {
+		addLine = lipgloss.NewStyle().Foreground(appstyles.ColorRunning)
+		removeLine = lipgloss.NewStyle().Foreground(appstyles.ColorFailed)
+		ctxLine = lipgloss.NewStyle().Foreground(appstyles.ColorDiffContext)
+		hunkHeader = lipgloss.NewStyle().Foreground(appstyles.ColorSucceeded).Bold(true)
+	})
+}
 
 // DiffView renders a colored unified diff between original and modified YAML.
 func DiffView(original, modified string, width int) string {

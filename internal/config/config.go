@@ -14,6 +14,9 @@ type Config struct {
 	// Theme selects the color palette by preset name (see styles.Presets).
 	// Empty or unknown names fall back to the default theme.
 	Theme string `json:"theme,omitempty"`
+	// DisableHover turns off mouse-hover highlighting (and the AllMotion
+	// event traffic it needs).
+	DisableHover bool `json:"disable_hover,omitempty"`
 	// Namespaces maps cluster context name → manually saved namespace list.
 	Namespaces map[string][]string `json:"namespaces"`
 	// LastNamespace maps cluster context name → last active namespace.

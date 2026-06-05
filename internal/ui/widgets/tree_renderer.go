@@ -8,10 +8,18 @@ import (
 	appstyles "github.com/chaitanyak/klens/internal/ui/styles"
 )
 
+// Tree styles, rebuilt on theme switch via styles.RegisterOnApply.
 var (
-	treeKindStyle = lipgloss.NewStyle().Foreground(appstyles.ColorPrimary).Bold(true)
-	treeNameStyle = lipgloss.NewStyle().Foreground(appstyles.ColorBodyText)
+	treeKindStyle lipgloss.Style
+	treeNameStyle lipgloss.Style
 )
+
+func init() {
+	appstyles.RegisterOnApply(func() {
+		treeKindStyle = lipgloss.NewStyle().Foreground(appstyles.ColorPrimary).Bold(true)
+		treeNameStyle = lipgloss.NewStyle().Foreground(appstyles.ColorBodyText)
+	})
+}
 
 // RenderTree renders a TreeNode hierarchy using unicode box-drawing characters.
 func RenderTree(root *k8s.TreeNode) string {

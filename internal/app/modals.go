@@ -74,6 +74,16 @@ func keyPressOnly(msg tea.Msg) bool {
 	return ok
 }
 
+// keyOrMouse intercepts keyboard and mouse input but lets informer updates,
+// ticks, and async results flow past — for overlays the user may leave open.
+func keyOrMouse(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseWheelMsg, tea.MouseReleaseMsg:
+		return true
+	}
+	return false
+}
+
 // modals returns the ordered modal stack for this Model. Each Modal's
 // closures capture &m so that widget mutations performed during Update flow
 // through to the local Model the caller will return.
@@ -151,6 +161,36 @@ func (m *Model) modals() ModalStack {
 			Update: func(msg tea.Msg) tea.Cmd {
 				var cmd tea.Cmd
 				m.pfDialog, cmd = m.pfDialog.Update(msg)
+				return cmd
+			},
+		},
+		{
+			Name:      "appMenu",
+			IsVisible: m.appMenu.IsVisible,
+			Handles:   keyOrMouse,
+			Update: func(msg tea.Msg) tea.Cmd {
+				var cmd tea.Cmd
+				m.appMenu, cmd = m.appMenu.Update(msg)
+				return cmd
+			},
+		},
+		{
+			Name:      "keysOverlay",
+			IsVisible: m.keysOverlay.IsVisible,
+			Handles:   keyOrMouse,
+			Update: func(msg tea.Msg) tea.Cmd {
+				var cmd tea.Cmd
+				m.keysOverlay, cmd = m.keysOverlay.Update(msg)
+				return cmd
+			},
+		},
+		{
+			Name:      "settings",
+			IsVisible: m.settings.IsVisible,
+			Handles:   keyOrMouse,
+			Update: func(msg tea.Msg) tea.Cmd {
+				var cmd tea.Cmd
+				m.settings, cmd = m.settings.Update(msg)
 				return cmd
 			},
 		},

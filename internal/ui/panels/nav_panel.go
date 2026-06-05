@@ -13,12 +13,21 @@ import (
 )
 
 // navTitleBase, navCursorBase, navBodyBase are pre-built without Width so that
-// per-render calls only incur one copy (`.Width(w)`) instead of a full style chain.
+// per-render calls only incur one copy (`.Width(w)`) instead of a full style
+// chain. Rebuilt on theme switch via styles.RegisterOnApply.
 var (
-	navTitleBase  = lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true).PaddingLeft(1)
-	navCursorBase = lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true)
-	navBodyBase   = lipgloss.NewStyle().Foreground(styles.ColorBodyText)
+	navTitleBase  lipgloss.Style
+	navCursorBase lipgloss.Style
+	navBodyBase   lipgloss.Style
 )
+
+func init() {
+	styles.RegisterOnApply(func() {
+		navTitleBase = lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true).PaddingLeft(1)
+		navCursorBase = lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true)
+		navBodyBase = lipgloss.NewStyle().Foreground(styles.ColorBodyText)
+	})
+}
 
 // NavPanel is the left-side resource navigator: kinds grouped under
 // collapsible category headers (Workloads / Network / …). The cursor browses

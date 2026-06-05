@@ -30,11 +30,20 @@ func TableAutoScrollTickCmd() tea.Cmd {
 	})
 }
 
+// Pre-built row styles, rebuilt on theme switch via styles.RegisterOnApply.
 var (
-	tableRowCursorBase = lipgloss.NewStyle().Background(styles.ColorSelection).Foreground(styles.ColorWhite)
-	tableRowHoverBase  = lipgloss.NewStyle().Background(styles.ColorHover)
-	tableRowBase       = lipgloss.NewStyle()
+	tableRowCursorBase lipgloss.Style
+	tableRowHoverBase  lipgloss.Style
+	tableRowBase       lipgloss.Style
 )
+
+func init() {
+	styles.RegisterOnApply(func() {
+		tableRowCursorBase = lipgloss.NewStyle().Background(styles.ColorSelection).Foreground(styles.ColorWhite)
+		tableRowHoverBase = lipgloss.NewStyle().Background(styles.ColorHover)
+		tableRowBase = lipgloss.NewStyle()
+	})
+}
 
 // ContentMode controls what is shown in the content panel.
 type ContentMode int

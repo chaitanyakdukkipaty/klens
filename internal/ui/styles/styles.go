@@ -202,6 +202,20 @@ var (
 	LogPrefixStyles []lipgloss.Style
 )
 
+// onApply holds rebuild hooks registered by packages that keep their own
+// pre-built styles derived from this palette (nav, table, diff, tree…).
+// Apply invokes them after rebuilding its own exports, so a runtime theme
+// switch propagates everywhere.
+var onApply []func()
+
+// RegisterOnApply registers a derived-style rebuild hook and invokes it once
+// immediately (the active palette is already applied by the time package
+// init() functions run).
+func RegisterOnApply(f func()) {
+	onApply = append(onApply, f)
+	f()
+}
+
 // statusStyleMap holds pre-built styles keyed by Kubernetes status string.
 var statusStyleMap map[string]lipgloss.Style
 
@@ -338,6 +352,10 @@ func Apply(p Palette) {
 		"missing": failed.Faint(true),
 	}
 	statusStyleDefault = lipgloss.NewStyle().Foreground(p.StatusUnknown)
+
+	for _, f := range onApply {
+		f()
+	}
 }
 
 func init() {
