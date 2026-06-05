@@ -52,12 +52,19 @@ internal/k8s/
 internal/config/config.go     → persisted user preferences (namespace lists, last active namespace per cluster,
                                 read_only flag); stored at ~/.config/klens/config.json
 internal/ui/
-  layout/layout.go            → panel sizing from terminal dimensions
-  panels/                     → header, status_bar, nav_panel, resource_table, yaml_viewer, yaml_editor,
+  layout/layout.go            → positioned panel rects (Rect{X,Y,Width,Height}) from terminal dimensions;
+                                Header / Nav / TabBar / Content / Status / Fullscreen
+  hit/hit.go                  → hit-region registry: zones (header/nav/tabbar/content/status) → local coords;
+                                rebuilt per mouse event from the live layout (model.hitMap)
+  keymap/keymap.go            → labels-only keybinding catalog (renders the ? overlay; dispatch stays in handlers)
+  panels/                     → header (clickable chips + ☰), tab_bar (mode tabs), status_bar, nav_panel
+                                (grouped, collapsible), resource_table, yaml_viewer, yaml_editor,
                                 describe_viewer, log_viewer, xray_panel, metrics_panel
   widgets/                    → sparkline, diff_viewer, tree_renderer, confirm_dialog, scale_dialog,
-                                namespace_picker, cluster_picker
-  styles/styles.go            → Lipgloss style definitions (Kubernetes blue theme)
+                                namespace_picker, cluster_picker, app_menu, keybindings_overlay,
+                                settings_overlay
+  styles/styles.go            → semantic Palette + presets (klens-dark, catppuccin-mocha); exported styles
+                                rebuilt by styles.Apply; derived package styles re-register via RegisterOnApply
 ```
 
 ## Key Conventions
@@ -77,6 +84,13 @@ internal/ui/
 - **Resource table scrollbar**: `ResourceTable.View()` reserves the rightmost inner column for a `renderScrollbar` thumb driven by `scrollStart()` over `len(t.filtered)` — works for both key navigation and mouse-wheel cursor moves. The title also appends a `i/N · P%` muted label via `cursorPositionLabel()`.
 - **Row ordering & sort**: `ResourceTable.sortRows()` (called by `WithRows` and the sort keys) is the single sort site. Default order is k9s-parity: newest-first for time-stamped kinds (`ResourceRow.SortByTime`, only Event today), else natural `(namespace, name)` via `k8s.RowLess` — natural so `pod-2` precedes `pod-10`, with the fqn as a total-order tie-break so refreshes don't reorder. Interactive column sort: `shift+→` (alias `>`) cycles `sortColIdx` forward (−1 = default), `shift+←` cycles it backward (`cycleSortColumnBack`); `shift+↑` / `shift+↓` force ascending / descending on the active column (`setSortDir`), while `<` flips it (`toggleSortDir`); all reset on kind switch. (Shift, not ctrl: macOS reserves ctrl+arrows for Spaces / Mission Control, so they never reach the terminal.) Clicking a column header (`HandleHeaderClickAt`, routed from the left-click handler in `model.go` before drag-select) sorts by that column — a click on the already-active column toggles direction, a click on another column selects it ascending. `columnAtX` maps the click's inner-X to a column using `headerColTextOffset` (1 border + 1 `TableHeader` left-pad) and `computeColWidths`, folding each trailing separator into the preceding column's hit-area. The active column compares via `k8s.CellCompare(col.SortType, a, b)` (ANSI-stripped), tie-breaking back to `RowLess`. `k8s.Column.SortType` (`SortString` default / `SortTime` / `SortNumber` / `SortCapacity`) is a per-column opt-in — set it on a column to make the sort compare that column by duration/number/quantity instead of raw text; the header shows a `▲`/`▼` arrow and the title a `· sort COL ▲` label.
 - **klog suppression**: klog is silenced at startup via `klog.SetOutput(io.Discard)` — suppress before any client-go initialization to avoid noisy stderr.
+- **Mouse routing**: all clicks resolve through `m.hitMap().At(x, y)` → (zone, panel-local coords); never hand-compute offsets at a call site. Panels receive coordinates relative to their outer rect (the table additionally takes border-inner Y, i.e. `ly-1`). Drag continuation deliberately bypasses the zone gate (`m.contentRect().Local`) so in-flight drags keep tracking outside the panel.
+- **Hover**: `tea.MouseModeAllMotion` + the main.go `tea.WithFilter` dropping motion events whose `resolveHover` target set is unchanged. Hover is render-only (header chips underline, tabs tint, nav/table rows background-tint via `Palette.Hover`); suppressed while loading, under modals, or when `disable_hover` is set in config.json.
+- **Tab bar**: `panels.TabBar` is a pure value built per render/hit-test by `buildTabBar()`; `segments()` is shared by View and TabAt so pixels and click targets can't drift. Tab click = the matching action key on the selected row; Table tab = esc; unsupported tabs dim via capability interfaces; multi-selection dims every single-resource view (only Logs composes); the editor adds a ● badge on the YAML tab and dirty switches confirm via the `discard-edits` pending op.
+- **Theming**: never hardcode hex in panels/widgets — add a semantic role to `styles.Palette`. Pre-built package-level styles derived from palette colors must be rebuilt inside a `styles.RegisterOnApply(func(){…})` hook or they go stale on a live theme switch (Settings → Theme).
+- **Nav groups**: `kinds.Meta.Group` is required (Workloads / Network / Config / Storage / Access / Cluster / Helm); the shim copies it to `ResourceDescriptor.NavGroup` and the sidebar builds its collapsible sections from it. Group fold/unfold is self-contained — it never moves focus or exits the current mode. Only the active kind shows a live count/fault dot (no informers for inactive kinds).
+- **Overlays on the modal stack**: long-lived overlays (☰ menu, keybindings, settings, pf list) register with the `keyOrMouse` / `keyPressOnly` Handles predicate so informer updates and ticks flow past while they're open; only short-lived fully-blocking dialogs (confirm, scale) take every message.
+- **Settings persistence**: config.json keys `theme`, `read_only`, `disable_hover`; `widgets.SettingsChanged` carries the full snapshot, the model applies + saves. The `--readonly` flag forces the effective state and renders the settings row inert.
 
 ## Keyboard Shortcuts
 
@@ -110,8 +124,17 @@ internal/ui/
 | `shift+↑` / `shift+↓` | sort the active column ascending / descending (no-op in default order); `<` flips direction |
 | click column header | sort by that column; click again to toggle asc/desc |
 | `:` | command palette (TODO) |
+| `?` | keybindings overlay (from table; also via ☰ menu) |
+| click `⎈ cluster ▾` / `ns ▾` | open cluster / namespace picker (header chips) |
+| click `☰` | app menu: Keybindings, Settings (theme / read-only / hover) |
+| click mode tab | switch view (Table·esc YAML·y Logs·l X-Ray·x Metrics·m Describe·d); `[⛶]` fullscreen |
+| click/drag scrollbar | jump / drag-scroll the table |
 | `esc` | back to table (or peel log viewer state) |
 | `q` | quit |
+
+The footer never lists y/l/x/m/d — those live in the tab bar. Sidebar groups:
+`h/←` fold, `l/→` unfold, `enter`/`space` toggle on a header; cursor on a
+header doesn't change the active kind.
 
 ### Describe viewer
 
@@ -169,7 +192,8 @@ that would otherwise reach the dispatch helpers.
 
 ## Adding a New Resource Type
 
-Create `internal/k8s/kinds/<kind>.go`. Implement `Meta()`, `Columns()` (with a
+Create `internal/k8s/kinds/<kind>.go`. Implement `Meta()` (including the
+required `Group` — the sidebar category), `Columns()` (with a
 `Render func(runtime.Object, k8s.RowContext) string` per column), and
 `Fetch()`. `List(c)` collapses to a one-liner — `return listVia(k, c)` — for
 every kind whose read path is the standard Lister; an explicit List body is
