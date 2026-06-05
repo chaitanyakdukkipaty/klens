@@ -328,6 +328,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshMsg:
 		rows := m.listRows(m.nav.ActiveKind())
+		// Sidebar count + fault dot reflect the unfiltered kind population.
+		m.nav = m.nav.SetActiveCounts(len(rows), anyFaultRow(rows))
 		rows = m.maybeFaultsFilter(rows)
 		m.tableCtrl = m.tableCtrl.WithRows(rows)
 		m = m.maybeApplyPendingJump()
@@ -655,7 +657,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// ly-1 skips the nav panel's top border.
 				prevKind := m.nav.ActiveKind()
 				var newKind string
-				m.nav, newKind = m.nav.HandleClickAt(ly - 1)
+				var toggled bool
+				m.nav, newKind, toggled = m.nav.HandleClickAt(ly - 1)
+				if toggled {
+					// Group fold/unfold is self-contained: no focus change,
+					// no mode exit.
+					return m, nil
+				}
 				switchedMode := m.mode != ModeTable
 				if switchedMode {
 					if m.mode == ModeLogs && m.logStreamer != nil {
@@ -1107,6 +1115,18 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	case "enter", "right":
 		if m.focus == FocusNav {
+			// On a group header, enter/right folds/unfolds instead of
+			// switching focus to the table.
+			if m.nav.CursorOnGroup() {
+				if msg.String() == "enter" {
+					m.nav = m.nav.ToggleCursorGroup()
+				} else {
+					var cmd tea.Cmd
+					m.nav, cmd = m.nav.Update(msg)
+					return m, cmd
+				}
+				return m, nil
+			}
 			m.focus = FocusContent
 			m.nav = m.nav.SetFocused(false)
 			m.tableCtrl = m.tableCtrl.SetFocused(true)
@@ -1373,6 +1393,18 @@ func (m Model) jumpToTab(id panels.TabID) (Model, tea.Cmd) {
 		return m.actionDescribe()
 	}
 	return m, nil
+}
+
+// anyFaultRow reports whether any row carries a fault-class status (the
+// same statuses the table styles red). Drives the sidebar fault dot.
+func anyFaultRow(rows []k8sops.ResourceRow) bool {
+	for _, r := range rows {
+		switch r.Status {
+		case "Failed", "Error", "CrashLoopBackOff", "OOMKilled", "False":
+			return true
+		}
+	}
+	return false
 }
 
 // isEventsTable reports whether the Events kind is currently displayed in

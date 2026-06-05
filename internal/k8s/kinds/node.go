@@ -19,6 +19,7 @@ type node struct{}
 func (node) Meta() Meta {
 	return Meta{
 		Kind:       "Node",
+		Group:      "Cluster",
 		Plural:     "nodes",
 		Aliases:    []string{"no"},
 		Namespaced: false,

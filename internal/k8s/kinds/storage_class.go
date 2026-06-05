@@ -17,6 +17,7 @@ type storageClass struct{}
 func (storageClass) Meta() Meta {
 	return Meta{
 		Kind:       "StorageClass",
+		Group:      "Storage",
 		Plural:     "storageclasses",
 		Aliases:    []string{"sc"},
 		Namespaced: false,

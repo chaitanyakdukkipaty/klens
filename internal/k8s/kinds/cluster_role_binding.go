@@ -17,6 +17,7 @@ type clusterRoleBinding struct{}
 func (clusterRoleBinding) Meta() Meta {
 	return Meta{
 		Kind:       "ClusterRoleBinding",
+		Group:      "Access",
 		Plural:     "clusterrolebindings",
 		Aliases:    []string{"crb"},
 		Namespaced: false,

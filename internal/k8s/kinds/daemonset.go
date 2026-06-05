@@ -19,6 +19,7 @@ type daemonSet struct{}
 func (daemonSet) Meta() Meta {
 	return Meta{
 		Kind:       "DaemonSet",
+		Group:      "Workloads",
 		Plural:     "daemonsets",
 		Aliases:    []string{"ds"},
 		Namespaced: true,

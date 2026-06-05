@@ -17,6 +17,7 @@ type configMap struct{}
 func (configMap) Meta() Meta {
 	return Meta{
 		Kind:       "ConfigMap",
+		Group:      "Config",
 		Plural:     "configmaps",
 		Aliases:    []string{"cm"},
 		Namespaced: true,

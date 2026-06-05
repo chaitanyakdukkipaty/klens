@@ -18,6 +18,7 @@ type namespace struct{}
 func (namespace) Meta() Meta {
 	return Meta{
 		Kind:       "Namespace",
+		Group:      "Cluster",
 		Plural:     "namespaces",
 		Aliases:    []string{"ns"},
 		Namespaced: false,

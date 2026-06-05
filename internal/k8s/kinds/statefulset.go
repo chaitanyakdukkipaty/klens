@@ -19,6 +19,7 @@ type statefulSet struct{}
 func (statefulSet) Meta() Meta {
 	return Meta{
 		Kind:       "StatefulSet",
+		Group:      "Workloads",
 		Plural:     "statefulsets",
 		Aliases:    []string{"sts"},
 		Namespaced: true,

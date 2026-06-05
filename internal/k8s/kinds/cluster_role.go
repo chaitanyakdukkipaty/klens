@@ -16,6 +16,7 @@ type clusterRole struct{}
 func (clusterRole) Meta() Meta {
 	return Meta{
 		Kind:       "ClusterRole",
+		Group:      "Access",
 		Plural:     "clusterroles",
 		Aliases:    []string{"cr"},
 		Namespaced: false,

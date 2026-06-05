@@ -24,6 +24,7 @@ type pod struct{}
 func (pod) Meta() Meta {
 	return Meta{
 		Kind:       "Pod",
+		Group:      "Workloads",
 		Plural:     "pods",
 		Aliases:    []string{"po"},
 		Namespaced: true,

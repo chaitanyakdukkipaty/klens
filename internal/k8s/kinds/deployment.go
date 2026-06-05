@@ -20,6 +20,7 @@ type deployment struct{}
 func (deployment) Meta() Meta {
 	return Meta{
 		Kind:       "Deployment",
+		Group:      "Workloads",
 		Plural:     "deployments",
 		Aliases:    []string{"deploy", "dp"},
 		Namespaced: true,

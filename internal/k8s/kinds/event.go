@@ -25,6 +25,7 @@ type event struct{}
 func (event) Meta() Meta {
 	return Meta{
 		Kind:       "Event",
+		Group:      "Cluster",
 		Plural:     "events",
 		Aliases:    []string{"ev"},
 		Namespaced: true,

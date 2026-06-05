@@ -21,6 +21,7 @@ type replicaSet struct{}
 func (replicaSet) Meta() Meta {
 	return Meta{
 		Kind:       "ReplicaSet",
+		Group:      "Workloads",
 		Plural:     "replicasets",
 		Aliases:    []string{"rs"},
 		Namespaced: true,

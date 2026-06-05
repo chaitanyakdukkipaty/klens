@@ -60,7 +60,10 @@ type ResourceDescriptor struct {
 	APIVersion string
 	Namespaced bool
 	Aliases    []string
-	Columns    []Column
+	// NavGroup is the sidebar category (kinds.Meta.Group): Workloads /
+	// Network / Config / Storage / Access / Cluster / Helm.
+	NavGroup string
+	Columns  []Column
 
 	// Behavior — populated via SetHandlers, optional per kind.
 	ListRows  ListRowsFunc

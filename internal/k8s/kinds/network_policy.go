@@ -16,6 +16,7 @@ type networkPolicy struct{}
 func (networkPolicy) Meta() Meta {
 	return Meta{
 		Kind:       "NetworkPolicy",
+		Group:      "Network",
 		Plural:     "networkpolicies",
 		Aliases:    []string{"netpol"},
 		Namespaced: true,

@@ -18,6 +18,7 @@ type ingress struct{}
 func (ingress) Meta() Meta {
 	return Meta{
 		Kind:       "Ingress",
+		Group:      "Network",
 		Plural:     "ingresses",
 		Aliases:    []string{"ing"},
 		Namespaced: true,

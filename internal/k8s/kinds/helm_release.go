@@ -27,6 +27,7 @@ var helmReleaseDefaultGVR = schema.GroupVersionResource{
 func (helmRelease) Meta() Meta {
 	return Meta{
 		Kind:       "HelmRelease",
+		Group:      "Helm",
 		Plural:     "helmreleases",
 		Aliases:    []string{"hr"},
 		Namespaced: true,

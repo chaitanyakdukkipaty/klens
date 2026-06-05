@@ -17,6 +17,7 @@ type secret struct{}
 func (secret) Meta() Meta {
 	return Meta{
 		Kind:       "Secret",
+		Group:      "Config",
 		Plural:     "secrets",
 		Aliases:    []string{"sec"},
 		Namespaced: true,

@@ -18,6 +18,7 @@ type cronJob struct{}
 func (cronJob) Meta() Meta {
 	return Meta{
 		Kind:       "CronJob",
+		Group:      "Workloads",
 		Plural:     "cronjobs",
 		Aliases:    []string{"cj"},
 		Namespaced: true,

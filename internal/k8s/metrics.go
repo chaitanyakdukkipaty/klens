@@ -15,8 +15,8 @@ const metricsSamples = 20
 
 // ResourceMetrics holds CPU and memory time-series for one resource.
 type ResourceMetrics struct {
-	Name      string
-	Namespace string
+	Name       string
+	Namespace  string
 	CPUSamples []float64 // millicores
 	MEMSamples []float64 // bytes
 	CPULatest  float64

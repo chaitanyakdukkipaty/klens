@@ -17,6 +17,7 @@ type job struct{}
 func (job) Meta() Meta {
 	return Meta{
 		Kind:       "Job",
+		Group:      "Workloads",
 		Plural:     "jobs",
 		Aliases:    []string{"jo"},
 		Namespaced: true,

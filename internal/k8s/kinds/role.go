@@ -16,6 +16,7 @@ type role struct{}
 func (role) Meta() Meta {
 	return Meta{
 		Kind:       "Role",
+		Group:      "Access",
 		Plural:     "roles",
 		Aliases:    []string{"role"},
 		Namespaced: true,

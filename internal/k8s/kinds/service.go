@@ -18,6 +18,7 @@ type service struct{}
 func (service) Meta() Meta {
 	return Meta{
 		Kind:       "Service",
+		Group:      "Network",
 		Plural:     "services",
 		Aliases:    []string{"svc"},
 		Namespaced: true,

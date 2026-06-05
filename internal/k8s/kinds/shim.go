@@ -27,6 +27,7 @@ func legacyDescriptorFrom(k Kind) k8s.ResourceDescriptor {
 		Plural:     m.Plural,
 		Aliases:    m.Aliases,
 		Namespaced: m.Namespaced,
+		NavGroup:   m.Group,
 		APIGroup:   m.GVR.Group,
 		APIVersion: m.GVR.Version,
 		Columns:    k.Columns(),

@@ -18,6 +18,7 @@ type serviceAccount struct{}
 func (serviceAccount) Meta() Meta {
 	return Meta{
 		Kind:       "ServiceAccount",
+		Group:      "Access",
 		Plural:     "serviceaccounts",
 		Aliases:    []string{"sa"},
 		Namespaced: true,

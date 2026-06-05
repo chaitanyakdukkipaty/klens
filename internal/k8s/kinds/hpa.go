@@ -16,6 +16,7 @@ type horizontalPodAutoscaler struct{}
 func (horizontalPodAutoscaler) Meta() Meta {
 	return Meta{
 		Kind:       "HorizontalPodAutoscaler",
+		Group:      "Config",
 		Plural:     "horizontalpodautoscalers",
 		Aliases:    []string{"hpa"},
 		Namespaced: true,

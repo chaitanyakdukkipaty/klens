@@ -16,6 +16,7 @@ type roleBinding struct{}
 func (roleBinding) Meta() Meta {
 	return Meta{
 		Kind:       "RoleBinding",
+		Group:      "Access",
 		Plural:     "rolebindings",
 		Aliases:    []string{"rb"},
 		Namespaced: true,

@@ -17,6 +17,7 @@ type endpoints struct{}
 func (endpoints) Meta() Meta {
 	return Meta{
 		Kind:       "Endpoints",
+		Group:      "Network",
 		Plural:     "endpoints",
 		Aliases:    []string{"ep"},
 		Namespaced: true,

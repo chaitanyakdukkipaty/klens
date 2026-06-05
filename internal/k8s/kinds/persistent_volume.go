@@ -17,6 +17,7 @@ type persistentVolume struct{}
 func (persistentVolume) Meta() Meta {
 	return Meta{
 		Kind:       "PersistentVolume",
+		Group:      "Storage",
 		Plural:     "persistentvolumes",
 		Aliases:    []string{"pv"},
 		Namespaced: false,
