@@ -1196,14 +1196,30 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.tableCtrl = m.tableCtrl.SetFocused(false).ClearSelection()
 		return m, nil
 	case "y":
+		if m.multiSelectBlocks(panels.TabYAML) {
+			m.statusBar = m.statusBar.SetMessage("YAML shows a single resource — esc clears the selection")
+			return m, nil
+		}
 		return m.actionViewYAML()
 	case "l":
 		return m.actionLogs()
 	case "x":
+		if m.multiSelectBlocks(panels.TabXRay) {
+			m.statusBar = m.statusBar.SetMessage("X-Ray shows a single resource — esc clears the selection")
+			return m, nil
+		}
 		return m.actionXRay()
 	case "m":
+		if m.multiSelectBlocks(panels.TabMetrics) {
+			m.statusBar = m.statusBar.SetMessage("Metrics shows a single resource — esc clears the selection")
+			return m, nil
+		}
 		return m.actionMetrics()
 	case "d":
+		if m.multiSelectBlocks(panels.TabDescribe) {
+			m.statusBar = m.statusBar.SetMessage("Describe shows a single resource — esc clears the selection")
+			return m, nil
+		}
 		return m.actionDescribe()
 	case "ctrl+d":
 		if m.isEventsTable() {
@@ -1308,6 +1324,15 @@ func (m Model) buildTabBar() panels.TabBar {
 		_, enabled[panels.TabXRay] = k.(kinds.XRayer)
 		_, enabled[panels.TabMetrics] = k.(kinds.MetricsSupporter)
 	}
+	// Multi-select composes only with Logs (multi-pod streaming); every
+	// other view targets a single resource, so they dim while a
+	// multi-selection is active.
+	if m.tableCtrl.SelectionCount() > 1 {
+		enabled[panels.TabYAML] = false
+		enabled[panels.TabXRay] = false
+		enabled[panels.TabMetrics] = false
+		enabled[panels.TabDescribe] = false
+	}
 	var active panels.TabID
 	switch m.mode {
 	case ModeYAML, ModeEditor:
@@ -1333,6 +1358,19 @@ func (m Model) buildTabBar() panels.TabBar {
 	}
 }
 
+// multiSelectBlocks reports whether an active multi-selection blocks the
+// given single-resource view tab (multi-select composes only with Logs).
+func (m Model) multiSelectBlocks(id panels.TabID) bool {
+	if m.tableCtrl.SelectionCount() <= 1 {
+		return false
+	}
+	switch id {
+	case panels.TabYAML, panels.TabXRay, panels.TabMetrics, panels.TabDescribe:
+		return true
+	}
+	return false
+}
+
 // handleTabClick routes a left-click at strip-local x. Disabled tabs give
 // explicit status-bar feedback (mirroring the Events-table pattern) instead
 // of a silent no-op; unsaved editor state routes through the confirm dialog.
@@ -1350,8 +1388,13 @@ func (m Model) handleTabClick(x int) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if !tb.IsEnabled(id) {
-		m.statusBar = m.statusBar.SetMessage(
-			panels.TabName(id) + " not supported on " + m.nav.ActiveKind())
+		if m.multiSelectBlocks(id) {
+			m.statusBar = m.statusBar.SetMessage(
+				panels.TabName(id) + " shows a single resource — esc clears the selection")
+		} else {
+			m.statusBar = m.statusBar.SetMessage(
+				panels.TabName(id) + " not supported on " + m.nav.ActiveKind())
+		}
 		return m, nil
 	}
 	if m.mode == ModeEditor {
