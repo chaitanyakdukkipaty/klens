@@ -695,6 +695,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 
+			case hit.ZoneHeader:
+				if click.Button == tea.MouseLeft {
+					if chip, ok := m.header.ChipAt(lx); ok {
+						switch chip {
+						case panels.ChipCluster:
+							return m.openClusterPicker(), nil
+						case panels.ChipNamespace:
+							return m.openNamespacePicker(), nil
+						case panels.ChipMenu:
+							// Wired to the app menu overlay (see menu task);
+							// placeholder feedback until then.
+							m.statusBar = m.statusBar.SetMessage("menu: coming soon")
+							return m, nil
+						}
+					}
+				}
+				return m, nil
+
 			case hit.ZoneContent:
 				// Content area click. Only the table interprets these as row
 				// selection; in other modes fall through to the panel's own
@@ -975,25 +993,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 	case "ctrl+n":
-		if m.clusterMgr != nil {
-			clusterNs := m.clusterNamespaces
-			if len(clusterNs) == 0 && m.watcher != nil {
-				for _, ns := range k8sops.ListAs[*corev1.Namespace](m.watcher, "Namespace", "") {
-					clusterNs = append(clusterNs, ns.Name)
-				}
-			}
-			savedNs := []string(nil)
-			if m.appConfig != nil {
-				savedNs = m.appConfig.SavedNamespaces(m.clusterMgr.ActiveContext())
-			}
-			m.namespacePicker = m.namespacePicker.Show(clusterNs, savedNs)
-		}
-		return m, nil
+		return m.openNamespacePicker(), nil
 	case "ctrl+o":
-		if m.clusterMgr != nil {
-			m.clusterPicker = m.clusterPicker.Show(m.clusterMgr.Contexts(), m.clusterMgr.ActiveContext())
-		}
-		return m, nil
+		return m.openClusterPicker(), nil
 	case "ctrl+f":
 		// PF list modal is global — works in any mode, regardless of focus.
 		// The log viewer also binds ctrl+f, but only while in ModeLogs, so we
@@ -1215,6 +1217,36 @@ func (m Model) handleTableKeys(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.tableCtrl, cmd = m.tableCtrl.Step(msg)
 	return m, cmd
+}
+
+// openNamespacePicker shows the namespace picker (ctrl+n and the header
+// namespace chip share this path).
+func (m Model) openNamespacePicker() Model {
+	if m.clusterMgr == nil {
+		return m
+	}
+	clusterNs := m.clusterNamespaces
+	if len(clusterNs) == 0 && m.watcher != nil {
+		for _, ns := range k8sops.ListAs[*corev1.Namespace](m.watcher, "Namespace", "") {
+			clusterNs = append(clusterNs, ns.Name)
+		}
+	}
+	savedNs := []string(nil)
+	if m.appConfig != nil {
+		savedNs = m.appConfig.SavedNamespaces(m.clusterMgr.ActiveContext())
+	}
+	m.namespacePicker = m.namespacePicker.Show(clusterNs, savedNs)
+	return m
+}
+
+// openClusterPicker shows the kube-context picker (ctrl+o and the header
+// cluster chip share this path).
+func (m Model) openClusterPicker() Model {
+	if m.clusterMgr == nil {
+		return m
+	}
+	m.clusterPicker = m.clusterPicker.Show(m.clusterMgr.Contexts(), m.clusterMgr.ActiveContext())
+	return m
 }
 
 // exitToTable leaves any detail mode and returns to the resource table,
