@@ -139,9 +139,11 @@ func (m AppMenu) View() string {
 				Width(inner).Render(line))
 		}
 	}
+	// lipgloss v2 Width includes the border frame: the box is appMenuWidth
+	// cells total, leaving appMenuWidth-2 for the rows rendered above.
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(appstyles.ColorPrimary).
-		Width(appMenuWidth - 2).
+		Width(appMenuWidth).
 		Render(strings.Join(rows, "\n"))
 }

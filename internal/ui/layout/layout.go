@@ -43,6 +43,10 @@ func (r Rect) Local(x, y int) (int, int) {
 type Layout struct {
 	termW int
 	termH int
+	// dockH is the terminal dock band's height in rows (0 = no dock). The
+	// dock sits between the middle section and the status bar, full width;
+	// nav / tab bar / content give up that many rows.
+	dockH int
 }
 
 const (
@@ -51,6 +55,10 @@ const (
 	tabBarHeight  = 1  // rows — mode-tab strip above the content panel
 	statusHeight  = 1  // rows
 	borderPadding = 2  // lipgloss rounded border = 2 extra rows/cols
+
+	dockHeightPct = 40 // percent of the middle band for the terminal dock
+	minDockHeight = 8  // border (2) + tab bar (1) + a usable shell viewport
+	minContentH   = 8  // rows the content panel keeps when the dock is open
 
 	MinTermWidth  = 60 // minimum usable terminal width
 	MinTermHeight = 18 // minimum usable terminal height
@@ -66,9 +74,52 @@ func (l Layout) Update(w, h int) Layout {
 	return l
 }
 
+// WithDockHeight sets the terminal dock band height (0 hides it).
+func (l Layout) WithDockHeight(h int) Layout {
+	l.dockH = max(0, h)
+	return l
+}
+
+// middleHeight is the band between header and status bar.
+func (l Layout) middleHeight() int {
+	return max(1, l.termH-headerHeight-statusHeight)
+}
+
+// DockHeightFor computes the dock band height for the current terminal size:
+// dockHeightPct of the middle band, clamped so the content keeps minContentH
+// rows; the full middle band when maximized.
+func (l Layout) DockHeightFor(maximized bool) int {
+	middleH := l.middleHeight()
+	if maximized {
+		return middleH
+	}
+	h := middleH * dockHeightPct / 100
+	if h < minDockHeight {
+		h = minDockHeight
+	}
+	if h > middleH-minContentH {
+		h = middleH - minContentH
+	}
+	return max(0, h)
+}
+
+// Dock is the terminal dock band: full width, directly above the status bar.
+// Zero Rect when no dock is set.
+func (l Layout) Dock() Rect {
+	if l.dockH <= 0 {
+		return Rect{}
+	}
+	return Rect{
+		X:      0,
+		Y:      max(headerHeight, l.termH-statusHeight-l.dockH),
+		Width:  l.termW,
+		Height: min(l.dockH, l.middleHeight()),
+	}
+}
+
 func (l Layout) Nav() Rect {
 	w := max(l.termW*navWidthPct/100, 18)
-	h := max(1, l.termH-headerHeight-statusHeight)
+	h := max(1, l.termH-headerHeight-statusHeight-l.dockH)
 	return Rect{X: 0, Y: headerHeight, Width: w, Height: h}
 }
 
@@ -82,7 +133,7 @@ func (l Layout) TabBar() Rect {
 func (l Layout) Content() Rect {
 	navW := l.Nav().Width
 	w := l.termW - navW
-	h := max(1, l.termH-headerHeight-tabBarHeight-statusHeight)
+	h := max(1, l.termH-headerHeight-tabBarHeight-statusHeight-l.dockH)
 	return Rect{X: navW, Y: headerHeight + tabBarHeight, Width: w, Height: h}
 }
 

@@ -59,9 +59,10 @@ type LogTarget struct {
 	Container string
 }
 
-// Attacher opens an interactive exec session against a pod. Returns a
-// tea.Cmd because the actual session is asynchronous and may either take
-// over the screen (tea.Exec) or spawn a tmux window (TmuxAttachWindowCmd).
+// Attacher marks kinds that support interactive exec sessions. The live
+// attach path is driven by the root model (model.actionAttach → an embedded
+// termsession dock tab) because the session registry and dock layout live
+// there; this interface gates the `a` key and its UI hints.
 type Attacher interface {
 	Kind
 	Attach(c Context, ns, name string) tea.Cmd

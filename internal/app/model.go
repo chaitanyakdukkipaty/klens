@@ -13,6 +13,7 @@ import (
 	appcfg "github.com/chaitanyak/klens/internal/config"
 	k8sops "github.com/chaitanyak/klens/internal/k8s"
 	"github.com/chaitanyak/klens/internal/k8s/kinds"
+	"github.com/chaitanyak/klens/internal/k8s/termsession"
 	"github.com/chaitanyak/klens/internal/ui/hit"
 	"github.com/chaitanyak/klens/internal/ui/layout"
 	"github.com/chaitanyak/klens/internal/ui/modes"
@@ -82,6 +83,20 @@ type Model struct {
 	// ModeYAML / ModeEditor / ModeLogs / ModeXRay / ModeMetrics. Reset to
 	// false whenever the user returns to ModeTable.
 	fullScreen bool
+
+	// Embedded terminal dock state. The dock band renders between the middle
+	// section and the status bar whenever sessions exist and it isn't hidden.
+	// dockFocus routes ALL keyboard input to the active session except the
+	// dock escape set (see handleDockKey); it is an input layer on top of the
+	// nav/content focus, not a FocusTarget.
+	sessions      []*termsession.Session
+	activeSession int // index into sessions; -1 when none
+	dockFocus     bool
+	dockMaximized bool
+	dockHidden    bool // hidden via alt+h while sessions keep running
+	// lastDockCtrlC stamps the most recent ctrl+c forwarded to the focused
+	// terminal; a second press inside dockKillWindow kills the tab.
+	lastDockCtrlC time.Time
 
 	// Pending operation waiting for confirm dialog
 	pendingOp pendingOpData
@@ -213,6 +228,7 @@ func New(readOnly bool) Model {
 		statusBar:       panels.NewStatusBar(80),
 		focus:           FocusNav,
 		mode:            ModeTable,
+		activeSession:   -1,
 		hover:           noHover,
 		hoverDisabled:   hoverDisabled,
 		msgCh:           ch,
@@ -501,22 +517,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fullScreen = false
 		return m, m.buildTableCmd()
 
-	case k8sops.AttachFinishedMsg:
-		if msg.Err != nil {
-			m.statusMsg = fmt.Sprintf("attach %s: %v", msg.Pod, msg.Err)
-			m.statusBar = m.statusBar.SetMessage(m.statusMsg)
-			return m, nil
-		}
-		m.statusMsg = fmt.Sprintf("attach session ended: %s", msg.Pod)
-		m.statusBar = m.statusBar.SetMessage(m.statusMsg)
-		return m, clearStatusAfterDelay(5 * time.Second)
+	case termsession.OutputMsg:
+		// A session's emulator received output. Ack BEFORE the render that
+		// follows this Update: output landing between ack and render just
+		// queues one more cheap message instead of being lost. Re-arm the
+		// pump — OutputMsg arrives through msgCh like the watcher messages.
+		msg.Session.AckOutput()
+		return m, k8sops.WatchCmd(m.msgCh)
 
-	case k8sops.TmuxWindowOpenedMsg:
-		if msg.Err != nil {
-			m.statusBar = m.statusBar.SetMessage("attach: " + msg.Err.Error())
+	case termsession.ExitedMsg:
+		// Delivered by the Start command's goroutine when the exec stream
+		// ends (shell exit, ctrl+d, or connection error). The tab closes
+		// itself; failures stay readable via the status bar. Sessions the
+		// user already closed by hand are gone from the registry — skip.
+		idx := m.sessionIndex(msg.Session)
+		if idx == -1 {
 			return m, nil
 		}
-		m.statusMsg = fmt.Sprintf("attached to %s", msg.Session.Pod)
+		if msg.Err != nil {
+			m.statusMsg = fmt.Sprintf("terminal %s: %v", msg.Session.Pod, msg.Err)
+		} else {
+			m.statusMsg = fmt.Sprintf("terminal session ended: %s", msg.Session.Pod)
+		}
+		m, _ = m.closeSession(idx)
 		m.statusBar = m.statusBar.SetMessage(m.statusMsg)
 		return m, clearStatusAfterDelay(5 * time.Second)
 
@@ -651,6 +674,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.PasteMsg:
+		// Terminal dock captures paste while focused (bracketed-paste aware).
+		if m.dockFocus && m.dockVisible() {
+			if s := m.activeSessionPtr(); s != nil {
+				s.Paste(msg.Content)
+			}
+			return m, nil
+		}
 		// Bracketed paste — route to whichever input is currently capturing.
 		switch m.mode {
 		case ModeLogs:
@@ -711,7 +741,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if click, ok := msg.(tea.MouseClickMsg); ok {
 			mouse := click.Mouse()
 			zone, lx, ly := m.hitMap().At(mouse.X, mouse.Y)
+			// Clicking anywhere outside the dock releases terminal focus —
+			// the click then lands on its target as usual, so "click the
+			// table, press a" attaches another pod without ctrl+].
+			if m.dockFocus && zone != hit.ZoneDock {
+				m.dockFocus = false
+				m.setStatusBarKind(m.nav.ActiveKind())
+			}
 			switch zone {
+			case hit.ZoneDock:
+				return m.handleDockClick(click, lx, ly)
+
 			case hit.ZoneNav:
 				// Nav click. If an item was clicked, select it; if we were
 				// in a non-table mode, return to the table view.
@@ -904,7 +944,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					mp := release.Mouse()
 					lx, ly := cr.Local(mp.X, mp.Y)
 					var status string
-					m.tableCtrl, status = m.tableCtrl.HandleMouseUp(lx, ly-1)
+					// Marking a row needs intent: ctrl+click (or space).
+					// A plain click only moves the cursor.
+					mark := mp.Mod&tea.ModCtrl != 0
+					m.tableCtrl, status = m.tableCtrl.HandleMouseUp(lx, ly-1, mark)
 					if status != "" {
 						m.statusBar = m.statusBar.SetMessage(status)
 					}
@@ -952,6 +995,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	// Terminal dock owns the keyboard while focused: every key is forwarded
+	// to the remote shell except the dock escape set. This MUST run before
+	// the global switch below, or q / esc / ctrl+c would never reach the
+	// shell. (Quit while attached: ctrl+] to release, then q.) Fullscreen
+	// hides the dock band, so the intercept is skipped there — ctrl+] below
+	// exits fullscreen on its way to the dock.
+	if m.dockFocus && m.dockVisible() && !m.fullScreen {
+		return m.handleDockKey(msg)
+	}
+
 	// When nav filter input is open, route all keys to nav handler.
 	if m.focus == FocusNav && m.nav.FilterActive() {
 		prev := m.nav.ActiveKind()
@@ -1082,6 +1135,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		// Sanitize is Pod-only and a destructive op.
 		if m.mode == ModeTable && m.nav.ActiveKind() == "Pod" {
 			return m.actionSanitize()
+		}
+	case "ctrl+]":
+		// Focus (and unhide) the terminal dock. The reverse direction —
+		// releasing focus — is handled by handleDockKey's escape set.
+		// Fullscreen hides the dock band, so drop it on the way in.
+		if len(m.sessions) > 0 {
+			m.fullScreen = false
+			m.dockHidden = false
+			m.dockFocus = true
+			m.statusBar = m.statusBar.SetHelp(dockHelp(m.dockMaximized))
+			return m.resizePanels(), nil
 		}
 	case "ctrl+r":
 		if m.watcher != nil {
@@ -2283,18 +2347,10 @@ func (m Model) actionAttach() (Model, tea.Cmd) {
 	return m, nil
 }
 
-// attachToContainer dispatches the attach command for a specific container.
-// container may be empty, in which case the API server's default selection
-// is used (k8s.detectContainer falls back to spec.Containers[0]).
+// attachToContainer opens an embedded exec session for a specific container
+// as a new dock tab and focuses it. container may be empty, in which case
+// termsession falls back to the pod's first container.
 func (m Model) attachToContainer(namespace, pod, container string) (Model, tea.Cmd) {
-	if os.Getenv("TMUX") != "" {
-		kubeCtx := ""
-		if m.clusterMgr != nil {
-			kubeCtx = m.clusterMgr.ActiveContext()
-		}
-		return m, k8sops.TmuxAttachWindowCmd(kubeCtx, namespace, pod, container)
-	}
-	// Non-tmux fallback: suspend TUI and exec directly.
 	if m.clusterMgr == nil {
 		return m, nil
 	}
@@ -2308,7 +2364,25 @@ func (m Model) attachToContainer(namespace, pod, container string) (Model, tea.C
 		m.statusBar = m.statusBar.SetMessage("rest config: " + err.Error())
 		return m, nil
 	}
-	return m, k8sops.AttachCmd(cs, cfg, namespace, pod, container)
+
+	// Reveal + focus the dock first so the layout (and therefore the new
+	// emulator's size) is final before the session is created. DockHeightFor
+	// is used directly: dockVisible() is still false until the session is
+	// appended below.
+	m.dockHidden = false
+	m.dockFocus = true
+	m.layout = m.layout.WithDockHeight(m.layout.DockHeightFor(m.dockMaximized))
+	dr := m.layout.Dock()
+	bw, bh := panels.DockBodySize(dr.Width, dr.Height)
+
+	sess := termsession.New(cs, cfg, namespace, pod, container, bw, bh, m.msgCh)
+	m.sessions = append(m.sessions, sess)
+	m.activeSession = len(m.sessions) - 1
+	m = m.resizePanels()
+	m.statusBar = m.statusBar.SetHelp(dockHelp(m.dockMaximized))
+	m.statusMsg = "attaching to " + pod + "…"
+	m.statusBar = m.statusBar.SetMessage(m.statusMsg)
+	return m, tea.Batch(sess.Start(), clearStatusAfterDelay(3*time.Second))
 }
 
 // PodContainerEntries flattens a pod's containers, init containers, and
@@ -2614,6 +2688,9 @@ func (m *Model) setStatusBarKind(kind string) {
 			break
 		}
 	}
+	if len(m.sessions) > 0 {
+		help = append(help, panels.HelpItem{Key: "ctrl+]", Desc: "terminal"})
+	}
 	help = append(help,
 		panels.HelpItem{Key: "ctrl+r", Desc: "refresh"},
 		panels.HelpItem{Key: "ctrl+c/q", Desc: "quit"},
@@ -2658,6 +2735,19 @@ func (m Model) View() tea.View {
 	// AllMotion delivers button-less motion for hover; the program filter
 	// in main.go drops motions whose hover target hasn't changed.
 	v.MouseMode = tea.MouseModeAllMotion
+	// Real cursor inside the focused terminal dock: the emulator's Render()
+	// carries no cursor, so position the program cursor at the emulator's
+	// cell offset by the dock body origin (border col/row + tab bar row).
+	if m.dockFocus && m.dockVisible() && !m.fullScreen &&
+		!m.loading && !m.layout.TooSmall() && !m.anyModalVisible() {
+		if s := m.activeSessionPtr(); s != nil {
+			if st, _ := s.Info(); st == termsession.StatusRunning {
+				dr := m.layout.Dock()
+				cx, cy := s.CursorPos()
+				v.Cursor = tea.NewCursor(dr.X+1+cx, dr.Y+2+cy)
+			}
+		}
+	}
 	return v
 }
 
@@ -2676,6 +2766,11 @@ func (m Model) WheelAtBoundary(button tea.MouseButton) bool {
 		return false
 	}
 	if m.anyModalVisible() {
+		return false
+	}
+	// Focused dock: never drop wheel events (forward-compat for terminal
+	// scrollback; today they fall through to the mode controllers).
+	if m.dockFocus && m.dockVisible() {
 		return false
 	}
 	if m.focus == FocusNav {
@@ -2728,6 +2823,11 @@ func (m Model) hitMap() hit.Map {
 	if m.fullScreen {
 		zones.Add(hit.ZoneContent, m.layout.Fullscreen())
 		return zones
+	}
+	// Dock first: when maximized it overlaps the (stale-height) nav/content
+	// rects, and first containing region wins.
+	if m.dockVisible() {
+		zones.Add(hit.ZoneDock, m.layout.Dock())
 	}
 	zones.Add(hit.ZoneHeader, m.layout.Header())
 	zones.Add(hit.ZoneNav, m.layout.Nav())
@@ -2886,12 +2986,28 @@ func (m Model) baseView() string {
 	if m.fullScreen {
 		return m.contentView()
 	}
+	// Maximized dock: the terminal owns the whole middle band.
+	if m.dockVisible() && m.dockMaximized {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			m.header.View(),
+			m.buildDock().View(),
+			m.statusBar.View(),
+		)
+	}
 	navView := m.nav.View()
 	right := lipgloss.JoinVertical(lipgloss.Left,
 		m.buildTabBar().View(),
 		m.contentView(),
 	)
 	middle := layout.JoinPanels(navView, right)
+	if m.dockVisible() {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			m.header.View(),
+			middle,
+			m.buildDock().View(),
+			m.statusBar.View(),
+		)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.header.View(),
 		middle,
@@ -2934,6 +3050,17 @@ func renderLoading(l layout.Layout, reconnecting bool) string {
 }
 
 func (m Model) resizePanels() Model {
+	// Dock height feeds every other rect, so settle it first; then push the
+	// new body size into every session (background tabs too, so switching
+	// to one never shows a stale-sized screen).
+	m.layout = m.layout.WithDockHeight(m.dockHeightWanted())
+	if dr := m.layout.Dock(); dr.Height > 0 {
+		bw, bh := panels.DockBodySize(dr.Width, dr.Height)
+		for _, s := range m.sessions {
+			s.Resize(bw, bh)
+		}
+	}
+
 	navDim := m.layout.Nav()
 	contentDim := m.layout.Content()
 	termW, termH := m.layout.TermSize()
@@ -3095,5 +3222,8 @@ func (m *Model) stopAll() {
 	}
 	if m.pfManager != nil {
 		m.pfManager.StopAll()
+	}
+	for _, s := range m.sessions {
+		s.Close()
 	}
 }

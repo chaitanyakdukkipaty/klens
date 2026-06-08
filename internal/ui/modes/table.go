@@ -192,14 +192,14 @@ func (c TableController) HandleMouseDrag(x, y int) TableController {
 	return c
 }
 
-func (c TableController) HandleMouseUp(x, y int) (TableController, string) {
-	p, status := c.panel.HandleMouseUp(x, y)
+func (c TableController) HandleMouseUp(x, y int, mark bool) (TableController, string) {
+	p, status := c.panel.HandleMouseUp(x, y, mark)
 	c.panel = p
 	return c, status
 }
 
-func (c TableController) HandleClickAt(y int, leftClick bool) (TableController, bool) {
-	p, hit := c.panel.HandleClickAt(y, leftClick)
+func (c TableController) HandleClickAt(y int, mark bool) (TableController, bool) {
+	p, hit := c.panel.HandleClickAt(y, mark)
 	c.panel = p
 	return c, hit
 }

@@ -20,6 +20,7 @@ const (
 	ZoneTabBar
 	ZoneContent
 	ZoneStatus
+	ZoneDock
 )
 
 // Region pairs a zone with its absolute screen rectangle.

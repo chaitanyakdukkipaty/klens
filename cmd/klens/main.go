@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/chaitanyak/klens/internal/app"
@@ -52,19 +50,6 @@ func main() {
 	if showVersion {
 		fmt.Println(version)
 		return
-	}
-
-	// Auto-wrap in tmux when not already inside a session. syscall.Exec
-	// replaces the current process so there is no parent to clean up.
-	if os.Getenv("TMUX") == "" {
-		if tmuxPath, err := exec.LookPath("tmux"); err == nil {
-			if self, err := os.Executable(); err == nil {
-				args := append([]string{"tmux", "new-session", "--"}, self)
-				args = append(args, os.Args[1:]...)
-				_ = syscall.Exec(tmuxPath, args, os.Environ())
-				// Only reaches here if Exec fails; fall through to run normally.
-			}
-		}
 	}
 
 	m := app.New(readOnly)

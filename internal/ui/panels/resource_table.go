@@ -739,9 +739,10 @@ func (t ResourceTable) HandleMouseDrag(innerX, innerY int) ResourceTable {
 }
 
 // HandleMouseUp finalises a drag-select. A real drag copies the [lo..hi]
-// range of resource names to the clipboard. A click without drag falls back
-// to the single-click behaviour: toggle multi-select on the clicked row.
-func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string) {
+// range of resource names to the clipboard. A click without drag only moves
+// the cursor (already done on mouse-down) — marking a row for multi-select
+// requires intent: space, or ctrl+click (mark=true).
+func (t ResourceTable) HandleMouseUp(innerX, innerY int, mark bool) (ResourceTable, string) {
 	if !t.drag.Active {
 		return t, ""
 	}
@@ -749,7 +750,7 @@ func (t ResourceTable) HandleMouseUp(innerX, innerY int) (ResourceTable, string)
 	lo, hi := t.drag.Range()
 	t.drag.Reset()
 	if !dragged {
-		if t.supportsMultiSelect() && lo >= 0 && lo < len(t.filtered) {
+		if mark && t.supportsMultiSelect() && lo >= 0 && lo < len(t.filtered) {
 			t.selected[t.filtered[lo].Name] = !t.selected[t.filtered[lo].Name]
 		}
 		return t, ""
@@ -812,16 +813,17 @@ func (t ResourceTable) AutoScrollStep() ResourceTable {
 	return t
 }
 
-// HandleClickAt moves the cursor to the row at panel-inner-Y. If leftClick,
-// also toggles multi-select on that row (same as pressing space).
+// HandleClickAt moves the cursor to the row at panel-inner-Y. If mark is
+// true (ctrl+click), also toggles multi-select on that row (same as space) —
+// a plain click only moves the cursor.
 // Returns true if the click landed on a real row (not title / header / filter / empty area).
-func (t ResourceTable) HandleClickAt(innerY int, leftClick bool) (ResourceTable, bool) {
+func (t ResourceTable) HandleClickAt(innerY int, mark bool) (ResourceTable, bool) {
 	rowIdx, ok := t.rowAtInnerY(innerY)
 	if !ok {
 		return t, false
 	}
 	t = t.SetCursorVisible(rowIdx)
-	if leftClick && t.supportsMultiSelect() {
+	if mark && t.supportsMultiSelect() {
 		if row := t.SelectedRow(); row != nil {
 			t.selected[row.Name] = !t.selected[row.Name]
 		}

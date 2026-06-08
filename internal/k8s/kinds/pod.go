@@ -102,15 +102,12 @@ func (pod) LogTargets(_ Context, ns, name string) ([]LogTarget, error) {
 // in setStatusBarKind via `_, ok := kind.(MetricsSupporter)`).
 func (pod) MetricsKey(ns, name string) string { return ns + "/" + name }
 
-// Attach is a placeholder until plan 01 step 6 wires the *rest.Config
-// through Context. The legacy model.actionAttach path drives the live
-// session today; this method exists so Pod satisfies Attacher (and so
-// the "a" UI hint shows up). When step 6 lands, model.go calls Attach
-// instead of k8s.AttachCmd directly.
+// Attach satisfies Attacher so the `a` key and its UI hints light up for
+// Pods. The live session is driven by model.actionAttach (an embedded
+// termsession dock tab) — the session registry and dock layout live on the
+// root model, so this method is never invoked.
 func (pod) Attach(c Context, ns, name string) tea.Cmd {
-	return func() tea.Msg {
-		return k8s.AttachFinishedMsg{Pod: name, Err: fmt.Errorf("pod.Attach: not wired (use model.actionAttach until step 6)")}
-	}
+	return nil
 }
 
 // ContainerPorts returns the pod's exposed container ports, sourced from

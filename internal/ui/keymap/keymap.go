@@ -43,11 +43,11 @@ func Sections() []Section {
 			{"esc", "back to table"},
 		}},
 		{Title: "Table", Bindings: []Binding{
-			{"space", "mark row (Pods; composes with logs)"},
+			{"space / ctrl+click", "mark row (Pods; composes with logs)"},
 			{"s", "scale / suspend (HelmRelease)"},
 			{"r", "resume (HelmRelease)"},
 			{"shift+f", "port-forward (Pods)"},
-			{"a", "attach / exec into pod"},
+			{"a", "attach shell (terminal dock)"},
 			{"ctrl+d", "delete (graceful)"},
 			{"ctrl+k", "kill (force, grace=0)"},
 			{"z", "sanitize completed/errored pods"},
@@ -86,6 +86,16 @@ func Sections() []Section {
 			{"c", "copy visible lines"},
 			{"ctrl+s", "save to file"},
 		}},
+		{Title: "Terminal dock", Bindings: []Binding{
+			{"a", "attach pod shell as a dock tab"},
+			{"ctrl+]", "toggle terminal: show+focus ↔ hide (sessions keep running)"},
+			{"shift+←/→", "previous / next tab"},
+			{"shift+↑ / shift+↓", "maximize / minimise dock"},
+			{"ctrl+c ctrl+c", "kill terminal (single ctrl+c = SIGINT as usual)"},
+			{"exit / ctrl+d", "end shell — tab closes itself"},
+			{"click outside", "release focus · click tab switches · × closes"},
+			{"alt+1–9 / ←→ / w/m/h", "tab chords (terminals with Alt-as-Meta)"},
+		}},
 		{Title: "YAML editor", Bindings: []Binding{
 			{"i a A o O", "insert modes"},
 			{"hjkl", "move (normal mode)"},
@@ -94,6 +104,7 @@ func Sections() []Section {
 		}},
 		{Title: "Mouse", Bindings: []Binding{
 			{"click", "select / activate everywhere"},
+			{"ctrl+click", "mark row for multi-select"},
 			{"right-click", "row context menu"},
 			{"drag", "select text to copy"},
 			{"drag thumb", "scroll (table scrollbar)"},
