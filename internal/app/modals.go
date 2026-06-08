@@ -92,7 +92,7 @@ func (m *Model) modals() ModalStack {
 		{
 			Name:      "namespacePicker",
 			IsVisible: m.namespacePicker.IsVisible,
-			Handles:   keyPressOnly,
+			Handles:   keyOrMouse,
 			Update: func(msg tea.Msg) tea.Cmd {
 				var cmd tea.Cmd
 				m.namespacePicker, cmd = m.namespacePicker.Update(msg)
@@ -102,7 +102,7 @@ func (m *Model) modals() ModalStack {
 		{
 			Name:      "clusterPicker",
 			IsVisible: m.clusterPicker.IsVisible,
-			Handles:   keyPressOnly,
+			Handles:   keyOrMouse,
 			Update: func(msg tea.Msg) tea.Cmd {
 				var cmd tea.Cmd
 				m.clusterPicker, cmd = m.clusterPicker.Update(msg)

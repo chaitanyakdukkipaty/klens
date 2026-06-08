@@ -3088,6 +3088,8 @@ func (m Model) resizePanels() Model {
 	m.appMenu = m.appMenu.SetSize(termW, termH)
 	m.keysOverlay = m.keysOverlay.SetSize(termW, termH)
 	m.settings = m.settings.SetSize(termW, termH)
+	m.namespacePicker = m.namespacePicker.SetSize(termW, termH)
+	m.clusterPicker = m.clusterPicker.SetSize(termW, termH)
 	return m
 }
 
