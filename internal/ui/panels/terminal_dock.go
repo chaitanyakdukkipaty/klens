@@ -29,6 +29,9 @@ type TerminalDock struct {
 	Maximized     bool
 	// Body is the active session's pre-rendered emulator screen (ANSI).
 	Body string
+	// Scroll, when non-empty, is shown right-aligned in the tab bar to signal
+	// that the active session is in scrollback (frozen) mode, e.g. "▲ 120/3000".
+	Scroll string
 }
 
 const (
@@ -156,6 +159,21 @@ func (d TerminalDock) renderTabBar(innerW int) string {
 		b.WriteString(d.renderSeg(seg))
 	}
 	line := b.String()
+
+	// Scroll indicator sits just left of the maximize toggle (or the right
+	// edge when there's no toggle), flagging that the session is frozen in
+	// scrollback. Styled with the focus color so it reads as an active mode.
+	if d.Scroll != "" {
+		label := styles.Primary.Render(d.Scroll)
+		end := innerW - 1
+		if bx := d.maxButtonX(); bx != -1 {
+			end = bx - 2
+		}
+		start := end - lipgloss.Width(d.Scroll) + 1
+		if pad := start - lipgloss.Width(line); pad > 0 {
+			line += strings.Repeat(" ", pad) + label
+		}
+	}
 
 	if bx := d.maxButtonX(); bx != -1 {
 		pad := bx - lipgloss.Width(line)

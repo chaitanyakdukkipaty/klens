@@ -74,6 +74,13 @@ type Session struct {
 	status  Status
 	exitErr error
 
+	// View state (scrollback browsing + text selection), guarded by mu. See
+	// view.go. following starts true: pinned to the live bottom, identical to
+	// the pre-scrollback behaviour.
+	following bool
+	scrollTop int
+	sel       selection
+
 	stdin  *inputBuffer
 	sizeCh chan remotecommand.TerminalSize
 
@@ -101,6 +108,7 @@ func New(cs kubernetes.Interface, cfg *rest.Config, namespace, pod, container st
 		stdin:     newInputBuffer(),
 		sizeCh:    make(chan remotecommand.TerminalSize, 1),
 		msgCh:     msgCh,
+		following: true,
 	}
 	s.sizeCh <- remotecommand.TerminalSize{Width: uint16(max(w, 1)), Height: uint16(max(h, 1))}
 	go s.pumpInput()

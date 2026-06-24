@@ -731,6 +731,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.applyHover(m.resolveHover(mp.X, mp.Y)), nil
 			}
 		}
+		// Wheel over the dock band drives terminal scrollback (or forwards to an
+		// alt-screen app) instead of the underlying mode's scroll.
+		if wheel, ok := msg.(tea.MouseWheelMsg); ok && m.dockVisible() {
+			mp := wheel.Mouse()
+			if zone, _, _ := m.hitMap().At(mp.X, mp.Y); zone == hit.ZoneDock {
+				return m.handleDockWheel(wheel)
+			}
+		}
 		// Click handling routes through the hit-region map: resolve the screen
 		// point to a zone once, then hand the panel coordinates relative to its
 		// own outer rect. Nav clicks work in every mode (clicking a nav item
@@ -891,6 +899,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		// Terminal dock drag-to-select takes precedence while the dock is
+		// focused: a body drag selects text, release copies it. Coordinates are
+		// dock-local (Rect.Local) and not zone-gated so an in-flight drag keeps
+		// tracking outside the band to drive edge auto-scroll.
+		if m.dockFocus && m.dockVisible() {
+			dr := m.layout.Dock()
+			if motion, ok := msg.(tea.MouseMotionMsg); ok {
+				mp := motion.Mouse()
+				lx, ly := dr.Local(mp.X, mp.Y)
+				return m.handleDockDrag(lx, ly)
+			}
+			if release, ok := msg.(tea.MouseReleaseMsg); ok && release.Button == tea.MouseLeft {
+				return m.handleDockRelease()
+			}
+		}
 		// Drag/release routing for in-app drag-to-copy. Coordinates are always
 		// relative to the content rect — deliberately not zone-gated, because a
 		// drag in flight must keep receiving motion outside the panel bounds to
@@ -1002,6 +1025,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	// hides the dock band, so the intercept is skipped there — ctrl+] below
 	// exits fullscreen on its way to the dock.
 	if m.dockFocus && m.dockVisible() && !m.fullScreen {
+		// Dock chrome (hide / resize / switch tab / close) works in both live
+		// and scrollback modes, so it's handled before the live-vs-scroll split.
+		if handled, nm, cmd := m.handleDockChromeKey(msg); handled {
+			return nm, cmd
+		}
+		// Scrollback (frozen) mode owns the keyboard for navigation/copy; only
+		// when following the live bottom do keys reach the remote shell.
+		if m.dockScrolling() {
+			return m.handleDockScrollKey(msg)
+		}
 		return m.handleDockKey(msg)
 	}
 
@@ -2741,7 +2774,9 @@ func (m Model) View() tea.View {
 	if m.dockFocus && m.dockVisible() && !m.fullScreen &&
 		!m.loading && !m.layout.TooSmall() && !m.anyModalVisible() {
 		if s := m.activeSessionPtr(); s != nil {
-			if st, _ := s.Info(); st == termsession.StatusRunning {
+			// Suppress the live cursor while browsing scrollback — the cell it
+			// points at isn't on screen, so a stray cursor would be misleading.
+			if st, _ := s.Info(); st == termsession.StatusRunning && s.Following() {
 				dr := m.layout.Dock()
 				cx, cy := s.CursorPos()
 				v.Cursor = tea.NewCursor(dr.X+1+cx, dr.Y+2+cy)
