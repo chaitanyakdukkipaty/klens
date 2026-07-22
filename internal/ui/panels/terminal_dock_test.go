@@ -45,6 +45,22 @@ func TestDockViewExactDimensions(t *testing.T) {
 	}
 }
 
+// The scroll indicator appears in the tab bar without breaking exact-width
+// rendering (it must fit between the tabs and the maximize toggle).
+func TestDockScrollIndicator(t *testing.T) {
+	d := dockFixture()
+	d.Scroll = "▲ 120/3000"
+	out := d.View()
+	if !strings.Contains(out, "120/3000") {
+		t.Fatalf("scroll indicator missing from view:\n%s", out)
+	}
+	for i, ln := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(ln); w != d.Width {
+			t.Fatalf("line %d width = %d, want %d", i, w, d.Width)
+		}
+	}
+}
+
 // Render and hit-test must agree: every segment's reported extent resolves
 // back to its own tab, and the close mark cell reports close=true.
 func TestDockTabAtMatchesSegments(t *testing.T) {
