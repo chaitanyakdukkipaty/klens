@@ -227,13 +227,13 @@ func (p NamespacePicker) Update(msg tea.Msg) (NamespacePicker, tea.Cmd) {
 		p.visible = false
 		return p, func() tea.Msg { return NamespacePickerCancelMsg{} }
 
-	case "up", "k":
+	case "up", "ctrl+p":
 		if p.cursor > 0 {
 			p.cursor--
 		}
 		p = p.ensureVisible(len(p.filtered()))
 
-	case "down", "j":
+	case "down", "ctrl+n":
 		filtered := p.filtered()
 		if p.cursor < len(filtered)-1 {
 			p.cursor++
